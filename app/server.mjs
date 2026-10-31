@@ -90,7 +90,10 @@ const RELATIONSHIP_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/re
 const OBJECTS_CONFIRM_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/confirm$/;
 const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
 const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/(contributions|collaboration)$/;
-const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo|recording\.wav)$/;
+const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo|recording\.wav|captions)$/;
+const CAPTION_REQUEST_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/captions\/requests\/([^/]+)$/;
+// A caption may hold 20,000 UTF-16 code units; even fully escaped it fits.
+const CAPTION_BODY_BYTES = 128 * 1024;
 const CONTRIBUTION_PHOTO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/photo$/;
 const CONTRIBUTION_BUNDLE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/bundle$/;
 const ERA_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/era$/;
@@ -538,6 +541,16 @@ export function createAppServer({
       sendJson(res, 200, await collaboration.submitBundle(draftId, jobId, current, form));
       return;
     }
+    // The outcome of one committed caption change, for its provider.
+    const captionRequest = CAPTION_REQUEST_PATH.exec(pathname);
+    if (captionRequest) {
+      const [, draftId, jobId, contributionId, requestId] = captionRequest;
+      const current = await requireScope(draftId);
+      if (!reading) throw new RequestError(405, 'Method not allowed.');
+      if (![draftId, jobId, contributionId, requestId].every((id) => UUID.test(id))) throw new RequestError(404, 'This caption change could not be found.');
+      sendJson(res, 200, await collaboration.captionRequest(draftId, jobId, current, contributionId, requestId));
+      return;
+    }
     const sceneCollaboration = SCENE_COLLABORATION_PATH.exec(pathname);
     const contributionAction = CONTRIBUTION_ACTION_PATH.exec(pathname);
     const eraMatch = ERA_PATH.exec(pathname);
@@ -578,6 +591,11 @@ export function createAppServer({
         const extra = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? ['photoReviewed', 'voiceReviewed'].filter((key) => Object.hasOwn(raw, key)) : [];
         const body = strictBody(raw, [...keys, ...extra]);
         sendJson(res, 200, await collaboration.review(draftId, jobId, current, third, body));
+        return;
+      }
+      if (fourth === 'captions') {
+        const body = strictBody(await readJsonBody(req, CAPTION_BODY_BYTES), ['requestId', 'baseCaptionSha256', 'captionText', 'captionConfirmed']);
+        sendJson(res, 200, await collaboration.captions(draftId, jobId, current, third, body));
         return;
       }
       const body = strictBody(await readJsonBody(req), ['requestId']);

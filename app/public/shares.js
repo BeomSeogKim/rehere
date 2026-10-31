@@ -3,6 +3,7 @@
 // link, list and revoke. The issued link is shown only from the token this
 // page generated; the server never returns it.
 
+import { captionExcerpt } from './collaboration.js';
 import { formatMs } from './story-player.js';
 import { mountVisitor, previewSource } from './visits.js';
 
@@ -56,14 +57,11 @@ export function materialsAllow(entry, uses) {
 export const recordingShareable = (entry) => QUOTABLE.has(entry.status) && Boolean(entry.voice?.captions) && materialsAllow(entry, ['place', 'share']);
 export const RECORDING_LIMIT = 8;
 
-// Tells recordings apart before a preview: who sent it, how long it plays and
-// the start of the captions its provider wrote (plain text, as written).
+// Tells recordings apart before a preview: who sent it, how long it plays,
+// which captions version and the start of the captions its provider wrote.
 export function recordingChoiceLabel(entry) {
-  const words = (entry.voice?.captions?.cues ?? []).map((cue) => cue.text).join(' ').replace(/\s+/g, ' ').trim();
-  // A long caption is cut at a word boundary within its first 60 characters.
-  const cut = words.slice(0, 60);
-  const excerpt = words.length > 60 ? `${(cut.lastIndexOf(' ') > 30 ? cut.slice(0, cut.lastIndexOf(' ')) : cut).trimEnd()}…` : words;
-  return `Recording by ${entry.provider?.displayName || 'someone'} · ${formatMs(entry.voice?.durationMs ?? 0)} long${excerpt ? ` · captions: “${excerpt}”` : ''}`;
+  const excerpt = captionExcerpt(entry.voice?.captions);
+  return `Recording by ${entry.provider?.displayName || 'someone'} · ${formatMs(entry.voice?.durationMs ?? 0)} long · captions version ${entry.voice?.captions?.version ?? 1}${excerpt ? `: “${excerpt}”` : ''}`;
 }
 export const PHOTO_EVIDENCE_LIMIT = 20;
 
@@ -298,10 +296,21 @@ export function mountShares(container, bridge) {
     const labels = new Map(viewBoxes.map(({ key, label }) => [idFor(key), label]));
     const offered = (collaboration?.contributions ?? []).filter(recordingShareable);
     for (const id of [...recordingChoices.keys()]) if (!offered.some((entry) => entry.id === id)) recordingChoices.delete(id);
+    // A choice is pinned to the captions it was made with. When they change,
+    // it is cleared rather than carried over to words the owner did not choose.
+    let changed = false;
+    for (const entry of offered) {
+      const choice = recordingChoices.get(entry.id);
+      if (choice && choice.captionSha256 !== entry.voice.captions.sha256) {
+        changed ||= choice.include;
+        recordingChoices.delete(entry.id);
+      }
+    }
+    if (changed) discardPreview('The captions of a chosen recording changed, so it is no longer chosen. Choose it again to share its current captions.');
     recordingList.replaceChildren(
       ...(offered.length
         ? offered.map((entry) => {
-            const choice = recordingChoices.get(entry.id) ?? { include: false, viewIds: new Set(), targetId: '' };
+            const choice = recordingChoices.get(entry.id) ?? { include: false, viewIds: new Set(), targetId: '', captionSha256: entry.voice.captions.sha256 };
             // Views no longer shared are dropped from the link.
             for (const id of [...choice.viewIds]) if (!viewIds.has(id)) choice.viewIds.delete(id);
             if (choice.targetId && !targets.some((target) => target.id === choice.targetId)) choice.targetId = '';
@@ -371,7 +380,7 @@ export function mountShares(container, bridge) {
     const byId = new Map((collaboration?.contributions ?? []).map((entry) => [entry.id, entry]));
     return [...recordingChoices.entries()]
       .filter(([id, choice]) => choice.include && byId.has(id))
-      .map(([id, choice]) => ({ contributionId: id, viewIds: [...choice.viewIds], targetId: choice.targetId, captionSha256: byId.get(id).voice.captions.sha256 }));
+      .map(([id, choice]) => ({ contributionId: id, viewIds: [...choice.viewIds], targetId: choice.targetId, captionSha256: choice.captionSha256 }));
   }
 
   function candidateInput() {

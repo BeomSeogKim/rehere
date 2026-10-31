@@ -47,6 +47,9 @@ optional photo. Each material retains its own original, source facts and
 default-off uses. Photo inspection uses a metadata-stripped copy; recordings
 use a locally decoded listening copy. Human-written listening captions are
 optional for private review and required for explicitly selected visitor audio.
+Providers can later add or correct their listening captions while keeping the
+original recording and previous caption versions. Existing links using the
+recording stop; corrected words need a new explicit visitor preview and link.
 Owners can preview a manual change, adopt it or preserve an alternative, and
 record a separate explicit time assertion. Recordings can also be linked to a
 visitor view and object or place without changing geometry. Withdrawal blocks
@@ -60,9 +63,8 @@ Human-supplied captions
 and provider attribution accompany a converted playback copy, with explicit
 visitor selection and current withdrawal checks. See [recorded stories](STORIES.md).
 
-Not included: automatic transcription, post-submission contributor-caption
-correction, multi-view alignment, hosted account integration, and recovery of
-input that never reached the server.
+Not included: automatic transcription, multi-view alignment, hosted account
+integration, and recovery of input that never reached the server.
 
 Saved visitor snapshots can include selected arrangements and permitted written
 recollections. Preview the actual visitor screen before issuing a local link;

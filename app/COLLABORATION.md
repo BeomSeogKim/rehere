@@ -27,9 +27,33 @@ mono WAV is used for listening. No audio or captions are sent to a model.
 Optional human-written listening captions stay separate from the recording
 and independent writing. They are not automatic or verified transcription.
 Private submission and listening work without captions; visitor sharing needs
-confirmed captions. Post-submission caption correction is not yet supported.
+confirmed captions.
 The provider can listen again from their own received-contributions list;
 the owner has a separate private review player. Neither starts automatically.
+
+After receipt, the provider can add listening captions or correct their own
+captions. Confirm the new wording explicitly. Each save creates an attributed
+version and keeps prior captions privately available to the owner and provider.
+The original recording, listening copy and independent written recollection
+remain unchanged. Only the providing person can make this change; the owner
+cannot rewrite another person's captions.
+
+A caption change stops existing visitor snapshots that included that recording.
+Returning to the earlier words creates another version and does not revive an
+old link. The owner must select the current captions, preview and issue a new
+snapshot. Already delivered copies cannot be recalled. Historical spatial
+reviews and geometry remain unchanged; a later caption difference is labelled
+separately from what the owner reviewed at the time. An old review without a
+recorded caption binding is labelled unknown.
+
+A rejected or unconfirmed caption save keeps the typed draft. An exact retry
+uses the prepared request, even after later typing. After reload, only an
+opaque request ID remains: check its receipt instead of recreating the old
+request from new text. A confirmed older save is distinguished from newer
+current captions. Concurrent edits use the current caption binding and refuse
+a stale change rather than overwrite it. Caption history is limited to twenty
+versions per contribution. Withdrawal removes all caption versions from later
+responses; it does not claim physical deletion of private stored records.
 
 A photo keeps its immutable original and a separate inspection JPEG, with
 checksums and a source relationship. Attribution comes from the signed-in

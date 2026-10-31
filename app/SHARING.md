@@ -88,6 +88,11 @@ Selected contributor recordings pin the audio and confirmed captions, with
 their chosen views and object or place association. Their live rights checks
 apply even when they did not inform a view's geometry. Owner-recorded stories
 and contributor recordings keep separate provenance.
+The providing person can add or correct listening captions as new versions.
+An old snapshot using that recording stops even if a later correction returns
+to its previous words. It never adopts the new captions automatically. Select
+the current version, preview it and issue a new link. Public visitors see the
+frozen caption version, not the private correction history.
 For a [two-object scene](OBJECTS.md) it keeps both objects' transforms and the
 relationship rule of each selected arrangement, plus the owner's object names
 and source boxes so visitors can tell the objects apart.

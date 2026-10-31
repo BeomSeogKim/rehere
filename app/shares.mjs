@@ -458,14 +458,16 @@ export class ShareStore {
       const publicId = randomUUID();
       pinned.push({
         publicId, contributionId: contribution.id, viewIds: [...item.viewIds], targetId: item.targetId,
-        originalSha256: source.sha256, playbackSha256: playback.sha256, playbackSize: playback.size, captionSha256: captions.sha256,
+        originalSha256: source.sha256, playbackSha256: playback.sha256, playbackSize: playback.size, captionSha256: captions.sha256, captionVersion: captions.version,
       });
       return {
         id: publicId, viewIds: [...item.viewIds],
         target: { id: item.targetId, label: item.targetId === 'place' ? 'About this place' : `About ${objectLabel}` },
         title: 'Contributor recording', label: RECORDING_LABEL,
         providerLabel: contribution.provider.displayName, captionAuthorLabel: captions.author.displayName,
-        cues: captions.cues.map((cue) => ({ ...cue })), durationMs: playback.durationMs, audio: { type: 'audio/wav', size: playback.size },
+        cues: captions.cues.map(({ startMs, endMs, text }) => ({ startMs, endMs, text })), durationMs: playback.durationMs, audio: { type: 'audio/wav', size: playback.size },
+        // The frozen caption version; earlier versions never reach visitors.
+        captionVersion: captions.version,
       };
     });
     return { pinned, published };

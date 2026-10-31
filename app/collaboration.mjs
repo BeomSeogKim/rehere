@@ -72,17 +72,62 @@ export function contributionAllows(contribution, purpose) {
     && (!contribution.voice || contribution.voice.source.permissions[purpose] === true);
 }
 
-// The canonical caption hash: it binds the provider's cues to the exact
-// original recording, its listening copy and the caption author.
-export const captionHash = (source, playback, authorId, cues) => sha256(JSON.stringify([source.sha256, playback.sha256, authorId, cues]));
+// Caption versions a recording can have, the first one included.
+export const CAPTION_VERSIONS = 20;
 
-// True only for confirmed captions whose stored hash is recomputed from their
-// current content and identity, written by the bundle's own provider. A stored
-// hash is never trusted on its own.
+// The canonical caption hash: it binds the provider's cues to the exact
+// original recording, its listening copy, the caption author and, from
+// version 2 on, the version itself, so an earlier text saved again never
+// matches an older pin. Only {startMs, endMs, text} of each cue count, in
+// that order; version 1 keeps the serialization committed recordings used.
+export function captionHash(source, playback, authorId, cues, version = 1) {
+  const canonical = cues.map(({ startMs, endMs, text }) => ({ startMs, endMs, text }));
+  const values = [source.sha256, playback.sha256, authorId, canonical];
+  return sha256(JSON.stringify(version === 1 ? values : [...values, version]));
+}
+
+// One saved caption version: confirmed, by the bundle's own provider, a
+// single whole-recording cue of plain text, and a stored hash that matches
+// the hash recomputed under its own version.
+function captionVersionValid(contribution, captions, version) {
+  const { source, playback } = contribution.voice;
+  if (captions === null || typeof captions !== 'object' || captions.confirmed !== true || captions.version !== version) return false;
+  if (captions.author?.principalId !== contribution.principalId || !Array.isArray(captions.cues) || captions.cues.length !== 1) return false;
+  const [cue] = captions.cues;
+  if (!exactKeys(cue, ['startMs', 'endMs', 'text']) || cue.startMs !== 0 || cue.endMs !== playback.durationMs || !nonblank(cue.text, COLLABORATION_LIMITS.captionText)) return false;
+  return typeof captions.sha256 === 'string' && captions.sha256 === captionHash(source, playback, contribution.principalId, captions.cues, version);
+}
+
+// Earlier caption versions as stored: an absent field means none, and any
+// present value that is not an array (null included) is malformed: null.
+function captionHistoryOf(voice) {
+  if (!Object.hasOwn(voice, 'captionHistory')) return [];
+  return Array.isArray(voice.captionHistory) ? voice.captionHistory : null;
+}
+
+// True only when the current captions and every earlier version form one
+// valid chain: earlier versions exactly 1..N, oldest first, each superseded,
+// and the current version N + 1, all bound by recomputed hashes. A stored hash
+// is never trusted on its own, and a rolled-back current caption on a newer
+// history never counts. Missing history means none (version 1 only).
 export function captionsIntact(contribution) {
-  const captions = contribution.voice?.captions;
-  if (!captions || captions.confirmed !== true || captions.author?.principalId !== contribution.principalId || !Array.isArray(captions.cues)) return false;
-  return captions.sha256 === captionHash(contribution.voice.source, contribution.voice.playback, captions.author.principalId, captions.cues);
+  const voice = contribution.voice;
+  if (!voice?.captions) return false;
+  const history = captionHistoryOf(voice);
+  if (!history || history.length >= CAPTION_VERSIONS) return false;
+  for (const [index, entry] of history.entries()) {
+    if (!captionVersionValid(contribution, entry, index + 1) || typeof entry.supersededAt !== 'string') return false;
+  }
+  return captionVersionValid(contribution, voice.captions, history.length + 1);
+}
+
+// The recording's caption record as a whole: intact captions, or none (null
+// or a missing field, version 0) with no history at all. Any other value,
+// such as false, 0 or '', is malformed rather than "no captions".
+function captionChainValid(contribution) {
+  const { captions } = contribution.voice;
+  if (captions === null || captions === undefined) return captionHistoryOf(contribution.voice)?.length === 0;
+  return captionsIntact(contribution);
 }
 
 // Grants apply per purpose to every inherited contribution. Any use needs each
@@ -236,6 +281,18 @@ function parsePhotoSubmit(body) {
   return { ...parseSubmit(text), photo: parsePhotoFacts(photo) };
 }
 
+// A caption addition or correction: the provider's own nonblank listening
+// captions, confirmed, against the caption version they started from.
+function parseCaptions(body) {
+  const valid = exactKeys(body, ['requestId', 'baseCaptionSha256', 'captionText', 'captionConfirmed']) && isId(body.requestId)
+    && (body.baseCaptionSha256 === null || (typeof body.baseCaptionSha256 === 'string' && /^[0-9a-f]{64}$/.test(body.baseCaptionSha256)))
+    && plain(body.captionText, COLLABORATION_LIMITS.captionText) && typeof body.captionConfirmed === 'boolean';
+  if (!valid) throw fail(400, UNREADABLE);
+  if (body.captionText.trim() === '') throw fail(400, 'Write the listening captions before saving.');
+  if (body.captionConfirmed !== true) throw fail(400, 'Confirm that you wrote these listening captions.');
+  return { requestId: body.requestId, baseCaptionSha256: body.baseCaptionSha256, captionText: body.captionText, captionConfirmed: true };
+}
+
 function parseWithdraw(body) {
   if (!exactKeys(body, ['requestId']) || !isId(body.requestId)) throw fail(400, UNREADABLE);
   return { requestId: body.requestId };
@@ -286,7 +343,7 @@ function projectContribution(manifest, contribution, principal) {
   const withdrawn = contribution.withdrawnAt !== null;
   const review = contribution.review && {
     decision: contribution.review.decision,
-    ...(owner && { reason: withdrawn ? null : contribution.review.reason, conflict: contribution.review.conflict }),
+    ...(owner && { reason: withdrawn ? null : contribution.review.reason, conflict: contribution.review.conflict, captionBinding: captionBinding(contribution) }),
     reviewedAt: contribution.review.reviewedAt,
     variantId: contribution.review.variantId,
     version: contribution.review.version,
@@ -314,6 +371,23 @@ function projectContribution(manifest, contribution, principal) {
 
 // The recording without IDs, raw hashes or names. The caption hash is the
 // pin an owner sends when choosing it for a shared view.
+function projectCaptions(captions) {
+  return {
+    cues: captions.cues.map(({ startMs, endMs, text }) => ({ startMs, endMs, text })), sha256: captions.sha256, authorLabel: captions.author.displayName,
+    version: captions.version, createdAt: captions.createdAt,
+  };
+}
+
+// Whether an owner's geometry review of a recording saw today's captions.
+// null: no recording or not a geometry review; 'unknown': a review saved
+// before the binding was kept.
+function captionBinding(contribution) {
+  const review = contribution.review;
+  if (!contribution.voice || !review || review.variantId === null) return null;
+  if (!Object.hasOwn(review, 'captionSha256')) return 'unknown';
+  return review.captionSha256 === (contribution.voice.captions?.sha256 ?? null) ? 'current' : 'changed';
+}
+
 function projectVoice(manifest, contribution) {
   if (!contribution.voice) return null;
   const { source, playback, captions } = contribution.voice;
@@ -329,7 +403,9 @@ function projectVoice(manifest, contribution) {
     dates: withdrawn ? null : { ...source.dates },
     permissions: { ...source.permissions },
     receivedAt: source.receivedAt,
-    captions: withdrawn || !captions ? null : { cues: captions.cues.map((cue) => ({ ...cue })), sha256: captions.sha256, authorLabel: captions.author.displayName },
+    captions: withdrawn || !captions ? null : projectCaptions(captions),
+    // Earlier versions, newest first, for the owner and the provider only.
+    captionHistory: withdrawn ? [] : [...(captionHistoryOf(contribution.voice) ?? [])].reverse().map((entry) => ({ ...projectCaptions(entry), supersededAt: entry.supersededAt })),
     url: available ? `/api/drafts/${manifest.draftId}/reconstructions/${manifest.id}/contributions/${contribution.id}/recording.wav` : null,
   };
 }
@@ -698,7 +774,7 @@ export class CollaborationStore {
           let captions = null;
           if (request.voice.captionText) {
             const cues = [{ startMs: 0, endMs: playback.durationMs, text: request.voice.captionText }];
-            captions = { version: 1, cues, author: provider, confirmed: true, createdAt: now, sha256: captionHash(source, derived, provider.principalId, cues) };
+            captions = { version: 1, cues, author: provider, confirmed: true, createdAt: now, sha256: captionHash(source, derived, provider.principalId, cues, 1) };
           }
           voice = { source, playback: derived, captions };
         }
@@ -732,6 +808,76 @@ export class CollaborationStore {
     } finally {
       if (!published) await rm(staging, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  // Only the contribution's own provider, whatever their role, may change or
+  // look up its captions. Checked before anything about the captions.
+  #captionContribution(manifest, principal, contributionId) {
+    const contribution = collaborationOf(manifest).contributions.find((item) => item.id === contributionId);
+    if (!contribution) throw fail(404, CONTRIBUTION_NOT_FOUND);
+    if (contribution.principalId !== principal.id) throw principal.role === 'owner' ? fail(403, NOT_ALLOWED) : fail(404, CONTRIBUTION_NOT_FOUND);
+    return contribution;
+  }
+
+  // Adds listening captions to a recording, or corrects them, as a new
+  // attributed version: the previous one moves unchanged into the history. The
+  // recording, writing, grants and saved versions are untouched. An exact
+  // replay answers first with the version that request saved.
+  async captions(draftId, jobId, principal, contributionId, body) {
+    this.#scope(principal, draftId);
+    const request = parseCaptions(body);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const collaboration = collaborationOf(manifest);
+      const contribution = this.#captionContribution(manifest, principal, contributionId);
+      const replay = this.#receipt(collaboration, request, 'captions', principal.id, contributionId);
+      if (replay) return { contribution: projectContribution(manifest, contribution, principal), appliedCaptionVersion: replay.captionVersion };
+      if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was withdrawn, so its captions cannot change.');
+      if (!contribution.voice) throw fail(409, 'This contribution has no recording.');
+      if (!photoAttested(manifest, contribution) || !captionChainValid(contribution)) throw fail(409, UNAVAILABLE_MATERIAL);
+      const { voice } = contribution;
+      const current = voice.captions ?? null;
+      if (request.baseCaptionSha256 !== (current?.sha256 ?? null)) throw fail(409, 'The captions changed since you started. Reload them before saving.');
+      if (current && current.cues[0].text === request.captionText) throw fail(400, 'These captions are the same as the current ones.');
+      // The chain check above guarantees an array here.
+      const history = captionHistoryOf(voice);
+      const saved = history.length + (current ? 1 : 0);
+      if (saved >= CAPTION_VERSIONS) throw fail(409, `This recording already has ${CAPTION_VERSIONS} caption versions, the most it can keep.`);
+      const version = saved + 1;
+      const now = new Date().toISOString();
+      const author = { principalId: contribution.principalId, displayName: contribution.provider.displayName };
+      const cues = [{ startMs: 0, endMs: voice.playback.durationMs, text: request.captionText }];
+      const captions = { version, cues, author, confirmed: true, createdAt: now, sha256: captionHash(voice.source, voice.playback, author.principalId, cues, version) };
+      const updated = {
+        ...contribution, revision: contribution.revision + 1,
+        voice: { ...voice, captions, captionHistory: current ? [...history, { ...current, supersededAt: now }] : history },
+      };
+      const { write } = this.#save(manifest, {
+        ...collaboration, contributions: collaboration.contributions.map((item) => (item.id === contributionId ? updated : item)),
+      }, { requestId: request.requestId, action: 'captions', principalId: principal.id, target: contributionId, digest: digest(request), captionVersion: version, captionSha256: captions.sha256 });
+      await write();
+      // The attestation covers the changed record only after a fresh read.
+      const stored = await this.#scene(draftId, jobId);
+      return { contribution: projectContribution(stored, collaborationOf(stored).contributions.find((item) => item.id === contributionId), principal), appliedCaptionVersion: version };
+    });
+  }
+
+  // The outcome of one committed caption request by this provider, with the
+  // contribution as it is now (redacted after withdrawal). Unknown is 404,
+  // which does not prove the request will never arrive.
+  async captionRequest(draftId, jobId, principal, contributionId, requestId) {
+    this.#scope(principal, draftId);
+    if (!isId(requestId)) throw fail(404, 'This caption change could not be found.');
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const contribution = this.#captionContribution(manifest, principal, contributionId);
+      const receipt = collaborationOf(manifest).receipts.find((item) => item.requestId === requestId && item.action === 'captions'
+        && item.principalId === principal.id && item.target === contributionId);
+      if (!receipt) throw fail(404, 'This caption change could not be found.');
+      return { contribution: projectContribution(manifest, contribution, principal), appliedCaptionVersion: receipt.captionVersion };
+    });
   }
 
   // The listening copy of a contributed recording, for the owner or the
@@ -800,7 +946,9 @@ export class CollaborationStore {
         decision: request.decision, reason: request.reason, conflict: request.conflict,
         reviewedBy: principal.id, reviewedAt: now, baseRevision: request.baseRevision, variantId: null, version: null,
         ...(photoGeometry && { photoReviewed: true }),
-        ...(needed.voiceReviewed && { voiceReviewed: true }),
+        // The captions the owner had when acknowledging the recording; later
+        // additions or corrections show as a changed binding, never as approved.
+        ...(needed.voiceReviewed && { voiceReviewed: true, captionSha256: contribution.voice.captions?.sha256 ?? null }),
       };
       let variant = null;
       let edit = null;

@@ -7,7 +7,7 @@
 
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import { register, registerElement, unregister } from './playback.js';
-import { createStoryPlayer } from './story-player.js';
+import { createStoryPlayer, formatMs } from './story-player.js';
 import { TEXT_LIMITS as SOURCE_LIMITS, isCalendarDate } from './source-details.js';
 
 export const TEXT_LIMIT = 10_000;
@@ -83,12 +83,52 @@ function photoFactsText(photo) {
 // What a review form's photo depends on: its availability, address and uses.
 const photoBinding = (photo, voice = null) =>
   JSON.stringify([photo ? [photo.available === true, photo.url ?? null, photo.permissions ?? null] : null, voice ? [voice.available === true, voice.url ?? null, voice.permissions ?? null, voice.captions?.sha256 ?? null] : null]);
+// The start of a recording's current captions, as its provider wrote them,
+// cut at a word boundary within the first 60 characters.
+export function captionExcerpt(captions) {
+  const words = (captions?.cues ?? []).map((cue) => cue.text).join(' ').replace(/\s+/g, ' ').trim();
+  const cut = words.slice(0, 60);
+  return words.length > 60 ? `${(cut.lastIndexOf(' ') > 30 ? cut.slice(0, cut.lastIndexOf(' ')) : cut).trimEnd()}…` : words;
+}
+// Tells one person's recordings apart: how long it plays and the start of its
+// current captions, or that none were supplied. No IDs or hashes.
+export function recordingContext(voice) {
+  const excerpt = captionExcerpt(voice?.captions);
+  const words = voice?.captions ? `captions version ${voice.captions.version ?? 1}${excerpt ? `: “${excerpt}”` : ''}` : 'No captions supplied.';
+  return `${formatMs(voice?.durationMs ?? 0)} long · ${words}`;
+}
+const captionWords = (captions) => (captions?.cues ?? []).map((cue) => cue.text).join('\n');
+const when = (iso) => (iso ? new Date(iso).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : 'an unknown time');
+// Earlier caption versions, private to the owner and the provider, newest
+// first. Text only; nothing plays from here.
+function captionHistoryBox(voice) {
+  const history = Array.isArray(voice?.captionHistory) ? voice.captionHistory : [];
+  if (!history.length) return null;
+  return el('details', { className: 'source-details' }, [
+    el('summary', { textContent: `Previous captions (${history.length})` }),
+    el(
+      'ul',
+      { className: 'collab-list' },
+      history.map((entry) =>
+        el('li', {}, [
+          el('p', { className: 'hint', textContent: `Version ${entry.version}, written by ${entry.authorLabel || 'the provider'} on ${when(entry.createdAt)}; replaced on ${when(entry.supersededAt)}.` }),
+          el('p', { className: 'memory-text', textContent: captionWords(entry) }),
+        ]),
+      ),
+    ),
+  ]);
+}
+const CAPTION_BINDING_TEXT = {
+  changed: 'The listening captions were added or corrected after this review. The review describes what you saw then.',
+  unknown: 'Which listening captions this review saw is not known.',
+};
 // What a withdrawal covers, named by what was actually sent.
 function withdrawnParts(contribution) {
   const parts = [contribution.text?.trim() ? 'your words' : null, contribution.photo ? 'your photo' : null, contribution.voice ? 'your recording' : null].filter(Boolean);
   if (parts.length <= 1) return parts[0] ?? 'this recollection';
   return `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
 }
+const recordingUsesText = (voice) => grantsText(voice?.permissions).replace(/^Allowed:/, 'Recording allowed:').replace(/^No uses allowed\./, 'No recording uses allowed.');
 const photoUsesText = (photo) => grantsText(photo?.permissions).replace(/^Allowed:/, 'photo allowed:').replace(/^No uses allowed\./, 'no photo uses allowed.');
 
 function base64url(bytes) {
@@ -277,6 +317,10 @@ export function mountContributor(container, { principal = null, media = null } =
   // keeps it there (with its captions, uses and any unconfirmed send) and the
   // new place starts without one.
   const placeTakes = new Map();
+  // Open caption editors and the last caption outcome, per contribution of
+  // this place; a re-render keeps them, a place change or closing drops them.
+  const captionEditors = new Map();
+  const captionNotes = new Map();
   const recorder = createRecorder(media ?? { mediaDevices: globalThis.navigator?.mediaDevices, MediaRecorder: globalThis.MediaRecorder });
   let takeUrl = null;
   let takeBlob = null;
@@ -331,6 +375,10 @@ export function mountContributor(container, { principal = null, media = null } =
   const message = el('p', { className: 'form-message', role: 'alert' });
   const status = el('p', { className: 'hint', role: 'status' });
   const own = el('ul', { className: 'collab-list' });
+  // Unsaved caption text, kept reachable when the list cannot be read again.
+  // It holds only the person's own typing and its outcome: no media, history
+  // or players from the list that could not be confirmed.
+  const captionRecovery = el('div');
   const form = el('div', { hidden: true }, [
     field('What you remember about this place', text, 'Your words are kept exactly as you write them. The owner may use them to adjust the scene by hand; nothing reads meaning from them automatically, and nothing here is checked as historical fact.'),
     field('When this was, as you remember it (optional)', period, 'Kept as your own words. It is not turned into a date.'),
@@ -367,6 +415,7 @@ export function mountContributor(container, { principal = null, media = null } =
     el('h2', { textContent: 'What you have sent' }),
     el('p', { className: 'hint', textContent: 'You see what happened to each recollection. The owner’s private review notes are not shared with you.' }),
     status,
+    captionRecovery,
     own,
   ]);
 
@@ -390,8 +439,7 @@ export function mountContributor(container, { principal = null, media = null } =
       return null;
     }
   }
-  function storePending(id) {
-    const key = storeKey();
+  function storePending(id, key = storeKey()) {
     if (!key) return;
     try {
       if (id) storage()?.setItem(key, id);
@@ -400,8 +448,7 @@ export function mountContributor(container, { principal = null, media = null } =
       // Recovery then relies on checking this session only.
     }
   }
-  function storedPending() {
-    const key = storeKey();
+  function storedPending(key = storeKey()) {
     try {
       const value = key ? storage()?.getItem(key) : null;
       return typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
@@ -561,6 +608,249 @@ export function mountContributor(container, { principal = null, media = null } =
     }
   }
 
+  // Only the opaque request ID of a caption change not known to have been
+  // saved, per principal, place and contribution; never the words.
+  const captionKey = (id) => (storeKey() ? `rehere:caption-pending:${principal.id}:${place.draftId}:${place.jobId}:${id}` : null);
+  // A save is confirmed only by an answer about this contribution: a version
+  // within the 20-version bound, and either the withdrawn record or current
+  // captions at least that new. Anything else leaves the outcome unknown.
+  const captionAnswer = (result, id) => {
+    const contribution = result.ok ? result.body?.contribution : null;
+    const applied = result.body?.appliedCaptionVersion;
+    if (!contribution || typeof contribution !== 'object' || contribution.id !== id || !Number.isInteger(applied) || applied < 1 || applied > 20) return false;
+    if (contribution.status === 'withdrawn') return true;
+    const now = contribution.voice?.captions;
+    return Boolean(now) && typeof now.sha256 === 'string' && Number.isInteger(now.version) && now.version >= applied && now.version <= 20 && Array.isArray(now.cues);
+  };
+
+  function showCaptionRecovery() {
+    const editors = [...captionEditors.values()];
+    if (!editors.length) {
+      captionRecovery.replaceChildren();
+      return;
+    }
+    const retry = el('button', { type: 'button', className: 'secondary', textContent: 'Refresh your recollections' });
+    retry.addEventListener('click', () => loadOwn());
+    captionRecovery.replaceChildren(
+      el('p', { className: 'hint', textContent: 'Your caption text is kept below while your recollections cannot be shown. Refresh to see them again.' }),
+      retry,
+      ...editors.map((editor) => {
+        refreshCaptionEditor(editor, editor.voice);
+        return editor.wrap;
+      }),
+    );
+  }
+
+  function captionControl(contribution) {
+    const slot = el('div');
+    let editor = captionEditors.get(contribution.id);
+    if (!editor && storedPending(captionKey(contribution.id))) editor = openCaptionEditor(contribution, true);
+    if (editor) {
+      refreshCaptionEditor(editor, contribution.voice);
+      slot.append(editor.wrap);
+      return slot;
+    }
+    const open = el('button', { type: 'button', className: 'secondary', textContent: contribution.voice.captions ? 'Correct listening captions' : 'Add listening captions' });
+    open.addEventListener('click', () => {
+      captionNotes.delete(contribution.id);
+      const created = openCaptionEditor(contribution, false);
+      refreshCaptionEditor(created, contribution.voice);
+      slot.replaceChildren(created.wrap);
+    });
+    slot.append(open);
+    return slot;
+  }
+
+  // An editor starts from the current captions it was opened on. After a
+  // reload with an earlier change unconfirmed, it can only look that change up.
+  function openCaptionEditor(contribution, lookup) {
+    const voice = contribution.voice;
+    const editor = {
+      id: contribution.id,
+      base: voice.captions?.sha256 ?? null,
+      attempt: null,
+      pendingId: lookup ? storedPending(captionKey(contribution.id)) : null,
+      busy: false,
+      open: !lookup,
+      voice,
+      text: el('textarea', { rows: 4, maxLength: CAPTION_LIMIT, value: lookup ? '' : captionWords(voice.captions) }),
+      confirm: el('input', { type: 'checkbox' }),
+      save: el('button', { type: 'button' }),
+      startNew: el('button', { type: 'button', className: 'secondary', textContent: 'Start a new caption change instead' }),
+      reopen: el('button', { type: 'button', className: 'secondary', textContent: 'Reopen the current captions' }),
+      staleNote: el('p', { className: 'hint' }),
+      note: el('p', { className: 'form-message', role: 'alert', textContent: lookup ? 'An earlier caption change may not have reached Rehere. Check it before starting a new one.' : '' }),
+    };
+    editor.fields = el('div', { hidden: lookup }, [
+      el('p', {
+        className: 'hint',
+        textContent:
+          'Listening captions are your own written account of what is heard, not a transcript and not a check of what happened. Your recording and anything you wrote stay as they are, and earlier captions stay listed as earlier versions. Saving stops any shared view that uses this recording; the owner needs a new preview and link to share it again. Copies someone already downloaded cannot be recalled.',
+      }),
+      field('Listening captions', editor.text, `Plain text, up to ${CAPTION_LIMIT.toLocaleString('en-US')} characters.`),
+      el('label', { className: 'memory-consent' }, [editor.confirm, ' I wrote these listening captions']),
+      editor.staleNote,
+    ]);
+    editor.wrap = el('div', {}, [editor.fields, el('div', { className: 'actions' }, [editor.reopen, editor.startNew, editor.save]), editor.note]);
+    editor.save.addEventListener('click', () => saveCaptions(editor));
+    // Discards the typed text only on this explicit request; an unconfirmed
+    // attempt stays as it was sent.
+    editor.reopen.addEventListener('click', () => {
+      editor.text.value = captionWords(editor.voice.captions);
+      editor.confirm.checked = false;
+      editor.base = editor.voice.captions?.sha256 ?? null;
+      editor.note.textContent = '';
+      refreshCaptionEditor(editor, editor.voice);
+    });
+    editor.startNew.addEventListener('click', () => {
+      storePending(null, captionKey(editor.id));
+      editor.pendingId = null;
+      editor.attempt = null;
+      if (!editor.open) {
+        editor.open = true;
+        editor.fields.hidden = false;
+        editor.text.value = captionWords(editor.voice.captions);
+        editor.base = editor.voice.captions?.sha256 ?? null;
+      }
+      editor.note.textContent = 'Your next save is a new caption change. The earlier one may still have been saved; Rehere could not confirm it.';
+      refreshCaptionEditor(editor, editor.voice);
+    });
+    captionEditors.set(contribution.id, editor);
+    return editor;
+  }
+
+  // A newer list may show captions the editor was not opened on: the typed
+  // text stays, but cannot be saved over them.
+  function refreshCaptionEditor(editor, voice) {
+    editor.voice = voice;
+    const stale = editor.open && editor.base !== (voice.captions?.sha256 ?? null);
+    editor.staleNote.textContent = stale
+      ? 'The listening captions changed after you opened this editor. Your text is still here, but it cannot be saved over captions you have not seen. Reopen the current captions to continue from them.'
+      : '';
+    editor.reopen.hidden = !stale;
+    editor.startNew.hidden = !editor.pendingId || editor.busy;
+    editor.save.textContent = editor.attempt ? 'Save again (same request)' : editor.pendingId ? 'Check earlier caption change' : 'Save listening captions';
+    editor.save.disabled = editor.busy || (!editor.attempt && !editor.pendingId && stale);
+  }
+
+  // One immutable attempt per change: saving again repeats it exactly, even
+  // after more typing. Late answers for another place, a closed screen or a
+  // dropped editor change nothing.
+  async function saveCaptions(editor) {
+    if (editor.busy || !place) return;
+    const mine = generation;
+    const target = place;
+    const current = () => !disposed && mine === generation && place === target && captionEditors.get(editor.id) === editor;
+    const url = `${scope()}/contributions/${editor.id}/captions`;
+    captionNotes.delete(editor.id);
+    if (!editor.attempt && editor.pendingId) {
+      editor.busy = true;
+      refreshCaptionEditor(editor, editor.voice);
+      readToken += 1;
+      const result = await request(`${url}/requests/${editor.pendingId}`);
+      if (!current()) return;
+      editor.busy = false;
+      if (captionAnswer(result, editor.id)) {
+        await captionSaved(editor, result.body, null);
+        return;
+      }
+      editor.note.textContent =
+        result.status === 404
+          ? 'Rehere has no record of your earlier caption change yet; it may still arrive. Check again later, or start a new caption change.'
+          : 'Rehere could not check your earlier caption change. Try again.';
+      refreshCaptionEditor(editor, editor.voice);
+      return;
+    }
+    let attempt = editor.attempt;
+    if (!attempt) {
+      const captionText = editor.text.value;
+      const problem = !captionText.trim()
+        ? 'Write the listening captions before saving.'
+        : captionText.length > CAPTION_LIMIT
+          ? `Keep the captions to ${CAPTION_LIMIT.toLocaleString('en-US')} characters or fewer.`
+          : editor.confirm.checked !== true
+            ? 'Confirm that you wrote these listening captions yourself.'
+            : '';
+      if (problem) {
+        editor.note.textContent = problem;
+        return;
+      }
+      const requestId = crypto.randomUUID();
+      attempt = { requestId, body: { requestId, baseCaptionSha256: editor.base, captionText, captionConfirmed: true } };
+    }
+    editor.attempt = attempt;
+    editor.pendingId = attempt.requestId;
+    storePending(attempt.requestId, captionKey(editor.id));
+    editor.busy = true;
+    refreshCaptionEditor(editor, editor.voice);
+    readToken += 1;
+    let result = await postJson(url, attempt.body);
+    if (!current()) return;
+    editor.busy = false;
+    if (result.ok && !captionAnswer(result, editor.id)) result = { ...result, ok: false, status: 0 };
+    if (unclear(result)) {
+      editor.note.textContent = withReason(result, 'Rehere could not confirm whether your captions were saved. What you typed is still here; saving again repeats the same request.');
+      refreshCaptionEditor(editor, editor.voice);
+      return;
+    }
+    if (result.ok) {
+      await captionSaved(editor, result.body, attempt.body.captionText);
+      return;
+    }
+    // Signed out or not allowed says nothing about an earlier try of this
+    // request: its ID and exact attempt stay until a receipt settles it or
+    // the person starts a new change. Reading the list again decides whether
+    // the draft may stay on screen.
+    if (result.status === 401 || result.status === 403) {
+      const note = 'Rehere did not accept this save because you are signed out or no longer allowed here. Whether an earlier try was saved is still unknown; once you can sign in again, Rehere can check it.';
+      editor.note.textContent = note;
+      message.textContent = note;
+      refreshCaptionEditor(editor, editor.voice);
+      await loadOwn();
+      return;
+    }
+    // A definite refusal: nothing was saved, and the typed text stays.
+    storePending(null, captionKey(editor.id));
+    editor.attempt = null;
+    editor.pendingId = null;
+    editor.note.textContent = `${reasonOf(result) || 'The captions could not be saved.'} What you typed is still here.`;
+    refreshCaptionEditor(editor, editor.voice);
+    await loadOwn();
+  }
+
+  // Saved means a 200 answer or a found receipt. The version this change
+  // saved is named apart from whatever is current now.
+  async function captionSaved(editor, body, savedText) {
+    const mine = generation;
+    const target = place;
+    const contribution = body.contribution;
+    const applied = body.appliedCaptionVersion;
+    const now = contribution.status === 'withdrawn' ? null : contribution.voice?.captions ?? null;
+    storePending(null, captionKey(editor.id));
+    editor.attempt = null;
+    editor.pendingId = null;
+    editor.note.textContent = '';
+    captionNotes.set(
+      editor.id,
+      contribution.status === 'withdrawn'
+        ? 'Your caption change was saved before this recollection was withdrawn. It is no longer shown or used.'
+        : now?.version !== applied
+          ? `Your listening captions were saved as version ${applied}. A later version${now ? ` (version ${now.version})` : ''} is now current.`
+          : applied === 1
+            ? 'Your listening captions were saved as version 1.'
+            : `Your listening captions were saved as version ${applied}; earlier versions stay listed. Shared views that used the earlier captions have stopped, and the owner needs a new preview and link to share this recording again.`,
+    );
+    // An editor still holding exactly what was saved closes; newer typing
+    // stays, continuing from this save only while it is still current.
+    if (!editor.open || savedText === editor.text.value) captionEditors.delete(editor.id);
+    else if (now && now.version === applied) editor.base = now.sha256;
+    // The save stays confirmed even when the list cannot be read again: the
+    // outcome moves to the form message, which does not depend on the list.
+    if ((await loadOwn()) === null && !disposed && mine === generation && place === target) {
+      message.textContent = `${captionNotes.get(editor.id)} Your list could not be refreshed; reload the page to see it.`;
+    }
+  }
+
   function renderOwn(contributions) {
     revokeOwn();
     const mine = generation;
@@ -577,12 +867,18 @@ export function mountContributor(container, { principal = null, media = null } =
         if (contribution.periodClaim) item.append(el('p', { className: 'hint', textContent: `Time as you remember it: ${contribution.periodClaim}` }));
         // Without words there are no word uses; the line above already says so.
         if (contribution.permissions || contribution.status === 'withdrawn') item.append(el('p', { className: 'hint', textContent: usesText(contribution) }));
+        // Withdrawal ends caption changes; nothing of an editor or its
+        // unconfirmed request is kept.
+        if (contribution.status === 'withdrawn') {
+          captionEditors.delete(contribution.id);
+          storePending(null, captionKey(contribution.id));
+        }
         if (contribution.voice && contribution.status !== 'withdrawn') {
           const voice = contribution.voice;
           item.append(
             el('p', {
               className: 'hint',
-              textContent: `Your recording · ${grantsText(voice.permissions).replace(/^Allowed:/, 'recording allowed:').replace(/^No uses allowed\./, 'no recording uses allowed.')} ${voice.captions ? 'With captions you wrote.' : 'No captions supplied.'}`,
+              textContent: `Your recording · ${recordingContext(voice)} ${recordingUsesText(voice)}`,
             }),
           );
           // The checked playback copy, only on the person's own Play.
@@ -594,7 +890,11 @@ export function mountContributor(container, { principal = null, media = null } =
             ownPlayers.push(player);
             item.append(player.element);
           } else item.append(el('p', { className: 'hint', textContent: 'Your recording is not available now.' }));
+          const history = captionHistoryBox(voice);
+          if (history) item.append(history);
+          if (voice.available) item.append(captionControl(contribution));
         }
+        if (captionNotes.has(contribution.id)) item.append(el('p', { className: 'form-message', textContent: captionNotes.get(contribution.id) }));
         if (contribution.photo && contribution.status !== 'withdrawn') {
           item.append(el('p', { className: 'hint', textContent: `Your photo · ${photoUsesText(contribution.photo)}` }));
           if (contribution.photo.available && contribution.photo.url) {
@@ -651,6 +951,10 @@ export function mountContributor(container, { principal = null, media = null } =
       return;
     }
     withdrawAttempt.settle();
+    if (result.ok) {
+      captionEditors.delete(contribution.id);
+      storePending(null, captionKey(contribution.id));
+    }
     message.textContent = result.ok
       ? `Withdrawn. Rehere no longer shows or uses ${withdrawnParts(contribution)}, and scenes and shared views that depended on it are blocked. Copies someone already saved outside Rehere are not affected.`
       : reasonOf(result) || 'The recollection could not be withdrawn.';
@@ -670,8 +974,13 @@ export function mountContributor(container, { principal = null, media = null } =
       revokeOwn();
       own.replaceChildren();
       status.textContent = 'Your recollections could not be loaded. Try again later.';
+      // Signed out or no longer allowed: no draft stays. Otherwise unsaved
+      // caption text stays reachable with a way to read the list again.
+      if (result.status === 401 || result.status === 403) captionEditors.clear();
+      showCaptionRecovery();
       return null;
     }
+    captionRecovery.replaceChildren();
     renderOwn(result.body.contributions);
     if (pendingId && result.body.contributions.some((contribution) => contribution.requestId === pendingId)) {
       const sameForm = pendingInput && sameJson(pendingInput, collect()) && (attempt?.file ?? null) === photoFile && (attempt?.voice ?? null) === (recorder.snapshot().recording ?? null);
@@ -732,6 +1041,9 @@ export function mountContributor(container, { principal = null, media = null } =
     }
     recorder.discard();
     generation += 1;
+    captionEditors.clear();
+    captionNotes.clear();
+    captionRecovery.replaceChildren();
     place = next;
     // A send still pending for the previous place no longer holds this form.
     send.disabled = false;
@@ -870,6 +1182,7 @@ export function mountContributor(container, { principal = null, media = null } =
     dispose() {
       disposed = true;
       generation += 1;
+      captionEditors.clear();
       revokeOwn();
       setPhoto(null);
       recorder.discard();
@@ -1085,7 +1398,15 @@ export function mountCollaboration(container, bridge) {
         if (entry.periodClaim && entry.text !== null) item.append(el('p', { className: 'hint', textContent: `Time as they remember it (their words, not checked): ${entry.periodClaim}` }));
         item.append(el('p', { className: 'hint', textContent: usesText(entry) }));
         if (entry.photo && entry.status !== 'withdrawn') item.append(el('p', { className: 'hint', textContent: `Photo included · ${photoUsesText(entry.photo)}` }));
-        if (entry.voice && entry.status !== 'withdrawn') item.append(el('p', { className: 'hint', textContent: `Recording included · ${grantsText(entry.voice.permissions).replace(/^Allowed:/, 'recording allowed:').replace(/^No uses allowed\./, 'no recording uses allowed.')}` }));
+        if (entry.voice && entry.status !== 'withdrawn') {
+          item.append(el('p', { className: 'hint', textContent: `Recording included · ${recordingContext(entry.voice)} ${recordingUsesText(entry.voice)}` }));
+          // A review keeps describing what it saw; later caption changes are named, never folded in.
+          if (CAPTION_BINDING_TEXT[entry.review?.captionBinding]) item.append(el('p', { className: 'hint', textContent: CAPTION_BINDING_TEXT[entry.review.captionBinding] }));
+          // Earlier caption versions stay inspectable on every row, final
+          // decisions included, not only while a review is open.
+          const history = captionHistoryBox(entry.voice);
+          if (history) item.append(history);
+        }
         // Only what the owner actually recorded; nothing for a withdrawn entry.
         const notes = [];
         if (entry.status !== 'withdrawn' && entry.review?.reason) notes.push(`Your note: ${entry.review.reason}`);
@@ -1204,7 +1525,7 @@ export function mountCollaboration(container, bridge) {
         ...(reviewPlayer ? [reviewPlayer.element] : [el('p', { className: 'hint', textContent: 'This recording is not available now, so it cannot support a change. You can hold or decline it.' })]),
         el('figcaption', {
           className: 'hint',
-          textContent: `Recording supplied by ${providerName(entry)}, kept as recorded. ${voice.captions ? `Captions written by ${voice.captions.authorLabel}; not a transcript.` : ''} Not checked as historical fact; Rehere does not compare it with the scene.`.replace(/\s+/g, ' '),
+          textContent: `Recording supplied by ${providerName(entry)}, kept as recorded. ${voice.captions ? `Captions version ${voice.captions.version ?? 1}, written by ${voice.captions.authorLabel}; not a transcript.` : ''} Not checked as historical fact; Rehere does not compare it with the scene.`.replace(/\s+/g, ' '),
         }),
         el('label', { className: 'memory-consent' }, [voiceAck, ' I listened to this recording myself; the position I set is my own judgment, not taken from the recording automatically']),
       );

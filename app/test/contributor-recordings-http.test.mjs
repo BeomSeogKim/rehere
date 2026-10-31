@@ -143,7 +143,7 @@ describe('submitting a recording', () => {
       assert.deepEqual(contribution.voice, {
         available: true, type: 'audio/webm', durationMs: 100, audio: { type: 'audio/wav', size: WAV.length },
         origin: body.voice.origin, dates: body.voice.dates, permissions: body.voice.permissions,
-        receivedAt: contribution.voice.receivedAt, captions: null, url: scene.recording(contribution.id),
+        receivedAt: contribution.voice.receivedAt, captions: null, captionHistory: [], url: scene.recording(contribution.id),
       });
       assert.equal(preparer.calls.length, 1);
       assert.deepEqual(preparer.calls[0].bytes, WEBM);
@@ -200,7 +200,7 @@ describe('submitting a recording', () => {
       const { contribution, principal } = await contributed(app, owner, scene, { text: 'Also in writing.', permissions: grants(), voice: voiceFacts({ captionText, captionConfirmed: true }) });
       const stored = (await storedOf(dataDir, scene, contribution.id)).voice;
       const cues = [{ startMs: 0, endMs: 100, text: captionText }];
-      assert.deepEqual(contribution.voice.captions, { cues, sha256: stored.captions.sha256, authorLabel: 'Synthetic speaker' });
+      assert.deepEqual(contribution.voice.captions, { cues, sha256: stored.captions.sha256, authorLabel: 'Synthetic speaker', version: 1, createdAt: stored.captions.createdAt });
       assert.equal(stored.captions.sha256, sha256(JSON.stringify([stored.source.sha256, stored.playback.sha256, principal.id, cues])));
       assert.deepEqual([stored.captions.version, stored.captions.confirmed, stored.captions.author.principalId], [1, true, principal.id]);
       assert.equal(contribution.text, 'Also in writing.');
@@ -441,7 +441,7 @@ describe('recordings linked to shared views', () => {
       assert.deepEqual(item, {
         id: item.id, viewIds: [v1.id], target: { id: 'selected-foreground', label: 'About the selected foreground object' }, title: 'Contributor recording',
         label: 'Contributor recording; human-written listening captions; not verified history.', providerLabel: 'Synthetic speaker', captionAuthorLabel: 'Synthetic speaker',
-        cues: [{ startMs: 0, endMs: 100, text: captionText }], durationMs: 100, audio: { type: 'audio/wav', size: WAV.length },
+        cues: [{ startMs: 0, endMs: 100, text: captionText }], durationMs: 100, audio: { type: 'audio/wav', size: WAV.length }, captionVersion: 1,
       });
       const stored = await storedOf(dataDir, scene, contribution.id);
       const shown = JSON.stringify(preview.publicView);

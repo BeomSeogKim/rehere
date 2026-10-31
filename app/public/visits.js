@@ -285,7 +285,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
             el('p', { className: 'hint', textContent: `${recording.target?.label ?? 'About this place'} · ${recording.label}` }),
             el('p', {
               className: 'hint',
-              textContent: `Recording by ${recording.providerLabel || 'a contributor'}. Captions written by ${recording.captionAuthorLabel || recording.providerLabel || 'the contributor'}; not a transcript. Nothing plays until you press Play.`,
+              textContent: `Recording by ${recording.providerLabel || 'a contributor'}. Listening captions, version ${recording.captionVersion ?? 1}${(recording.captionVersion ?? 1) >= 2 ? ', corrected by the contributor' : ''}; written by ${recording.captionAuthorLabel || recording.providerLabel || 'the contributor'}; not a transcript. Nothing plays until you press Play.`,
             }),
             ...(player ? [player.element] : []),
           ]);

@@ -517,7 +517,7 @@ describe('the owner listening before a change', () => {
     const view = mountCollaboration(root, b);
     await settle();
     const ui = finder(root);
-    assert.match(root.textContent, /Recording included · recording allowed/);
+    assert.match(root.textContent, /Recording included · 0:04\.0 long · No captions supplied\. Recording allowed: use to reconstruct this place; share with others\./);
     assert.match(root.textContent, /No written words were sent\./);
     ui.button('Review').dispatch('click');
     assert.match(root.textContent, /No captions supplied\./);
@@ -615,8 +615,8 @@ describe('telling recordings apart when sharing', () => {
       .findAll((node) => node.tag === 'label' && /^ Recording by/.test(node.textContent))
       .map((node) => node.textContent.trim());
     assert.deepEqual(labels, [
-      'Recording by Mina · 0:04.0 long · captions: “A bell rings twice from the shop door, then the counter…”',
-      'Recording by Mina · 1:01.5 long · captions: “The flour sacks stood by the window.”',
+      'Recording by Mina · 0:04.0 long · captions version 1: “A bell rings twice from the shop door, then the counter…”',
+      'Recording by Mina · 1:01.5 long · captions version 1: “The flour sacks stood by the window.”',
     ]);
     assert.equal(new Set(labels).size, 2, 'the two choices can be told apart');
     assert.ok(ui.legendSet('Contributor recordings to include (optional)').findAll((node) => node.type === 'checkbox').every((box) => !box.checked), 'neither is chosen');
@@ -675,7 +675,7 @@ describe('a contributor recording for visitors', () => {
       assert.doesNotMatch(root.textContent, /Contributor recordings for this view/, 'not under an unlinked view');
       ui.button('Mina’s alternative').dispatch('click');
       assert.match(root.textContent, /About this place · Contributor recording; human-written listening captions; not verified history\./);
-      assert.match(root.textContent, /Captions written by Mina; not a transcript\. Nothing plays until you press Play\./);
+      assert.match(root.textContent, /Listening captions, version 1; written by Mina; not a transcript\. Nothing plays until you press Play\./);
       assert.deepEqual(heard, [], 'nothing loads before Play');
       ui.button('Play').dispatch('click');
       await settle();
