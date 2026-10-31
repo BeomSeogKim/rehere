@@ -19,6 +19,8 @@ export function createRecorder({ mediaDevices, MediaRecorder, maxMs = MAX_RECORD
   let startedAt = null;
   let limitTimer = null;
   let stopWaiters = [];
+  // The state to return to when a restored recording is discarded.
+  let restoredFrom = null;
   const listeners = new Set();
 
   const snapshot = () => ({ state, message, recording, startedAt });
@@ -149,7 +151,20 @@ export function createRecorder({ mediaDevices, MediaRecorder, maxMs = MAX_RECORD
     }
     recording = null;
     settle(null);
-    set('idle');
+    const back = restoredFrom ?? { state: 'idle', message: '' };
+    restoredFrom = null;
+    set(back.state, back.message);
+  }
+
+  // Shows a recording the server already received as a finished one. It never
+  // asks for the microphone; discarding it returns to the earlier state, so a
+  // browser that cannot record does not appear able to.
+  function restore(blob) {
+    if (!['idle', 'unavailable'].includes(state) || !(blob instanceof Blob) || blob.size === 0) return false;
+    restoredFrom = { state, message };
+    recording = blob;
+    set('recorded');
+    return true;
   }
 
   // For leaving the entry screen: no capture may continue out of view, but a
@@ -163,6 +178,7 @@ export function createRecorder({ mediaDevices, MediaRecorder, maxMs = MAX_RECORD
     start,
     stop,
     discard,
+    restore,
     leave,
     snapshot,
     subscribe(listener) {

@@ -2,6 +2,7 @@ import { mountAccess } from './access-ui.js';
 import { mountContributor } from './collaboration.js';
 import { registerElement, stopAll } from './playback.js';
 import { isStopped, mountSourceControls, renderStoppedMarker } from './source-controls.js';
+import { createIntakeSession, detailsFromSourceInput, identify, intakeApi, isOpenState, isTerminalState, pendingIds, planFrom, sha256Hex } from './intake.js';
 import { latestOnly } from './latest.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import {
@@ -22,8 +23,6 @@ const PHOTO_TYPES = new Set(['image/jpeg', 'image/png']);
 // Finishing a recording normally takes well under a second; this bounds a stuck recorder.
 const FINALIZE_TIMEOUT_MS = 10_000;
 const KEPT = 'Nothing was saved, and your photos, writing and recording are still here.';
-// A lost response does not mean the server did not store the memory.
-const UNCONFIRMED = 'Rehere could not confirm whether this was saved. Your photos, writing and recording are still here. Check Saved memories before trying again.';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -59,6 +58,9 @@ const els = {
   viewerSpace: $('viewer-space'),
   savedEmpty: $('saved-empty'),
   savedList: $('saved-list'),
+  intakeResume: $('intake-resume'),
+  intakeStatus: $('intake-status'),
+  inputPanels: [$('photos-panel'), $('text-panel'), $('voice-panel')],
 };
 
 // Each photo object owns its source details, so they follow the photo when
@@ -78,6 +80,33 @@ let ownerActive = false;
 let visiting = false;
 let sessionGeneration = 0;
 const stillOwner = (generation) => ownerActive && generation === sessionGeneration;
+
+// The unfinished save the form belongs to, if any, and what it needs: the
+// owner's API with a signal that sign-out aborts, opaque pending IDs, the
+// recording's identity, a lost recording, and the source input a restored
+// written memory had on the server.
+let ownerId = null;
+let intakeAbort = null;
+let intake = null;
+let voiceItem = null;
+let lostVoice = null;
+let textKeptInput = null;
+let resumeButtons = [];
+let offerButtons = [];
+// True while a chosen unfinished save is being loaded: the form, Save and
+// every other offer wait, so a restore never overwrites newer work.
+let restoring = false;
+// Reading localStorage itself can throw (blocked storage); then no IDs are
+// kept in the browser and the server's list of open intakes is the fallback.
+function browserStorage() {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+const intakeIds = () => pendingIds(browserStorage(), ownerId);
+const newIntake = () => createIntakeSession({ api: intakeApi(globalThis.fetch.bind(globalThis), intakeAbort?.signal), ids: intakeIds() });
 
 const recorder = createRecorder({
   mediaDevices: navigator.mediaDevices,
@@ -104,16 +133,18 @@ function renderPhotos() {
       const item = document.createElement('li');
       const frame = document.createElement('div');
       frame.className = 'photo-frame';
-      const image = document.createElement('img');
-      image.src = photo.url;
-      image.alt = `Selected photo ${index + 1}`;
+      const image = photo.missing ? missingSlot(photo, index) : document.createElement('img');
+      if (!photo.missing) {
+        image.src = photo.url;
+        image.alt = `Selected photo ${index + 1}`;
+      }
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'remove';
       remove.textContent = 'Remove';
       remove.setAttribute('aria-label', `Remove photo ${index + 1}`);
       remove.addEventListener('click', () => {
-        URL.revokeObjectURL(photo.url);
+        if (photo.url) URL.revokeObjectURL(photo.url);
         photos.splice(photos.indexOf(photo), 1);
         renderPhotos();
         els.addPhotos.focus();
@@ -126,6 +157,39 @@ function renderPhotos() {
       return item;
     }),
   );
+  updateResumeLabels();
+}
+
+// A restored photo whose bytes never reached Rehere. Choosing the same file
+// again (same size and SHA-256) keeps its part and source settings; any other
+// file is a new photo whose uses start off.
+function missingSlot(photo, index) {
+  const slot = document.createElement('div');
+  slot.className = 'photo-missing';
+  const note = document.createElement('p');
+  note.className = 'hint';
+  note.textContent = `Photo ${index + 1}${photo.hints?.name ? ` (${photo.hints.name})` : ''} did not reach Rehere. Choose the file again to send it.`;
+  const choose = document.createElement('input');
+  choose.type = 'file';
+  choose.accept = 'image/jpeg,image/png';
+  choose.setAttribute('aria-label', `Choose photo ${index + 1} again`);
+  choose.addEventListener('change', async () => {
+    const [file] = choose.files ?? [];
+    if (!file) return;
+    const generation = sessionGeneration;
+    const same = file.size === photo.size && (await sha256Hex(file)) === photo.sha256;
+    if (!stillOwner(generation) || !photos.includes(photo)) return;
+    if (same) {
+      Object.assign(photo, { file, url: URL.createObjectURL(file), missing: false, identity: { file, partId: photo.partId } });
+      setMessage('');
+    } else {
+      photos.splice(photos.indexOf(photo), 1, { kind: 'photo', file, url: URL.createObjectURL(file), details: createSourceDetails(), state: {} });
+      setMessage('That is a different file, so it is added as a new photo and its source settings start with no uses allowed.');
+    }
+    renderPhotos();
+  });
+  slot.append(note, choose);
+  return slot;
 }
 
 function renderTextSource() {
@@ -144,7 +208,7 @@ function addPhotos(files) {
     if (photos.length >= PHOTO_LIMIT) skipped.push(`${file.name} (the limit is ${PHOTO_LIMIT} photos)`);
     else if (!PHOTO_TYPES.has(file.type)) skipped.push(`${file.name} (only JPEG or PNG)`);
     else if (file.size > PHOTO_BYTES) skipped.push(`${file.name} (larger than 20 MB)`);
-    else photos.push({ file, url: URL.createObjectURL(file), details: createSourceDetails(), state: {} });
+    else photos.push({ kind: 'photo', file, url: URL.createObjectURL(file), details: createSourceDetails(), state: {} });
   }
   renderPhotos();
   setMessage(skipped.length ? `Some photos were not added: ${skipped.join(', ')}.` : '');
@@ -187,6 +251,7 @@ function renderVoice() {
     ticker = null;
   }
   renderActions();
+  updateResumeLabels();
 }
 
 function renderActions() {
@@ -194,8 +259,11 @@ function renderActions() {
   const capturing = state === 'recording' || state === 'finalizing';
   els.save.textContent = capturing ? 'Stop and save' : state === 'requesting' ? 'Save without voice' : 'Save';
   els.saveWithoutVoice.hidden = !capturing;
-  els.form.inert = saving;
-  els.form.setAttribute('aria-busy', String(saving));
+  els.form.inert = saving || restoring;
+  els.form.setAttribute('aria-busy', String(saving || restoring));
+  updateResumeLabels();
+  // While an outcome is unknown only Save, which checks it, stays usable.
+  for (const panel of els.inputPanels) panel.inert = Boolean(intake?.pending);
 }
 
 function timeout(promise, ms) {
@@ -218,8 +286,13 @@ function resetForm() {
   els.text.value = '';
   els.textCount.textContent = '0';
   textSource = { details: createSourceDetails(), state: {} };
+  textKeptInput = null;
   renderTextSource();
   recorder.discard();
+  intake = null;
+  voiceItem = null;
+  lostVoice = null;
+  renderIntake();
 }
 
 function sourceProblem(voice) {
@@ -243,7 +316,7 @@ function savedNotice(id) {
 }
 
 async function save(includeVoice) {
-  if (saving) return;
+  if (saving || restoring) return;
   saving = true;
   setMessage('');
   renderActions();
@@ -260,7 +333,7 @@ async function save(includeVoice) {
       setMessage('Add a photo, a written memory or a voice recording before saving.');
       return;
     }
-    const total = photos.reduce((sum, photo) => sum + photo.file.size, 0) + (voice?.size ?? 0);
+    const total = photos.reduce((sum, photo) => sum + (photo.file?.size ?? photo.size ?? 0), 0) + (voice?.size ?? 0);
     if (total > REQUEST_BYTES) {
       setMessage('Everything saved at once must total 64 MB or less. Remove a photo or record a shorter message.');
       return;
@@ -270,44 +343,136 @@ async function save(includeVoice) {
       setMessage(`${problem} ${KEPT}`);
       return;
     }
-    const metadata = buildMetadata({
-      photos,
-      text,
-      textDetails: textSource.details,
-      voice,
-      voiceDetails: voiceSource.current.details,
-    });
-    const body = new FormData();
-    body.append('text', text);
-    body.append('metadata', JSON.stringify(metadata));
-    for (const photo of photos) body.append('photos', photo.file);
-    if (voice) body.append('voice', voice, 'voice');
-
-    let response;
-    let result = null;
-    try {
-      response = await fetch('/api/drafts', { method: 'POST', body });
-      result = await response.json().catch(() => null);
-    } catch {
-      response = null;
+    // Every item gets the identity of its exact original before anything is sent.
+    voiceItem = voice ? (voiceItem?.file === voice ? voiceItem : { kind: 'voice', file: voice }) : null;
+    if (voiceItem) {
+      voiceItem.details = voiceSource.current.details;
+      // A new take replaces a recording that was lost; nothing is inherited.
+      lostVoice = null;
     }
+    const recording = voiceItem ?? (includeVoice ? lostVoice : null);
+    for (const item of [...photos, ...(recording ? [recording] : [])]) await identify(item);
     if (!stillOwner(generation)) return;
-    if (response && !response.ok && typeof result?.error === 'string') {
-      setMessage(`${result.error} ${KEPT}`);
-      return;
-    }
-    if (!response?.ok || !result?.id) {
-      setMessage(UNCONFIRMED);
-      await loadSaved();
-      return;
-    }
-    resetForm();
-    setMessage(savedNotice(result.id), 'success');
-    await loadSaved();
+    const intended = planFrom({ text, photos, voice: recording, textDetails: textSource.details, textKeptInput });
+    const files = new Map([...photos, ...(recording ? [recording] : [])].filter((item) => item.file).map((item) => [item.partId, item.file]));
+    intake ??= newIntake();
+    const session = intake;
+    const outcome = await session.save(intended, files, renderIntake);
+    if (!stillOwner(generation) || session !== intake) return;
+    settleIntake(outcome);
+  } catch (error) {
+    if (error?.name !== 'AbortError') throw error;
   } finally {
-    saving = false;
-    renderActions();
+    // Only the session that started this save may end its lock; a sign-out
+    // has already reset it, and a later session's own work stays locked.
+    if (generation === sessionGeneration) {
+      saving = false;
+      renderActions();
+      renderIntake();
+    }
   }
+}
+
+// What the form says after an attempt. Only a final draft ID means Saved.
+function settleIntake(outcome) {
+  switch (outcome.kind) {
+    case 'saved':
+      resetForm();
+      setMessage(savedNotice(outcome.draftId), 'success');
+      loadSaved();
+      break;
+    case 'discarded':
+      intake = null;
+      setMessage('This unfinished save was discarded elsewhere. The form is unchanged; saving again starts a new one.');
+      break;
+    case 'unknown':
+      setMessage('Rehere could not confirm the last step. Nothing in the form was changed. Press Save to check again; it repeats the same request and never starts a second save.');
+      break;
+    case 'conflict':
+      setMessage('This unfinished save was changed in another window, so nothing was overwritten. Reload the page and resume it to continue from what Rehere has.');
+      break;
+    case 'refused':
+      setMessage(`${outcome.message} ${KEPT}`);
+      break;
+    default: {
+      const parts = outcome.state?.parts ?? [];
+      const received = parts.filter((part) => part.status === 'received').length;
+      setMessage(`Not saved yet: ${received} of ${parts.length} files reached Rehere. Saving again sends only the files still missing; you can also remove or replace a file first.`);
+    }
+  }
+}
+
+const PART_TEXT = {
+  missing: 'Not sent yet',
+  sending: 'Sending…',
+  received: 'Received by Rehere, not saved yet',
+  failed: 'Failed',
+  unknown: 'Sending result unclear; it will be checked',
+};
+const FAILURES = { empty: 'the file is empty', size: 'the size did not match', hash: 'the content did not match', type: 'not a supported photo or recording type' };
+
+// Per-file progress of the unfinished save, from the server's own record.
+function renderIntake() {
+  const state = intake?.state;
+  if (!state) {
+    els.intakeStatus.replaceChildren();
+    return;
+  }
+  let photoNumber = 0;
+  const list = document.createElement('ul');
+  for (const part of state.parts) {
+    const row = intake.row(part.partId);
+    const item = document.createElement('li');
+    const label = part.kind === 'voice' ? 'The recording' : `Photo ${(photoNumber += 1)}`;
+    const failure = row.status === 'failed' ? `: ${FAILURES[part.error] ?? 'it could not be stored'}` : '';
+    item.textContent = `${label}${part.hints?.name ? ` (${part.hints.name})` : ''}: ${PART_TEXT[row.status] ?? PART_TEXT.missing}${failure}.`;
+    list.append(item);
+  }
+  const nodes = [list];
+  if (lostVoice) {
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.className = 'secondary';
+    drop.textContent = 'Remove the lost recording';
+    drop.addEventListener('click', () => {
+      lostVoice = null;
+      renderIntake();
+    });
+    const note = document.createElement('p');
+    note.textContent = 'The recording did not reach Rehere and cannot be recovered here. Remove it, or record a new one; a new recording starts with no uses allowed.';
+    nodes.push(note, drop);
+  }
+  if (!saving && !intake.pending) {
+    const discard = document.createElement('button');
+    discard.type = 'button';
+    discard.className = 'secondary';
+    discard.textContent = 'Discard this unfinished save';
+    discard.addEventListener('click', () => discardIntake(intake));
+    nodes.push(discard);
+  }
+  els.intakeStatus.replaceChildren(...nodes);
+}
+
+// Removes the server's copy of an unfinished save. The form keeps its content.
+async function discardIntake(session) {
+  const generation = sessionGeneration;
+  const outcome = await session.discard();
+  if (!stillOwner(generation)) return;
+  if (outcome.kind === 'saved') {
+    if (session === intake) settleIntake(outcome);
+    return;
+  }
+  if (outcome.kind !== 'discarded') {
+    setMessage(outcome.kind === 'unknown' ? 'Rehere could not confirm the discard. Try again.' : outcome.message);
+    return;
+  }
+  if (session === intake) {
+    intake = null;
+    lostVoice = null;
+    setMessage('The unfinished save was discarded. Your form is unchanged; saving again starts a new one.', 'success');
+  }
+  renderIntake();
+  offerResume();
 }
 
 async function loadSaved() {
@@ -512,6 +677,7 @@ els.photoInput.addEventListener('change', () => {
 });
 els.text.addEventListener('input', () => {
   els.textCount.textContent = els.text.value.length.toLocaleString('en-US');
+  updateResumeLabels();
 });
 els.record.addEventListener('click', () => {
   setMessage('');
@@ -537,13 +703,198 @@ function clearViewer() {
   stopViewerVoice();
 }
 
-function startOwner() {
+function startOwner(principal) {
   // A session answer that arrives while a visit is open never starts the app.
   if (visiting) return;
   ownerActive = true;
+  ownerId = principal?.id ?? null;
+  intakeAbort = new AbortController();
   els.ownerApp.hidden = false;
   route();
   loadSaved();
+  offerResume();
+}
+
+// Unsent input includes a take in progress: asking for the microphone,
+// recording or finishing, as well as a finished recording.
+const TAKE_STATES = new Set(['requesting', 'recording', 'finalizing', 'recorded']);
+function formHasContent() {
+  const { state, recording } = recorder.snapshot();
+  return photos.length > 0 || els.text.value.trim() !== '' || Boolean(recording) || TAKE_STATES.has(state);
+}
+
+// After sign-in: settle saves this browser was waiting on, then offer every
+// unfinished save the server holds. Nothing is loaded until the person
+// chooses Resume, and resuming over unsent input says so on the button.
+async function offerResume() {
+  const generation = sessionGeneration;
+  const api = intakeApi(globalThis.fetch.bind(globalThis), intakeAbort?.signal);
+  const ids = intakeIds();
+  try {
+    const listed = await api.list();
+    if (!stillOwner(generation)) return;
+    const open = listed.ok && Array.isArray(listed.body) ? listed.body.filter(isOpenState) : [];
+    for (const { intakeId } of ids.read()) {
+      if (open.some((state) => state.id === intakeId)) continue;
+      const result = await api.read(intakeId);
+      if (!stillOwner(generation)) return;
+      if (result.status === 404 || (isTerminalState(result.body) && result.body.status === 'discarded')) ids.remove(intakeId);
+      else if (isTerminalState(result.body) && result.body.status === 'committed') {
+        ids.remove(intakeId);
+        setMessage(savedNotice(result.body.draftId), 'success');
+        loadSaved();
+      }
+    }
+    renderResume(open.filter((state) => state.id !== intake?.intakeId));
+  } catch (error) {
+    if (error?.name !== 'AbortError') throw error;
+  }
+}
+
+// Each Resume button says whether it replaces what the form holds now, and
+// follows the form as it changes, so resuming never overwrites it silently.
+function updateResumeLabels() {
+  for (const button of offerButtons) button.disabled = restoring || saving;
+  if (resumeButtons.length === 0) return;
+  const replaces = formHasContent();
+  for (const button of resumeButtons) button.textContent = replaces ? 'Resume it (replaces what is in the form now)' : 'Resume it';
+}
+
+function renderResume(open) {
+  resumeButtons = [];
+  offerButtons = [];
+  els.intakeResume.replaceChildren(
+    ...open.map((state) => {
+      const received = state.parts.filter((part) => part.status === 'received').length;
+      const box = document.createElement('div');
+      box.className = 'panel';
+      const text = document.createElement('p');
+      text.textContent = `An unfinished save from ${formatDate(state.updatedAt ?? state.createdAt)}: ${received} of ${state.parts.length} files reached Rehere. They are kept there, not saved as a memory, until you finish or discard it.`;
+      const resume = document.createElement('button');
+      resume.type = 'button';
+      resume.addEventListener('click', () => resumeIntake(state.id));
+      resumeButtons.push(resume);
+      const discard = document.createElement('button');
+      discard.type = 'button';
+      discard.className = 'secondary';
+      discard.textContent = 'Discard it';
+      discard.addEventListener('click', () => {
+        const session = newIntake();
+        session.resume(state);
+        discardIntake(session);
+      });
+      const later = document.createElement('button');
+      later.type = 'button';
+      later.className = 'secondary';
+      later.textContent = 'Not now';
+      later.addEventListener('click', () => box.remove());
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      actions.append(later, discard, resume);
+      offerButtons.push(discard, resume);
+      box.append(text, actions);
+      return box;
+    }),
+  );
+  updateResumeLabels();
+}
+
+// Loads one unfinished save into the form: only parts the server received
+// come back as files; the rest are shown as not received. Source settings
+// and recorded file dates are kept exactly; a recording never touches the
+// microphone or plays.
+async function resumeIntake(id) {
+  if (saving || restoring) return;
+  restoring = true;
+  renderActions();
+  const generation = sessionGeneration;
+  const api = intakeApi(globalThis.fetch.bind(globalThis), intakeAbort?.signal);
+  try {
+    const read = await api.read(id);
+    if (!stillOwner(generation)) return;
+    if (!read.ok || !isOpenState(read.body)) {
+      if (isTerminalState(read.body) && read.body.status === 'committed') setMessage(savedNotice(read.body.draftId), 'success');
+      else if (read.ok || read.status === 404) setMessage('That unfinished save is no longer available.');
+      else setMessage('Rehere could not read that unfinished save. Nothing in the form was changed; try again.');
+      offerResume();
+      return;
+    }
+    const state = read.body;
+    const bytes = new Map();
+    for (const part of state.parts) {
+      if (part.status !== 'received') continue;
+      const blob = await api.partBytes(state.id, part.partId);
+      if (!stillOwner(generation)) return;
+      if (blob) bytes.set(part.partId, blob);
+    }
+    // The server's record decides what arrived. If a file it received cannot
+    // be downloaded now, nothing is restored and the form is left as it was.
+    const received = state.parts.filter((part) => part.status === 'received');
+    const unread = received.filter((part) => !bytes.has(part.partId)).length;
+    if (unread) {
+      setMessage(`Resuming could not finish: ${unread} of the ${received.length} file${received.length === 1 ? '' : 's'} Rehere received could not be downloaded just now. They are still kept by Rehere, and nothing in the form was changed. Try Resume again.`);
+      offerResume();
+      return;
+    }
+    resetForm();
+    const photoParts = state.parts.filter((part) => part.kind === 'photo');
+    photoParts.forEach((part, index) => {
+      const input = state.metadata?.photos?.[index];
+      const blob = bytes.get(part.partId);
+      const lastModified = input?.dates?.fileModifiedAt ? Date.parse(input.dates.fileModifiedAt) : 0;
+      const file = blob ? new File([blob], part.hints.name || `photo-${index + 1}`, { type: part.detectedType || part.hints.type || blob.type, lastModified }) : null;
+      photos.push({
+        kind: 'photo',
+        file,
+        url: file ? URL.createObjectURL(file) : null,
+        missing: !file,
+        details: detailsFromSourceInput(input),
+        state: {},
+        partId: part.partId,
+        sha256: part.sha256,
+        size: part.size,
+        hints: part.hints,
+        keptInput: input ?? null,
+        identity: file ? { file, partId: part.partId } : null,
+      });
+    });
+    els.text.value = state.text;
+    els.textCount.textContent = state.text.length.toLocaleString('en-US');
+    if (state.metadata?.text) {
+      textSource = { details: detailsFromSourceInput(state.metadata.text), state: {} };
+      textKeptInput = state.metadata.text;
+    }
+    const voicePart = state.parts.find((part) => part.kind === 'voice');
+    if (voicePart) {
+      const blob = bytes.get(voicePart.partId);
+      const kept = { partId: voicePart.partId, sha256: voicePart.sha256, size: voicePart.size, hints: voicePart.hints, keptInput: state.metadata?.voice ?? null };
+      if (blob && recorder.restore(blob)) {
+        Object.assign(voiceSource.current.details, detailsFromSourceInput(state.metadata?.voice));
+        voiceItem = { kind: 'voice', file: blob, ...kept, identity: { file: blob, partId: voicePart.partId } };
+        renderVoiceSource();
+      } else {
+        lostVoice = { kind: 'voice', file: null, details: detailsFromSourceInput(state.metadata?.voice), ...kept };
+      }
+    }
+    intake = newIntake();
+    intake.resume(state);
+    renderPhotos();
+    renderTextSource();
+    renderVoice();
+    renderIntake();
+    els.intakeResume.replaceChildren();
+    const missing = state.parts.length - received.length;
+    setMessage(missing ? `Resumed. ${missing} file${missing === 1 ? '' : 's'} did not reach Rehere and must be chosen again or removed before saving.` : 'Resumed. Press Save to finish saving this memory.', 'success');
+  } catch (error) {
+    if (error?.name !== 'AbortError') throw error;
+  } finally {
+    // As for saving: a sign-out already reset the lock, and a restore from an
+    // earlier session never releases a later session's work.
+    if (generation === sessionGeneration) {
+      restoring = false;
+      renderActions();
+    }
+  }
 }
 
 // Removes everything private from the page and stops capture, synchronously,
@@ -552,9 +903,20 @@ function stopOwner() {
   stopAll();
   ownerActive = false;
   sessionGeneration += 1;
+  // Late intake answers are aborted and dropped; nothing private stays shown.
+  // The busy locks belong to this session and end with it.
+  intakeAbort?.abort();
+  intakeAbort = null;
+  saving = false;
+  restoring = false;
+  ownerId = null;
+  resumeButtons = [];
+  offerButtons = [];
+  els.intakeResume.replaceChildren();
   viewRequests.invalidate();
   closeSpace();
   resetForm();
+  renderActions();
   setMessage('');
   clearViewer();
   els.savedList.replaceChildren();

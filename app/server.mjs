@@ -7,6 +7,7 @@ import { AccessStore, isToken } from './access.mjs';
 import { CollaborationStore } from './collaboration.mjs';
 import { ShareStore, UNAVAILABLE as VISIT_UNAVAILABLE, isVisitToken } from './shares.mjs';
 import { createAudioDecoder } from './audio-derivative.mjs';
+import { INTAKE_LIMITS, IntakeStore } from './intakes.mjs';
 import { StoryStore } from './stories.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
@@ -44,6 +45,7 @@ const STATIC_FILES = new Map([
   ['/playback.js', ['playback.js', 'text/javascript; charset=utf-8']],
   ['/story-player.js', ['story-player.js', 'text/javascript; charset=utf-8']],
   ['/stories.js', ['stories.js', 'text/javascript; charset=utf-8']],
+  ['/intake.js', ['intake.js', 'text/javascript; charset=utf-8']],
   ['/scene-relations.js', ['scene-relations.js', 'text/javascript; charset=utf-8']],
   ['/arrangement.js', ['arrangement.js', 'text/javascript; charset=utf-8']],
 ]);
@@ -69,6 +71,9 @@ const ASSET_PATH = /^\/api\/drafts\/([^/]+)\/assets\/([^/]+)$/;
 const DRAFT_PATH = /^\/api\/drafts\/([^/]+)$/;
 const SOURCE_SIZE_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/image-size$/;
 const SOURCE_POLICY_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/policy$/;
+const INTAKE_PATH = /^\/api\/intakes\/([^/]+)$/;
+const INTAKE_ACTION_PATH = /^\/api\/intakes\/([^/]+)\/(plan|commit|discard)$/;
+const INTAKE_PART_PATH = /^\/api\/intakes\/([^/]+)\/parts\/([^/]+)$/;
 const JOBS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions$/;
 const JOB_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)$/;
 const JOB_EDIT_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/edit$/;
@@ -328,6 +333,7 @@ export function createAppServer({
   });
   const collaboration = new CollaborationStore({ reconstructions });
   const stories = new StoryStore({ reconstructions, audioDecoder });
+  const intakes = new IntakeStore({ dataDir, drafts: store });
   const shares = new ShareStore({ reconstructions, stories });
 
   // Visitor routes authenticate only with a Bearer visit token; cookies and
@@ -718,6 +724,64 @@ export function createAppServer({
 
     // Draft reads always go through the current source-use projection, so
     // stopped material never appears in a draft, its summary or a preview.
+    // Resumable input: owner-only intakes, created by an explicit Save.
+    if (pathname === '/api/intakes' && reading) {
+      sendJson(res, 200, await intakes.list());
+      return;
+    }
+    if (pathname === '/api/intakes' && req.method === 'POST') {
+      const { status, intake } = await intakes.create(owner, await readJsonBody(req, INTAKE_LIMITS.bodyBytes));
+      sendJson(res, status, intake);
+      return;
+    }
+    const intakeOnly = INTAKE_PATH.exec(pathname);
+    const intakeAction = INTAKE_ACTION_PATH.exec(pathname);
+    const intakePart = INTAKE_PART_PATH.exec(pathname);
+    if (intakeOnly || intakeAction || intakePart) {
+      const intakeId = (intakeOnly ?? intakeAction ?? intakePart)[1];
+      const partId = intakePart?.[2] ?? null;
+      const action = intakeAction?.[2] ?? null;
+      if (!UUID.test(intakeId) || (partId !== null && !UUID.test(partId))) throw new RequestError(404, 'This upload could not be found.');
+      if (partId !== null && reading) {
+        sendAsset(req, res, await intakes.partAsset(intakeId, partId));
+        return;
+      }
+      if (partId !== null && req.method === 'POST') {
+        if (!/^application\/octet-stream(?:;|$)/i.test(req.headers['content-type'] ?? '')) throw new RequestError(415, 'The file could not be read.');
+        // The cap comes from the planned kind and is checked before any byte is buffered.
+        const cap = await intakes.partCap(intakeId, partId);
+        const declared = Number(req.headers['content-length']);
+        let bytes;
+        try {
+          if (declared > cap) throw new RequestError(413, 'too large');
+          bytes = await readBody(req, cap);
+        } catch (error) {
+          if (!(error instanceof RequestError)) throw error;
+          await intakes.refusePart(intakeId, partId, 'size');
+          throw new RequestError(413, 'This file is larger than allowed for its kind.');
+        }
+        sendJson(res, 200, await intakes.receivePart(intakeId, partId, bytes));
+        return;
+      }
+      if (intakeOnly) {
+        if (!reading) throw new RequestError(405, 'Method not allowed.');
+        sendJson(res, 200, await intakes.get(intakeId));
+        return;
+      }
+      if (req.method !== 'POST' || partId !== null) throw new RequestError(405, 'Method not allowed.');
+      if (action === 'plan') {
+        sendJson(res, 200, await intakes.plan(intakeId, await readJsonBody(req, INTAKE_LIMITS.bodyBytes)));
+        return;
+      }
+      if (action === 'commit') {
+        const { status, intake } = await intakes.commit(intakeId, owner, await readJsonBody(req));
+        sendJson(res, status, intake);
+        return;
+      }
+      sendJson(res, 200, await intakes.discard(intakeId, await readJsonBody(req)));
+      return;
+    }
+
     const policies = reconstructions.sourcePolicies;
     if (pathname === '/api/drafts' && req.method === 'POST') {
       const draft = await store.create(await parseDraft(await readForm(req, limits.requestBytes), limits));

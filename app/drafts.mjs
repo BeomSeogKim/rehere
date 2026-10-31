@@ -16,6 +16,7 @@ export const LIMITS = Object.freeze({
 });
 
 const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const INTAKE_RECEIPT = 'intake-receipt.json';
 const FIELDS = new Set(['text', 'photos', 'voice', 'metadata']);
 
 export class RequestError extends Error {
@@ -49,6 +50,17 @@ function voiceType(bytes) {
   if (ascii(bytes, 0, 4) === 'OggS') return { type: 'audio/ogg', extension: 'ogg' };
   if (ascii(bytes, 4, 8) === 'ftyp' && !isHeif(bytes)) return { type: 'audio/mp4', extension: 'm4a' };
   return null;
+}
+
+// The detected type of one photo or voice file, or a fixed refusal message.
+// Shared with resumable intakes so both paths accept exactly the same files.
+export function detectMedia(kind, bytes) {
+  if (kind === 'photo') {
+    const detected = photoType(bytes);
+    if (detected) return detected;
+    return { error: isHeif(bytes) ? 'HEIC photos are not supported yet. Please export the photo as JPEG or PNG.' : 'Photos must be JPEG or PNG images.' };
+  }
+  return voiceType(bytes) ?? { error: 'The voice recording could not be read.' };
 }
 
 async function readPhoto(file, limits) {
@@ -129,8 +141,9 @@ export class DraftStore {
 
   // Files are written to a private folder and renamed into place last, so a
   // failed save leaves no partial draft and existing drafts are never touched.
-  async create({ text, photos, voice, sources }) {
-    const id = randomUUID();
+  // An intake commit passes its reserved ID and a receipt, which lands in the
+  // same rename as draft.json; the receipt is never listed or served.
+  async create({ text, photos, voice, sources }, { id = randomUUID(), receipt = null } = {}) {
     const staging = path.join(this.tempDir, id);
     const draft = {
       id,
@@ -168,6 +181,7 @@ export class DraftStore {
         const sourceId = addSource('voice', sources.voice, { name, bytes: voice.bytes, type: voice.type });
         draft.voice = { name, type: voice.type, size: voice.bytes.length, sourceId };
       }
+      if (receipt) await writeFile(path.join(staging, INTAKE_RECEIPT), JSON.stringify(receipt, null, 2), { mode: 0o600 });
       await writeFile(path.join(staging, 'draft.json'), JSON.stringify(draft, null, 2));
       await mkdir(this.draftsDir, { recursive: true });
       await rename(staging, path.join(this.draftsDir, id));

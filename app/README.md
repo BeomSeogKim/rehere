@@ -15,10 +15,14 @@ presses Record, and declining it never blocks saving.
   discards the recording. A pending microphone request never blocks saving.
   Opening a saved memory cancels a pending microphone request and stops an
   active recording, keeping the finished recording in the form.
-- **Save** reports success only after the server has stored every file. A
-  failed save keeps all selected photos, writing and the recording for retry.
-  When the response is lost, the page says it cannot confirm the save and
-  asks the person to check the saved list before retrying.
+- **Save** sends files separately and reports success only after the final
+  memory is committed. A failed file leaves received files in place; remove,
+  replace or retry it without sending successful files again. An unclear
+  response is checked against the same unfinished save before retrying.
+- After a refresh, explicitly resume an unfinished save from the server.
+  Received files, text and source settings return; files that never reached
+  the server must be selected again, removed or replaced. A missing recording
+  needs a new take. Temporary received files are labelled as not saved yet.
 - Saved memories are listed and can be reopened to view photos, read the text
   and play the recording. Saved memories cannot be edited.
 
@@ -50,7 +54,8 @@ and provider attribution accompany a converted playback copy, with explicit
 visitor selection and current withdrawal checks. See [recorded stories](STORIES.md).
 
 Not included: automatic transcription, multi-view alignment, photo or voice
-contributions, hosted account integration, and recovery of unsaved input.
+contributions, hosted account integration, and recovery of input that never
+reached the server.
 
 Saved visitor snapshots can include selected arrangements and permitted written
 recollections. Preview the actual visitor screen before issuing a local link;
@@ -97,6 +102,36 @@ failed save leaves no partial memory and does not affect earlier ones.
 | `GET /api/drafts/<id>` | One saved memory |
 | `GET /api/drafts/<id>/assets/<name>` | A file listed in that memory; supports byte ranges |
 
+The entry screen first creates an owner-private unfinished save under
+`data/intakes/<id>/`. Adding a file does not upload it; only Save starts the
+transfer. Each planned original has a stable part ID, byte count and SHA-256.
+Files are validated and acknowledged separately. Updating a plan checks its
+revision and keeps received parts with unchanged identities; changed originals
+need new IDs and start with no uses allowed. File names and modification times
+are display hints, never paths or source dates.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/intakes` | Start or reopen the same explicit Save using `requestId`, raw `text`, `parts` and `metadata` |
+| `GET /api/intakes` | Open unfinished saves, newest first |
+| `GET /api/intakes/<id>` | Current progress or a terminal saved/discarded receipt |
+| `POST /api/intakes/<id>/parts/<part>` | Send one planned original as `application/octet-stream` |
+| `GET /api/intakes/<id>/parts/<part>` | Received bytes of an active part of an open save; supports ranges |
+| `POST /api/intakes/<id>/plan` | Update text, settings and active parts using `requestId` and `baseRevision` |
+| `POST /api/intakes/<id>/commit` | Commit all received originals using `requestId` and `baseRevision` |
+| `POST /api/intakes/<id>/discard` | Explicitly discard temporary progress using `requestId` |
+
+Finalization rechecks the originals and atomically stores one ordinary draft
+with a private receipt. A lost response or a process restart resolves to that
+same draft. Terminal intake routes return identifiers and receipts only;
+content goes through the saved draft's current source-use controls. Temporary
+part access ends even when cleanup fails. Open progress has no automatic
+expiry; explicitly discard it when no longer needed. Browser storage holds
+only opaque pending IDs scoped to the owner, never text, files or source details.
+Unavailable browser storage still permits recovery from the server's open list.
+These guarantees coordinate one process and process restarts, without fsync
+or multi-process locking.
+
 ## Original sources and dates
 
 New drafts use `schemaVersion: 2` and contain a `sources` array. Each original
@@ -104,8 +139,9 @@ gets a server-generated source ID, kind, SHA-256 checksum, byte count and its
 source details. Photo and voice entries refer to those records through
 `sourceId`; `textSourceId` identifies the written original. Meaningful written
 text is preserved as received, including whitespace, and hashed as UTF-8.
-Multipart string fields normalize line breaks to CRLF during transport; the
-checksum describes that received original. No derived copy replaces an
+The entry screen sends text as JSON and preserves its line breaks. The legacy
+multipart endpoint normalizes string-field line breaks to CRLF during
+transport; its checksum describes that received original. No derived copy replaces an
 original. Derived assets have separate records and a reference to their
 original.
 
@@ -260,7 +296,7 @@ served at `/vendor/THREE-LICENSE`. The project license remains undecided.
 
 ## Upload limits
 
-These are transport limits for this endpoint, not the final upload-validation
+These are transport limits, not the final upload-validation
 policy. Supported formats, decoding checks and processing failures still need
 to be decided against the processing pipeline.
 
@@ -271,6 +307,10 @@ to be decided against the processing pipeline.
 | Voice | One recording, 50 MiB, WebM, Ogg or MP4 container by signature |
 | Text | 10,000 characters before trimming; whitespace-only text is empty |
 | Empty save | Refused unless there is a photo, text or a recording |
+
+An intake plan also limits aggregate original bytes to 64 MiB. Its create and
+plan-update JSON bodies are limited to 512 KiB; each file has the limits above.
+An empty planned file fails individually without losing received files.
 
 The five-minute recording length is enforced in the browser only. File content
 is checked by signature, not decoded.

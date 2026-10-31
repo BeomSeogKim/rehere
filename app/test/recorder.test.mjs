@@ -336,3 +336,32 @@ describe('voice recorder', () => {
     assert.deepEqual(seen, ['requesting', 'recording', 'finalizing', 'recorded']);
   });
 });
+
+describe('restoring a received recording', () => {
+  it('shows it as finished without asking for the microphone, and discarding it returns to idle', () => {
+    const r = setup();
+    const blob = new Blob(['voice'], { type: 'audio/webm' });
+    assert.equal(r.recorder.restore(blob), true);
+    assert.equal(r.requests.length, 0, 'no microphone request');
+    assert.equal(r.recorder.snapshot().state, 'recorded');
+    assert.equal(r.recorder.snapshot().recording, blob);
+    r.recorder.discard();
+    assert.equal(r.recorder.snapshot().state, 'idle');
+    assert.equal(r.recorder.snapshot().recording, null);
+  });
+
+  it('is refused during a take, and a browser that cannot record goes back to unavailable', async () => {
+    const r = setup();
+    r.recorder.start();
+    assert.equal(r.recorder.restore(new Blob(['voice'])), false, 'a take in progress is never replaced');
+    r.recorder.discard();
+    assert.equal(r.recorder.restore(new Blob([])), false, 'an empty recording is not restored');
+
+    const unsupported = createRecorder({});
+    const { message } = unsupported.snapshot();
+    assert.equal(unsupported.restore(new Blob(['voice'])), true);
+    assert.equal(unsupported.snapshot().state, 'recorded');
+    unsupported.discard();
+    assert.deepEqual([unsupported.snapshot().state, unsupported.snapshot().message], ['unavailable', message], 'Record does not become available');
+  });
+});
