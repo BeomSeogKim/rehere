@@ -154,9 +154,9 @@ describe('contributor screen', () => {
   it('uses only the scoped place list and own recollections, with every use unchecked', async () => {
     const ui = await mount();
     assert.deepEqual(requests.map((r) => r.url), ['/api/contributor/places', `${JOB_URL}/collaboration`]);
-    assert.equal(ui.checkboxes().length, 3);
+    assert.equal(ui.checkboxes().length, 6, 'three uses for the words and three for an optional photo');
     assert.ok(ui.checkboxes().every((box) => !box.checked));
-    assert.equal(ui.find((node) => node.tag === 'input' && node.type === 'file').length, 0, 'no photo upload');
+    assert.equal(ui.find((node) => node.tag === 'input' && node.type === 'file').length, 1, 'an optional photo, sent only with the recollection');
   });
 
   it('sends the raw text with explicit grants and repeats exactly after an unconfirmed send', async () => {
@@ -172,7 +172,7 @@ describe('contributor screen', () => {
     assert.match(ui.message(), /could not confirm whether it arrived/);
     assert.equal(text.value, '  The counter faced the window.\n');
     routes[`POST ${JOB_URL}/contributions`] = () => Promise.resolve(json(201, contribution()));
-    ui.button('Send recollection').dispatch('click');
+    ui.button('Send again (same request)').dispatch('click');
     await settle();
     const [first, second] = posts(`${JOB_URL}/contributions`);
     assert.deepEqual(second.body, first.body);

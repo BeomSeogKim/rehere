@@ -410,3 +410,81 @@ describe('a blocked two-object scene', () => {
     assert.deepEqual(sent.body, { requestId: sent.body.requestId, baseVersion: 3, targetVersion: 2, ruleChangeConfirmed: true });
   });
 });
+
+describe('sharing follows the recollection panel', () => {
+  it('offers a newly saved photo-backed alternative and its photo without reloading', async () => {
+    const PHOTO_URL = `${JOB_URL}/contributions/${CID}/photo`;
+    const VID = '4e4e4e4e-4e4e-4e4e-8e4e-4e4e4e4e4e4e';
+    const entry = (overrides = {}) => ({
+      id: CID,
+      principalId: 'p',
+      provider: { displayName: 'Mina' },
+      kind: 'human_recollection',
+      text: 'The flour stood further left.',
+      textSha256: 'a'.repeat(64),
+      permissions: { place: true, model: false, share: true },
+      periodClaim: null,
+      createdAt: '2026-11-01T00:00:00.000Z',
+      revision: 1,
+      status: 'submitted',
+      review: null,
+      withdrawnAt: null,
+      photo: { available: true, type: 'image/jpeg', width: 400, height: 300, review: { width: 400, height: 300 }, origin: { kind: 'own', reference: '' }, dates: null, permissions: { place: true, model: false, share: true }, receivedAt: '2026-11-01T00:00:00.000Z', url: PHOTO_URL },
+      ...overrides,
+    });
+    routes[`GET ${JOB_URL}/collaboration`] = () => Promise.resolve(json(200, { contributions: [entry()], variants: [], blocked: false }));
+    routes[`GET ${PHOTO_URL}`] = () => Promise.resolve({ status: 200, ok: true, json: async () => ({}), blob: async () => new Blob(['jpeg'], { type: 'image/jpeg' }) });
+    const ui = await open();
+    const historyReads = () => requests.filter((r) => r.url === `${JOB_URL}/history` && r.method === 'GET').length;
+    const before = historyReads();
+    const sharePanel = () => ui.find((node) => node.tag === 'details' && /Share a saved view with visitors/.test(node.textContent))[0];
+    assert.match(sharePanel().textContent, /No contributor photo can be shown with the chosen views\./);
+    assert.doesNotMatch(sharePanel().textContent, /Mina’s alternative/);
+
+    // The owner keeps the recollection as an alternative, set by hand from the photo.
+    ui.button('Review').dispatch('click');
+    const decision = ui.find((node) => node.tag === 'select' && node.children.some((option) => option.value === 'alternative'))[0];
+    decision.value = 'alternative';
+    decision.dispatch('change');
+    ui.button('B: Flour stack').dispatch('click');
+    await settle();
+    ui.find((node) => node.tag === 'img' && node.alt === 'Photo supplied by Mina')[0].dispatch('load');
+    const ack = ui.find((node) => node.tag === 'label' && /I compared this photo with the current scene myself/.test(node.textContent))[0].children[0];
+    ack.checked = true;
+    ack.dispatch('change');
+    const x = ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === 'Candidate Left / right')[0];
+    x.value = '-0.4';
+    x.dispatch('input');
+    ui.button('Preview candidate on the scene').dispatch('click');
+    routes[`POST ${JOB_URL}/contributions/${CID}/review`] = () => {
+      routes[`GET ${JOB_URL}/collaboration`] = () =>
+        Promise.resolve(json(200, { contributions: [entry({ status: 'alternative' })], variants: [{ id: VID, label: 'Mina’s alternative', parentVersion: 1, edit: { objects: arrangement().objects, relationship: null }, contributionIds: [CID], era: null, eraRevision: 0, blocked: false }], blocked: false }));
+      return Promise.resolve(json(200, { contribution: entry({ status: 'alternative' }) }));
+    };
+    ui.button('Save decision').dispatch('click');
+    await settle();
+    assert.equal(ui.posts(`/contributions/${CID}/review`)[0].body.photoReviewed, true);
+
+    assert.equal(historyReads(), before + 1, 'the share choices were read again once, after the change');
+    const views = ui.find((node) => node.tag === 'fieldset' && node.children[0]?.textContent === 'Views to share')[0];
+    const alternative = views.findAll((node) => node.tag === 'label' && /Mina’s alternative/.test(node.textContent))[0];
+    assert.ok(alternative, 'the new alternative is offered');
+    alternative.children[0].checked = true;
+    alternative.children[0].dispatch('change');
+    assert.match(sharePanel().textContent, /Photo supplied by Mina/, 'and its photo can be shown');
+  });
+
+  it('does not reread the share choices for the first read or after the scene closes', async () => {
+    let release;
+    const ui = await open();
+    const historyReads = () => requests.filter((r) => r.url === `${JOB_URL}/history` && r.method === 'GET').length;
+    const before = historyReads();
+    assert.equal(before, 3, 'opening reads history once each for memory, stories and sharing: the first recollection read is not a change');
+    routes[`GET ${JOB_URL}/collaboration`] = () => new Promise((resolve) => (release = () => resolve(json(200, { contributions: [], variants: [{ id: 'late', label: 'Late', contributionIds: [], blocked: false, eraRevision: 0, era: null }], blocked: false }))));
+    ui.button('Refresh').dispatch('click');
+    for (const space of mounted.splice(0)) space.dispose();
+    release();
+    await settle();
+    assert.equal(historyReads(), before, 'a late answer for a closed scene changes nothing');
+  });
+});

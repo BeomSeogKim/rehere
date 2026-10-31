@@ -179,7 +179,7 @@ describe('contributions', () => {
     assert.deepEqual({ ...submitted, id: null, createdAt: null }, {
       id: null, principalId: ctx.alex.id, provider: { displayName: 'Alex' }, kind: 'human_recollection', text, periodClaim: 'Around a summer',
       textSha256: sha256(Buffer.from(text, 'utf8')), permissions: { place: true, model: false, share: false }, createdAt: null,
-      revision: 1, status: 'submitted', review: null, withdrawnAt: null,
+      revision: 1, status: 'submitted', review: null, withdrawnAt: null, requestId, photo: null,
     });
     assert.deepEqual(await ctx.collaboration.submit(ctx.draftId, ctx.jobId, ctx.alex, body), submitted);
     await assert.rejects(ctx.collaboration.submit(ctx.draftId, ctx.jobId, ctx.alex, { ...body, text: 'Changed.' }), status(409));
@@ -489,7 +489,8 @@ describe('dependencies and withdrawal', () => {
       redacted(list.find((item) => item.id === pending.id), pending.id);
       redacted(await store.proposal(ctx.draftId, ctx.jobId, applied.id), applied.id);
       redacted(await store.createProposal(ctx.draftId, ctx.jobId, createBody), pending.id);
-      redacted((await store.applyProposal(ctx.draftId, ctx.jobId, applied.id, applyBody)).proposal, applied.id);
+      // A replayed apply never returns the withdrawn version's geometry.
+      await assert.rejects(store.applyProposal(ctx.draftId, ctx.jobId, applied.id, applyBody), (error) => error.status === 409 && /withdrawn/.test(error.message));
     };
     await check(ctx.reconstructions);
     await ctx.reconstructions.close();

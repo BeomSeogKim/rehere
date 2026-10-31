@@ -41,8 +41,11 @@ model reconstruction from one photograph, not a complete room or calibrated
 geometry. A scene can instead hold exactly two named objects that are confirmed,
 moved and related separately; see [two objects](OBJECTS.md).
 
-Scoped contributors can submit written recollections. Owners can preview a
-manual change, adopt it or preserve an alternative, and record a separate
+Scoped contributors can submit written recollections with an optional photo.
+The photo retains its own original, source facts and default-off uses; private
+review and explicitly selected visitor evidence use a metadata-stripped copy.
+Owners can preview a manual change, adopt it or preserve an alternative, and
+record a separate
 explicit time assertion. Withdrawal blocks dependent spatial uses. See the
 [collaboration guide](COLLABORATION.md) for grants, review and restoration.
 
@@ -53,7 +56,7 @@ Human-supplied captions
 and provider attribution accompany a converted playback copy, with explicit
 visitor selection and current withdrawal checks. See [recorded stories](STORIES.md).
 
-Not included: automatic transcription, multi-view alignment, photo or voice
+Not included: automatic transcription, multi-view alignment, voice
 contributions, hosted account integration, and recovery of input that never
 reached the server.
 

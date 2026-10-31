@@ -5,7 +5,7 @@
 // explicitly. Recollections, photos and model reconstructions stay separate
 // kinds of evidence; none of them is shown as verified history.
 
-import { isCalendarDate } from './source-details.js';
+import { TEXT_LIMITS as SOURCE_LIMITS, isCalendarDate } from './source-details.js';
 
 export const TEXT_LIMIT = 10_000;
 export const PERIOD_LIMIT = 300;
@@ -34,6 +34,37 @@ const PERMISSION_LABELS = {
   share: 'Share with others',
 };
 const FINAL = new Set(['adopted', 'alternative', 'rejected', 'withdrawn']);
+
+// A contributor photo: one JPEG or PNG, recognised by its first bytes, up to
+// the raw limit. The server decodes it and remains the authority.
+export const PHOTO_LIMIT_MB = 20;
+const PHOTO_ORIGINS = { unknown: 'Not known', own: 'My own photo', public: 'A public source', other: 'Someone else' };
+export async function photoProblem(file) {
+  if (!file || file.size === 0) return 'That file is empty.';
+  if (file.size > PHOTO_LIMIT_MB * 1024 * 1024) return `Choose a photo of ${PHOTO_LIMIT_MB} MB or less.`;
+  const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  const jpeg = head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+  const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, i) => head[i] === byte);
+  return jpeg || png ? null : 'Choose a JPEG or PNG photo.';
+}
+export function photoFieldsProblem(photo) {
+  if (!photo) return null;
+  if (photo.origin.reference.length > SOURCE_LIMITS.reference) return `Keep the photo’s reference to ${SOURCE_LIMITS.reference.toLocaleString('en-US')} characters or fewer.`;
+  if (photo.dates.estimatedPeriod.length > SOURCE_LIMITS.estimatedPeriod) return `Keep the photo’s period to ${SOURCE_LIMITS.estimatedPeriod} characters or fewer.`;
+  if (photo.dates.capturedOn && !isCalendarDate(photo.dates.capturedOn)) return 'The photo’s date taken is not a real calendar date.';
+  return null;
+}
+// The contributor's own statements about the photo, as given; nothing here is
+// read from the file.
+function photoFactsText(photo) {
+  const facts = [`Where it comes from, as they say: ${PHOTO_ORIGINS[photo.origin?.kind] ?? 'not known'}${photo.origin?.reference ? ` (${photo.origin.reference})` : ''}.`];
+  if (photo.dates?.capturedOn) facts.push(`Date taken, as they say: ${photo.dates.capturedOn}.`);
+  if (photo.dates?.estimatedPeriod) facts.push(`Period, as they say: ${photo.dates.estimatedPeriod}.`);
+  return facts.join(' ');
+}
+// What a review form's photo depends on: its availability, address and uses.
+const photoBinding = (photo) => (photo ? JSON.stringify([photo.available === true, photo.url ?? null, photo.permissions ?? null]) : '');
+const photoUsesText = (photo) => grantsText(photo?.permissions).replace(/^Allowed:/, 'photo allowed:').replace(/^No uses allowed\./, 'no photo uses allowed.');
 
 function base64url(bytes) {
   let binary = '';
@@ -151,7 +182,9 @@ async function request(url, options = {}) {
 
 const postJson = (url, payload) =>
   request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
-const unclear = (result) => result.status === 0 || result.status >= 500;
+// No answer, a server error, or a refusal whose body is not Rehere's own
+// {error}: the outcome is unknown and the same request is repeated.
+const unclear = (result) => result.status === 0 || result.status >= 500 || (!result.ok && typeof result.body?.error !== 'string');
 const reasonOf = (result) => (typeof result.body?.error === 'string' ? result.body.error.trim() : '');
 const withReason = (result, note) => (reasonOf(result) ? `${reasonOf(result)} ${note}` : note);
 const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -182,24 +215,62 @@ function grantsText(permissions) {
 
 // ---------------------------------------------------------------- contributor
 
-// A contributor's own screen: choose a place, send a written recollection, see
-// what happened to it and withdraw it. No scene, photo, microphone or other
-// people's words are requested.
-export function mountContributor(container) {
+// A contributor's own screen: choose a place, send a written recollection
+// with at most one photo, see what happened to it and withdraw it. No scene,
+// microphone or other people's words are requested.
+//
+// A send whose outcome is unknown keeps its request ID until Rehere's record
+// of this contributor's own recollections shows whether it arrived: sending
+// again repeats that ID, and only an explicit new submission gets a new one.
+// The browser keeps only that opaque ID, per principal and place, never the
+// words, the photo, its name or its settings.
+export function mountContributor(container, { principal = null } = {}) {
   let disposed = false;
   let place = null;
   let generation = 0;
   // Each read of the own list carries a token; a write or a newer read makes
   // older reads stale, so a slow older answer cannot bring back withdrawn words.
   let readToken = 0;
-  const submitAttempt = attempts();
   const withdrawAttempt = attempts();
+  // The request ID of a send not known to have arrived, and what it held.
+  let pendingId = null;
+  let pendingInput = null;
+  // The exact attempt behind pendingId in this session: its input and file.
+  // "Send again" repeats it, whatever the form holds now.
+  let attempt = null;
+  let photoFile = null;
+  let previewUrl = null;
+  let ownUrls = [];
+  // Invalidates a photo check still reading a file, and own-list photo loads.
+  let selectToken = 0;
+  let ownToken = 0;
 
   const placeSelect = el('select');
   const text = el('textarea', { rows: 6, maxLength: TEXT_LIMIT });
   const period = el('input', { type: 'text', maxLength: PERIOD_LIMIT });
   const grants = Object.fromEntries(Object.keys(PERMISSION_LABELS).map((key) => [key, el('input', { type: 'checkbox' })]));
+  const photoInput = el('input', { type: 'file', accept: 'image/jpeg,image/png' });
+  const photoPreview = el('img', { className: 'space-proposal', alt: 'The photo you chose', hidden: true });
+  const removePhoto = el('button', { type: 'button', className: 'secondary', textContent: 'Remove photo', hidden: true });
+  const photoOrigin = select(Object.entries(PHOTO_ORIGINS), 'unknown');
+  const photoReference = el('input', { type: 'text', maxLength: SOURCE_LIMITS.reference });
+  const photoCaptured = el('input', { type: 'date' });
+  const photoPeriod = el('input', { type: 'text', maxLength: SOURCE_LIMITS.estimatedPeriod });
+  const photoGrants = Object.fromEntries(Object.keys(PERMISSION_LABELS).map((key) => [key, el('input', { type: 'checkbox' })]));
+  const photoFields = el('div', { hidden: true }, [
+    field('Where the photo comes from', photoOrigin),
+    field('Reference (optional)', photoReference, 'A link or note about where it came from.'),
+    field('Date taken (optional)', photoCaptured, 'Leave blank if unknown. Rehere does not read dates from the file.'),
+    field('Approximate period (optional)', photoPeriod, 'For example, summer 1998. Kept as you write it.'),
+    el('fieldset', { className: 'source-permissions' }, [
+      el('legend', { textContent: 'Allowed uses of your photo' }),
+      el('p', { className: 'hint', textContent: 'A use needs your permission for both your words and your photo.' }),
+      ...Object.entries(PERMISSION_LABELS).map(([key, label]) => el('label', {}, [photoGrants[key], ` ${label}`])),
+    ]),
+  ]);
   const send = el('button', { type: 'button', textContent: 'Send recollection' });
+  const startNew = el('button', { type: 'button', className: 'secondary', textContent: 'Start a new submission instead', hidden: true });
+  const uncertainNote = el('p', { className: 'hint' });
   const message = el('p', { className: 'form-message', role: 'alert' });
   const status = el('p', { className: 'hint', role: 'status' });
   const own = el('ul', { className: 'collab-list' });
@@ -207,10 +278,22 @@ export function mountContributor(container) {
     field('What you remember about this place', text, 'Your words are kept exactly as you write them. The owner may use them to adjust the scene by hand; nothing reads meaning from them automatically, and nothing here is checked as historical fact.'),
     field('When this was, as you remember it (optional)', period, 'Kept as your own words. It is not turned into a date.'),
     el('fieldset', { className: 'source-permissions' }, [
-      el('legend', { textContent: 'Allowed uses' }),
+      el('legend', { textContent: 'Allowed uses of your words' }),
       ...Object.entries(PERMISSION_LABELS).map(([key, label]) => el('label', {}, [grants[key], ` ${label}`])),
     ]),
-    el('div', { className: 'actions' }, [send]),
+    el('fieldset', { className: 'source-permissions' }, [
+      el('legend', { textContent: 'Add a photo (optional)' }),
+      el('p', {
+        className: 'hint',
+        textContent: `JPEG or PNG, up to ${PHOTO_LIMIT_MB} MB and 32 megapixels. If a PNG is not accepted, export it as a JPEG or an 8-bit PNG. Rehere keeps your original and shows the owner a copy without file details such as location. What the photo shows, such as faces or signs, is not hidden. Nothing is sent until you press Send.`,
+      }),
+      photoInput,
+      photoPreview,
+      el('div', { className: 'actions' }, [removePhoto]),
+      photoFields,
+    ]),
+    el('div', { className: 'actions' }, [startNew, send]),
+    uncertainNote,
     message,
     el('h2', { textContent: 'What you have sent' }),
     el('p', { className: 'hint', textContent: 'You see what happened to each recollection. The owner’s private review notes are not shared with you.' }),
@@ -228,17 +311,155 @@ export function mountContributor(container) {
 
   const scope = () => `/api/drafts/${place.draftId}/reconstructions/${place.jobId}`;
 
+  // Only an opaque ID, scoped to this principal and place; blocked storage
+  // simply keeps nothing.
+  const storeKey = () => (principal?.id && place ? `rehere:contribution-pending:${principal.id}:${place.draftId}:${place.jobId}` : null);
+  function storage() {
+    try {
+      return globalThis.localStorage ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function storePending(id) {
+    const key = storeKey();
+    if (!key) return;
+    try {
+      if (id) storage()?.setItem(key, id);
+      else storage()?.removeItem(key);
+    } catch {
+      // Recovery then relies on checking this session only.
+    }
+  }
+  function storedPending() {
+    const key = storeKey();
+    try {
+      const value = key ? storage()?.getItem(key) : null;
+      return typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+  // The ID is kept before a send starts; the person is offered the explicit
+  // choice between repeating it and starting anew only once it is uncertain.
+  function setPending(id, input = null) {
+    pendingId = id;
+    pendingInput = input;
+    storePending(id);
+    if (!id) {
+      attempt = null;
+      showUncertain(false);
+    }
+  }
+  function showUncertain(on) {
+    startNew.hidden = !on;
+    send.textContent = on ? 'Send again (same request)' : 'Send recollection';
+    uncertainNote.textContent = on && attempt ? 'Sending again repeats exactly what was sent before, including its photo. Any newer changes in the form stay there for a new submission.' : '';
+  }
+
+  function revokeOwn() {
+    ownToken += 1;
+    for (const url of ownUrls) URL.revokeObjectURL(url);
+    ownUrls = [];
+  }
+  // A different original starts with its facts unknown and every use off;
+  // re-choosing the same file keeps what was set for it. Text uses are kept.
+  function resetPhotoFacts() {
+    photoOrigin.value = 'unknown';
+    photoReference.value = '';
+    photoCaptured.value = '';
+    photoPeriod.value = '';
+    for (const box of Object.values(photoGrants)) box.checked = false;
+  }
+  function setPhoto(file) {
+    selectToken += 1;
+    if (file !== photoFile) resetPhotoFacts();
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = null;
+    photoFile = file;
+    if (file) {
+      previewUrl = URL.createObjectURL(file);
+      photoPreview.src = previewUrl;
+    } else {
+      photoPreview.removeAttribute?.('src');
+      photoInput.value = '';
+    }
+    photoPreview.hidden = !file;
+    removePhoto.hidden = !file;
+    photoFields.hidden = !file;
+  }
+  function clearForm() {
+    text.value = '';
+    period.value = '';
+    for (const box of [...Object.values(grants), ...Object.values(photoGrants)]) box.checked = false;
+    photoOrigin.value = 'unknown';
+    photoReference.value = '';
+    photoCaptured.value = '';
+    photoPeriod.value = '';
+    setPhoto(null);
+  }
+
+  photoInput.addEventListener('change', async () => {
+    const [file] = photoInput.files ?? [];
+    if (!file) return;
+    const mine = generation;
+    // A newer choice, a removal or closing makes this check stale.
+    const token = ++selectToken;
+    const problem = await photoProblem(file);
+    if (disposed || mine !== generation || token !== selectToken) return;
+    if (problem) {
+      // A refused choice leaves no photo: preview, input and what Send
+      // would send agree.
+      setPhoto(null);
+      message.textContent = problem;
+      return;
+    }
+    message.textContent = '';
+    setPhoto(file);
+  });
+  removePhoto.addEventListener('click', () => setPhoto(null));
+
+  // Loads one review copy for display; it is released on the next render.
+  async function photoImage(url, alt) {
+    const token = ownToken;
+    try {
+      const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      // A later render or closing already released this list.
+      if (disposed || token !== ownToken) return null;
+      const objectUrl = URL.createObjectURL(blob);
+      ownUrls.push(objectUrl);
+      return el('img', { className: 'space-proposal', src: objectUrl, alt });
+    } catch {
+      return null;
+    }
+  }
+
   function renderOwn(contributions) {
+    revokeOwn();
+    const mine = generation;
     own.replaceChildren(
       ...contributions.map((contribution) => {
         const item = el('li', {}, [
           el('p', { className: 'collab-status', textContent: contributionStatusText(contribution) }),
           contribution.text === null
-            ? el('p', { className: 'hint', textContent: 'The text is no longer shown.' })
+            ? el('p', { className: 'hint', textContent: contribution.photo ? 'Your words and photo are no longer shown or used.' : 'The text is no longer shown.' })
             : el('p', { className: 'memory-text', textContent: contribution.text }),
         ]);
         if (contribution.periodClaim) item.append(el('p', { className: 'hint', textContent: `Time as you remember it: ${contribution.periodClaim}` }));
         item.append(el('p', { className: 'hint', textContent: usesText(contribution) }));
+        if (contribution.photo && contribution.status !== 'withdrawn') {
+          item.append(el('p', { className: 'hint', textContent: `Your photo · ${photoUsesText(contribution.photo)}` }));
+          if (contribution.photo.available && contribution.photo.url) {
+            const slot = el('div');
+            item.append(slot);
+            photoImage(contribution.photo.url, 'Your photo, as the owner sees it, without file details').then((image) => {
+              if (disposed || mine !== generation) return;
+              slot.replaceChildren(image ?? el('p', { className: 'hint', textContent: 'The photo is not available now.' }));
+            });
+          } else item.append(el('p', { className: 'hint', textContent: 'The photo is not available now.' }));
+        }
         if (contribution.status !== 'withdrawn') item.append(withdrawControl(contribution));
         return item;
       }),
@@ -246,21 +467,20 @@ export function mountContributor(container) {
     status.textContent = contributions.length ? '' : 'Nothing sent yet.';
   }
 
-  // Withdrawal takes two presses: it hides the words and blocks every scene
-  // that used them.
+  // Withdrawal takes two presses: it hides the words and any photo and
+  // blocks every scene that used them.
   function withdrawControl(contribution) {
     const wrap = el('div', { className: 'actions' });
     const start = el('button', { type: 'button', className: 'secondary', textContent: 'Withdraw' });
     start.addEventListener('click', () => {
-      const confirm = el('button', { type: 'button', textContent: 'Withdraw this recollection' });
+      const confirm = el('button', { type: 'button', textContent: contribution.photo ? 'Withdraw this recollection and its photo' : 'Withdraw this recollection' });
       const cancel = el('button', { type: 'button', className: 'secondary', textContent: 'Keep it' });
       cancel.addEventListener('click', () => wrap.replaceChildren(start));
       confirm.addEventListener('click', () => withdraw(contribution, confirm));
       wrap.replaceChildren(
         el('p', {
           className: 'hint',
-          textContent:
-            'Rehere will stop showing and using these words, and any scene that depends on them will be blocked. Copies someone already saved outside Rehere cannot be removed from here.',
+          textContent: `Rehere will stop showing and using these words${contribution.photo ? ' and this photo' : ''}, and any scene that depends on them will be blocked. Copies someone already saved outside Rehere cannot be removed from here.`,
         }),
         cancel,
         confirm,
@@ -285,22 +505,55 @@ export function mountContributor(container) {
     }
     withdrawAttempt.settle();
     message.textContent = result.ok
-      ? 'Withdrawn. Rehere no longer shows or uses these words, and scenes that depended on them are blocked.'
+      ? `Withdrawn. Rehere no longer shows or uses these words${contribution.photo ? ' or this photo' : ''}, and scenes that depended on them are blocked.`
       : reasonOf(result) || 'The recollection could not be withdrawn.';
     await loadOwn();
   }
 
+  // Reads this contributor's own recollections. An unknown send is settled
+  // here: its request ID in the list means it arrived.
   async function loadOwn() {
     const mine = generation;
     const target = place;
     const token = ++readToken;
     const result = await request(`${scope()}/collaboration`);
-    if (disposed || mine !== generation || place !== target || token !== readToken) return;
+    if (disposed || mine !== generation || place !== target || token !== readToken) return null;
     if (!result.ok || !Array.isArray(result.body?.contributions)) {
       status.textContent = 'Your recollections could not be loaded. Try again later.';
-      return;
+      return null;
     }
     renderOwn(result.body.contributions);
+    if (pendingId && result.body.contributions.some((contribution) => contribution.requestId === pendingId)) {
+      const sameForm = pendingInput && sameJson(pendingInput, collect()) && (attempt?.file ?? null) === photoFile;
+      setPending(null);
+      if (sameForm) clearForm();
+      message.textContent = sameForm
+        ? 'Your earlier recollection arrived. The owner decides whether and how to use it.'
+        : 'Your earlier recollection arrived. Your newer changes are still in the form; send them as a new recollection if you want.';
+      return true;
+    }
+    return false;
+  }
+
+  function collect() {
+    return {
+      text: text.value,
+      periodClaim: period.value,
+      permissions: Object.fromEntries(Object.entries(grants).map(([key, box]) => [key, box.checked === true])),
+      photo: photoFile
+        ? {
+            origin: { kind: photoOrigin.value, reference: photoReference.value.trim() },
+            dates: {
+              capturedOn: photoCaptured.value || null,
+              fileCreatedAt: null,
+              // Informational only: when the file was last written, not when it was taken.
+              fileModifiedAt: Number.isFinite(photoFile.lastModified) && photoFile.lastModified > 0 ? new Date(photoFile.lastModified).toISOString() : null,
+              estimatedPeriod: photoPeriod.value.trim(),
+            },
+            permissions: Object.fromEntries(Object.entries(photoGrants).map(([key, box]) => [key, box.checked === true])),
+          }
+        : null,
+    };
   }
 
   function choose(next) {
@@ -310,45 +563,88 @@ export function mountContributor(container) {
     send.disabled = false;
     message.textContent = '';
     form.hidden = !place;
+    revokeOwn();
     own.replaceChildren();
-    if (place) loadOwn();
+    pendingId = null;
+    pendingInput = null;
+    // Another place's exact attempt never travels under this place's ID.
+    attempt = null;
+    const stored = place ? storedPending() : null;
+    setPending(stored);
+    showUncertain(Boolean(stored));
+    if (stored) message.textContent = 'An earlier recollection may not have reached Rehere. Checking…';
+    if (place) {
+      loadOwn().then((arrived) => {
+        if (arrived !== false || !pendingId || pendingId !== stored) return;
+        message.textContent =
+          'Rehere has no record of your earlier recollection yet. To retry it exactly, enter the same words and settings and choose the same photo, then press Send again. Or start a new submission.';
+      });
+    }
   }
 
   placeSelect.addEventListener('change', () => choose(placesById.get(placeSelect.value) ?? null));
+  startNew.addEventListener('click', () => {
+    setPending(null);
+    message.textContent = 'The next send starts a new submission with what the form holds now.';
+  });
   send.addEventListener('click', async () => {
     if (!place) return;
-    const input = {
-      text: text.value,
-      periodClaim: period.value,
-      permissions: Object.fromEntries(Object.entries(grants).map(([key, box]) => [key, box.checked === true])),
-    };
-    const problem = submissionProblem(input);
+    // An uncertain send from this session is repeated exactly as it was sent,
+    // file included; newer edits stay in the form for a new submission. After
+    // a reload only the ID is known, so the person re-enters the same input.
+    const current = attempt ?? { input: collect(), file: photoFile };
+    const problem = submissionProblem(current.input) ?? photoFieldsProblem(current.input.photo);
     if (problem) {
       message.textContent = problem;
       return;
     }
     const mine = generation;
     const target = place;
-    const body = submitAttempt.prepare(`${target.draftId}/${target.jobId}`, input, () => ({ requestId: crypto.randomUUID(), ...input }));
+    // An uncertain send is repeated with its own ID; a new ID only for new work.
+    const requestId = pendingId ?? crypto.randomUUID();
+    setPending(requestId, current.input);
+    attempt = current;
     send.disabled = true;
     readToken += 1;
-    const result = await postJson(`${scope()}/contributions`, body);
+    const { photo, ...words } = current.input;
+    let result;
+    if (photo) {
+      const form = new FormData();
+      form.append('payload', JSON.stringify({ requestId, ...words, photo }));
+      form.append('photo', current.file);
+      result = await request(`${scope()}/contributions/photo`, { method: 'POST', body: form });
+    } else {
+      result = await postJson(`${scope()}/contributions`, { requestId, ...words });
+    }
     if (disposed || mine !== generation || place !== target) return;
     send.disabled = false;
+    // A success without a readable contribution is not taken as sent.
+    if (result.ok && typeof result.body?.id !== 'string') result = { ...result, ok: false, status: 0 };
     if (unclear(result)) {
-      message.textContent = withReason(result, 'Rehere could not confirm whether it arrived. Your text is still here; sending again repeats the same request.');
+      showUncertain(true);
+      message.textContent = withReason(result, 'Rehere could not confirm whether it arrived. What you entered is still here; sending again repeats the same request.');
       return;
     }
-    submitAttempt.settle();
-    if (!result.ok) {
-      message.textContent = reasonOf(result) || 'The recollection could not be sent.';
+    if (result.ok) {
+      // Only a form still holding exactly what was sent is cleared.
+      const sameForm = sameJson(collect(), current.input) && photoFile === current.file;
+      setPending(null);
+      if (sameForm) clearForm();
+      message.textContent = sameForm ? 'Sent. The owner decides whether and how to use it.' : 'Your earlier recollection was sent. Your newer changes are still in the form; send them as a new recollection if you want.';
+      await loadOwn();
       return;
     }
-    text.value = '';
-    period.value = '';
-    for (const box of Object.values(grants)) box.checked = false;
-    message.textContent = 'Sent. The owner decides whether and how to use it.';
-    await loadOwn();
+    if (result.status === 409) {
+      // Busy, or the same request already holds something: the record decides.
+      if (await loadOwn()) return;
+      if (disposed || mine !== generation || place !== target) return;
+      showUncertain(true);
+      message.textContent = `${reasonOf(result) || 'Rehere could not accept it right now.'} It is not in your recollections yet. Send again to repeat the same request, or start a new submission.`;
+      return;
+    }
+    // A definite refusal: nothing was kept for this request.
+    setPending(null);
+    message.textContent = `${reasonOf(result) || 'The recollection could not be sent.'}${photo ? ' If the photo is not accepted, export it as a JPEG or an 8-bit PNG and try again.' : ''}`;
   });
 
   const placesById = new Map();
@@ -374,12 +670,12 @@ export function mountContributor(container) {
     dispose() {
       disposed = true;
       generation += 1;
+      revokeOwn();
+      setPhoto(null);
       container.replaceChildren();
     },
   };
 }
-
-// ---------------------------------------------------------------- invitations
 
 // Owner-only invitations for one place. The one-use code is generated here and
 // kept in memory until the owner closes it; it never goes into a URL or
@@ -486,7 +782,8 @@ export function mountInvitations(container, { draftId }) {
 // The owner's panel inside a ready scene. bridge: { jobUrl, editor(),
 // showTransform(transform|null) -> boolean (true only when the 3D view drew
 // it), setLocked(boolean), saved(edit), unconfirmed(), conflict(), blocked(),
-// targets? }. targets, only on two-object scenes: { selected() -> id | null,
+// targets?, onChanged? }. onChanged() is called after a fresh read finds the
+// recollections or alternatives changed. targets, only on two-object scenes: { selected() -> id | null,
 // nameOf(id), describe(arrangement) }; a candidate then moves the selected
 // object and carries its targetId, and editor() is that object's saved state.
 // blocked() is called once when a refresh finds the current scene blocked, so
@@ -501,6 +798,16 @@ export function mountCollaboration(container, bridge) {
   // alternative. Only one at a time; cleared before anything else is shown.
   let showing = null;
   let blockedReported = false;
+  let lastSeen = null;
+  // The review copy shown in the open review form; released when that form
+  // is replaced or the panel closes, and late loads are dropped.
+  let reviewPhotoUrl = null;
+  let reviewPhotoToken = 0;
+  const releaseReviewPhoto = () => {
+    reviewPhotoToken += 1;
+    if (reviewPhotoUrl) URL.revokeObjectURL(reviewPhotoUrl);
+    reviewPhotoUrl = null;
+  };
   const reviewAttempt = attempts();
   const eraAttempt = attempts();
   // Forms are kept while their record is unchanged, so typed input and a
@@ -570,6 +877,7 @@ export function mountCollaboration(container, bridge) {
         ]);
         if (entry.periodClaim && entry.text !== null) item.append(el('p', { className: 'hint', textContent: `Time as they remember it (their words, not checked): ${entry.periodClaim}` }));
         item.append(el('p', { className: 'hint', textContent: usesText(entry) }));
+        if (entry.photo && entry.status !== 'withdrawn') item.append(el('p', { className: 'hint', textContent: `Photo included · ${photoUsesText(entry.photo)}` }));
         // Only what the owner actually recorded; nothing for a withdrawn entry.
         const notes = [];
         if (entry.status !== 'withdrawn' && entry.review?.reason) notes.push(`Your note: ${entry.review.reason}`);
@@ -588,15 +896,89 @@ export function mountCollaboration(container, bridge) {
     const entry = contribution();
     if (!entry || FINAL.has(entry.status)) {
       reviewForm = null;
+      releaseReviewPhoto();
       review.replaceChildren();
       return;
     }
-    if (reviewForm && reviewForm.id === entry.id && reviewForm.revision === entry.revision && reviewForm.status === entry.status) {
+    // The photo binding is part of what the form was built for: a photo that
+    // became unavailable or changed rebuilds it, dropping the old image, the
+    // acknowledgment and any candidate shown on the scene.
+    const photoKey = photoBinding(entry.photo);
+    if (reviewForm && reviewForm.id === entry.id && reviewForm.revision === entry.revision && reviewForm.status === entry.status && reviewForm.photoKey === photoKey) {
       reviewForm.refreshControls();
       return;
     }
+    if (reviewForm && reviewForm.id === entry.id && reviewForm.photoKey !== photoKey && showing?.kind === 'candidate') stopShowing();
+    releaseReviewPhoto();
     const editor = bridge.editor();
     const decision = select(DECISIONS.map((value) => [value, DECISION_LABELS[value]]), 'reviewing');
+    // A photo-backed recollection: its review copy is shown beside the scene,
+    // loaded only now, and a change from it needs the owner's own comparison.
+    const photo = entry.photo ?? null;
+    let photoState = photo ? (photo.available && photo.url ? 'loading' : 'unavailable') : 'none';
+    const photoAck = el('input', { type: 'checkbox' });
+    const photoSlot = el('div');
+    const photoBox = photo
+      ? el('figure', { className: 'anchor-figure' }, [
+          photoSlot,
+          el('figcaption', { className: 'hint', textContent: `Photo supplied by ${providerName(entry)}, shown without file details. ${photoFactsText(photo)} Not checked as historical fact; Rehere does not compare it with the scene.` }),
+          el('label', { className: 'memory-consent' }, [photoAck, ' I compared this photo with the current scene myself; the position I set is my own judgment, not matched automatically']),
+        ])
+      : null;
+    if (photoState === 'loading') {
+      const token = reviewPhotoToken;
+      photoSlot.replaceChildren(el('p', { className: 'hint', textContent: 'Loading the photo…' }));
+      (async () => {
+        let url = null;
+        try {
+          const response = await fetch(photo.url, { credentials: 'same-origin', cache: 'no-store' });
+          if (response.ok) url = URL.createObjectURL(await response.blob());
+        } catch {
+          url = null;
+        }
+        if (disposed || token !== reviewPhotoToken) {
+          if (url) URL.revokeObjectURL(url);
+          return;
+        }
+        reviewPhotoUrl = url;
+        const unavailable = () => {
+          photoState = 'unavailable';
+          photoAck.checked = false;
+          if (showing?.kind === 'candidate') stopShowing();
+          photoSlot.replaceChildren(el('p', { className: 'hint', textContent: 'This photo is not available now, so it cannot support a change. You can hold or decline it.' }));
+          reviewForm?.refreshControls();
+        };
+        if (!url) {
+          unavailable();
+          return;
+        }
+        // Loaded means the image actually decoded and is on screen; a broken
+        // image is unavailable and undoes the acknowledgment.
+        const image = el('img', { className: 'space-proposal', src: url, alt: `Photo supplied by ${providerName(entry)}`, hidden: true });
+        image.addEventListener('load', () => {
+          if (disposed || token !== reviewPhotoToken) return;
+          image.hidden = false;
+          photoState = 'loaded';
+          photoSlot.replaceChildren(image);
+          reviewForm?.refreshControls();
+        });
+        image.addEventListener('error', () => {
+          if (disposed || token !== reviewPhotoToken) return;
+          unavailable();
+        });
+        photoSlot.append(image);
+      })();
+    } else if (photoState === 'unavailable') {
+      photoSlot.replaceChildren(el('p', { className: 'hint', textContent: 'This photo is not available now, so it cannot support a change. You can hold or decline it.' }));
+    }
+    const photoProblemText = () => {
+      if (!photo) return '';
+      if (photo.permissions?.place !== true) return 'The photo’s provider did not allow use to reconstruct the place, so this recollection cannot change the scene. You can hold or decline it.';
+      if (photoState === 'loading') return 'Loading the photo…';
+      if (photoState !== 'loaded') return 'This photo is not available now, so it cannot support a change. You can hold or decline it.';
+      if (photoAck.checked !== true) return 'Confirm that you compared the photo with the scene yourself before previewing or saving.';
+      return '';
+    };
     const reason = el('textarea', { rows: 2, maxLength: REASON_LIMIT });
     const conflict = select(Object.entries(CONFLICTS), 'unknown');
     const axes = ['Left / right', 'Down / up', 'Away / toward', 'Turn (degrees)'];
@@ -648,6 +1030,7 @@ export function mountCollaboration(container, bridge) {
       let reasonText = '';
       if (geometry()) {
         if (entry.permissions?.place !== true) reasonText = 'This recollection does not allow use to reconstruct the place, so it cannot change the scene. You can hold or decline it.';
+        else if (photoProblemText()) reasonText = photoProblemText();
         else if (state.blocked) reasonText = 'The current scene depends on a withdrawn recollection. Restore an unaffected saved version first.';
         else if (noTarget()) reasonText = 'Choose the object this recollection is about first; the candidate moves only that object.';
         else if (!editorNow.clean && !showing) reasonText = 'Save or revert your manual change, or finish the memory proposal, first.';
@@ -658,12 +1041,17 @@ export function mountCollaboration(container, bridge) {
       }
       note.textContent = reasonText;
       targetNote.textContent = bridge.targets && !noTarget() ? `The candidate moves ${bridge.targets.nameOf(bridge.targets.selected())}; the other object stays as saved.` : '';
-      preview.disabled = busy || noTarget() || entry.permissions?.place !== true || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
+      preview.disabled = busy || noTarget() || entry.permissions?.place !== true || Boolean(photoProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
       save.disabled = busy || (geometry() && Boolean(reasonText));
     };
 
     decision.addEventListener('change', () => {
       if (!geometry()) stopShowing();
+      refreshControls();
+    });
+    photoAck.addEventListener('change', () => {
+      // Without the acknowledgment no candidate stays on the scene.
+      if (photoAck.checked !== true && showing?.kind === 'candidate') stopShowing();
       refreshControls();
     });
     for (const input of inputs) {
@@ -684,7 +1072,10 @@ export function mountCollaboration(container, bridge) {
         transform: geometry() ? candidate() : null,
         baseVersion: bridge.editor().version,
         baseRevision: entry.revision,
+        // Recorded only for a change informed by the photo.
+        ...(photo && geometry() ? { photoReviewed: true } : {}),
       };
+      if (photo && geometry() && photoProblemText()) return;
       if (reason.value.length > REASON_LIMIT) {
         message.textContent = `Keep the note to ${REASON_LIMIT} characters or fewer.`;
         return;
@@ -718,12 +1109,13 @@ export function mountCollaboration(container, bridge) {
       field('Decision', decision),
       field('Your note (optional)', reason),
       field('Possible reason for a difference', conflict, 'A label for your own review. It does not decide which account is right or set a time.'),
+      ...(photoBox ? [photoBox] : []),
       candidateBox,
       targetNote,
       note,
       el('div', { className: 'actions' }, [preview, save]),
     );
-    reviewForm = { id: entry.id, revision: entry.revision, status: entry.status, refreshControls };
+    reviewForm = { id: entry.id, revision: entry.revision, status: entry.status, photoKey, refreshControls };
     refreshControls();
   }
 
@@ -858,6 +1250,12 @@ export function mountCollaboration(container, bridge) {
       status.textContent = 'Recollections could not be loaded. Try Refresh.';
       return;
     }
+    // Other panels (sharing) hear about a real change only: a fresh valid
+    // read that differs from the last one seen, including a photo's
+    // availability at the same revision. The first read is not a change.
+    const seen = JSON.stringify([result.body.contributions, result.body.variants, result.body.blocked ?? false]);
+    const changed = lastSeen !== null && seen !== lastSeen;
+    lastSeen = seen;
     state = result.body;
     if (showing?.kind === 'variant' && !state.variants.some((variant) => variant.id === showing.id && !variant.blocked)) stopShowing();
     const candidateSource = showing?.kind === 'candidate' ? state.contributions.find((entry) => entry.id === showing.id) : null;
@@ -871,6 +1269,7 @@ export function mountCollaboration(container, bridge) {
       }
     }
     render();
+    if (changed && !disposed) bridge.onChanged?.();
   }
 
   refresh();
@@ -883,6 +1282,7 @@ export function mountCollaboration(container, bridge) {
     dispose() {
       disposed = true;
       readToken += 1;
+      releaseReviewPhoto();
       if (showing) {
         showing = null;
         bridge.showTransform(null);

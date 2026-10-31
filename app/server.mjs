@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AccessStore, isToken } from './access.mjs';
 import { CollaborationStore } from './collaboration.mjs';
+import { CONTRIBUTION_PHOTO_LIMITS, pythonPhotoDecoder, readPhotoForm } from './contribution-photos.mjs';
 import { ShareStore, UNAVAILABLE as VISIT_UNAVAILABLE, isVisitToken } from './shares.mjs';
 import { createAudioDecoder } from './audio-derivative.mjs';
 import { INTAKE_LIMITS, IntakeStore } from './intakes.mjs';
@@ -87,7 +88,8 @@ const RELATIONSHIP_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/re
 const OBJECTS_CONFIRM_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/confirm$/;
 const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
 const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/(contributions|collaboration)$/;
-const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw)$/;
+const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo)$/;
+const CONTRIBUTION_PHOTO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/photo$/;
 const ERA_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/era$/;
 const NOT_FOUND = 'This scene could not be found.';
 const SHARES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares$/;
@@ -102,6 +104,8 @@ const STORIES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories
 const STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)$/;
 const STORY_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)\/(audio\.wav|withdraw)$/;
 const SHARE_ASSETS = new Set(['surface.json', 'texture.jpg']);
+// A pinned contributor photo in a shared view: evidence/<n>.jpg.
+const sharedAsset = (viewId, name) => (UUID.test(viewId) && SHARE_ASSETS.has(name)) || (viewId === 'evidence' && /^[1-9][0-9]?\.jpg$/.test(name));
 // Accepts exactly one Authorization header holding a canonical visit token.
 function visitToken(req) {
   const values = req.headersDistinct?.authorization;
@@ -325,13 +329,14 @@ export function createAppServer({
   prepareModelImage = pythonModelImage(),
   accessStore = new AccessStore({ dataDir }),
   audioDecoder = createAudioDecoder(),
+  contributionPhotoDecoder = pythonPhotoDecoder(),
 } = {}) {
   const store = new DraftStore(dataDir);
   const attempts = attemptLimiter();
   const reconstructions = new ReconstructionStore({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage,
   });
-  const collaboration = new CollaborationStore({ reconstructions });
+  const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder });
   const stories = new StoryStore({ reconstructions, audioDecoder });
   const intakes = new IntakeStore({ dataDir, drafts: store });
   const shares = new ShareStore({ reconstructions, stories });
@@ -345,7 +350,7 @@ export function createAppServer({
     const storyMatch = VISIT_STORY_PATH.exec(pathname);
     const token = visitToken(req);
     const reading = req.method === 'GET' || req.method === 'HEAD';
-    const known = pathname === '/api/visit' || (assetMatch && UUID.test(assetMatch[1]) && SHARE_ASSETS.has(assetMatch[2])) || (storyMatch && UUID.test(storyMatch[1]));
+    const known = pathname === '/api/visit' || (assetMatch && sharedAsset(assetMatch[1], assetMatch[2])) || (storyMatch && UUID.test(storyMatch[1]));
     if (!reading || !token || !known) {
       unavailable();
       return;
@@ -499,6 +504,18 @@ export function createAppServer({
       sendJson(res, 200, await collaboration.places(current));
       return;
     }
+    // Writing plus one photo. Scope and the request origin are checked before
+    // any media is read.
+    const photoSubmission = CONTRIBUTION_PHOTO_PATH.exec(pathname);
+    if (photoSubmission) {
+      const [, draftId, jobId] = photoSubmission;
+      const current = await requireScope(draftId);
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
+      const form = await readPhotoForm(await readForm(req, CONTRIBUTION_PHOTO_LIMITS.requestBytes));
+      sendJson(res, 200, await collaboration.submitPhoto(draftId, jobId, current, form));
+      return;
+    }
     const sceneCollaboration = SCENE_COLLABORATION_PATH.exec(pathname);
     const contributionAction = CONTRIBUTION_ACTION_PATH.exec(pathname);
     const eraMatch = ERA_PATH.exec(pathname);
@@ -508,8 +525,9 @@ export function createAppServer({
       const current = await requireScope(draftId);
       const ownerOnly = eraMatch || fourth === 'review';
       if (ownerOnly && current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
-      const writing = req.method === 'POST' && (!sceneCollaboration || third === 'contributions');
-      if (!(sceneCollaboration && reading) && !writing) throw new RequestError(405, 'Method not allowed.');
+      const photoRead = fourth === 'photo';
+      const writing = !photoRead && req.method === 'POST' && (!sceneCollaboration || third === 'contributions');
+      if (!((sceneCollaboration || photoRead) && reading) && !writing) throw new RequestError(405, 'Method not allowed.');
       if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
       if (sceneCollaboration && reading) {
         sendJson(res, 200, await collaboration.get(draftId, jobId, current));
@@ -521,13 +539,21 @@ export function createAppServer({
         return;
       }
       if (!UUID.test(third)) throw new RequestError(404, eraMatch ? 'This version could not be found.' : 'This contribution could not be found.');
+      if (photoRead) {
+        sendAsset(req, res, await collaboration.photo(draftId, jobId, current, third));
+        return;
+      }
       if (eraMatch) {
         const body = strictBody(await readJsonBody(req), ['requestId', 'baseRevision', 'kind', 'label', 'start', 'end', 'statement', 'relation', 'relativeToVariantId', 'confirmed']);
         sendJson(res, 200, await collaboration.era(draftId, jobId, current, third, body));
         return;
       }
       if (fourth === 'review') {
-        const body = strictBody(await readJsonBody(req), ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform']);
+        // photoReviewed is an optional extra key; the store decides when it is required.
+        const raw = await readJsonBody(req);
+        const keys = ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'];
+        const reviewed = raw !== null && typeof raw === 'object' && !Array.isArray(raw) && Object.hasOwn(raw, 'photoReviewed');
+        const body = strictBody(raw, reviewed ? [...keys, 'photoReviewed'] : keys);
         sendJson(res, 200, await collaboration.review(draftId, jobId, current, third, body));
         return;
       }
@@ -616,7 +642,7 @@ export function createAppServer({
         return;
       }
       if (previewAssetMatch && reading) {
-        if (!UUID.test(fourth) || !SHARE_ASSETS.has(fifth)) throw new RequestError(404, 'Not found.');
+        if (!sharedAsset(fourth, fifth)) throw new RequestError(404, 'Not found.');
         sendAsset(req, res, await shares.previewAsset(draftId, jobId, owner, third, fourth, fifth));
         return;
       }

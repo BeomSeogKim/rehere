@@ -66,3 +66,39 @@ case's `windowBox`.
 Running these cases against a hosted model is a separate, deliberate action:
 it needs the app's explicit live enablement, permissions, consent and a
 checked budget. This folder includes no automated paid runner.
+
+## Contributor-photo workflow fixture
+
+Generate a separate reference with the same backdrop and chair as room A,
+but with the counter drawing 80 pixels left:
+
+```sh
+../spatial/.venv/bin/python generate_contribution_photo.py
+```
+
+The command uses the pinned Pillow environment, refuses existing output and
+checks the baseline against room A's frozen hash. It writes `baseline.png`,
+`counter-left.png` and their hashes and diagram coordinates in `fixture.json`
+under `generated/contributor-photo/`, or `--output-dir`. The original A/B
+planner inputs and expected answers stay unchanged. No inference runs.
+
+Use the baseline's existing chair and counter boxes to prepare a two-object
+scene. A separate synthetic contributor can submit the leftward reference
+with explicit writing, attribution and independent photo uses. The owner
+reviews it, chooses the counter, previews a qualitative leftward position and
+saves an alternative while the current arrangement stays unchanged. Scene
+units are the owner's judgment, never a conversion from the 80-pixel shift.
+Time stays unknown unless separately asserted.
+
+Preview a visitor snapshot containing the baseline and alternative, explicitly
+including the contributor inspection photo. It should appear only for the
+related alternative, with the contributor's claim and owner's interpretation
+distinguished from source-derived geometry. Withdraw the bundle and check that
+dependent alternatives and snapshots stop, while an independent baseline
+snapshot stays usable. Check original hashes before and after the workflow.
+
+This is a constructed diagram workflow, not evidence of automatic photograph
+alignment, calibrated movement, historical accuracy or consumer value. The
+older room B swaps background landmarks without moving the counter; it cannot
+establish a counter-position correction and remains a separate discrepancy
+control.

@@ -681,6 +681,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     });
     collaborationPanel = mountCollaboration(collaborationSection, {
       jobUrl: `${base}/${jobId}`,
+      // New alternatives or recollections change what can be shared.
+      onChanged: () => sharesPanel?.refreshOptions(),
       editor: editorFor('collaboration'),
       // True only when the 3D view actually drew the transform.
       showTransform(transform) {
@@ -1547,6 +1549,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       });
       collaborationPanel = mountCollaboration(collaborationSection, {
         jobUrl,
+        // New alternatives or recollections change what can be shared.
+        onChanged: () => sharesPanel?.refreshOptions(),
         editor: editorFor('collaboration'),
         targets,
         showTransform(transform) {

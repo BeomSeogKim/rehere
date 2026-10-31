@@ -154,6 +154,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     clearTimeout(timer);
     timer = null;
     disposePlayers();
+    releasePhotos();
     controller?.abort();
     controller = null;
     viewer?.dispose();
@@ -183,6 +184,16 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       if (!ok) unavailable();
       else scheduleHeartbeat(mine);
     }, HEARTBEAT_MS);
+  }
+
+  // Contributor photos shown for the current view; their local copies are
+  // released whenever the view changes or the screen closes.
+  let photoUrls = [];
+  let photoToken = 0;
+  function releasePhotos() {
+    photoToken += 1;
+    for (const url of photoUrls) URL.revokeObjectURL(url);
+    photoUrls = [];
   }
 
   async function render(manifest, surface, textureUrl, mine) {
@@ -242,6 +253,51 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         }),
       );
     };
+    // Only photos related to the current view, collapsed until asked for and
+    // fetched only then. Each is a contributor's photo, shown as such.
+    const contributorPhotos = Array.isArray(manifest.contributorPhotos) ? manifest.contributorPhotos : [];
+    const photoBox = el('div');
+    const renderContributorPhotos = (viewId) => {
+      releasePhotos();
+      const related = contributorPhotos.filter((photo) => Array.isArray(photo.viewIds) && photo.viewIds.includes(viewId));
+      if (!related.length) {
+        photoBox.replaceChildren();
+        return;
+      }
+      const items = related.map((photo) => ({ photo, slot: el('div') }));
+      const section = el('details', { className: 'source-details' }, [
+        el('summary', { textContent: `Contributor photos (${related.length})` }),
+        ...items.map(({ photo, slot }) =>
+          el('figure', { className: 'anchor-figure' }, [slot, el('figcaption', { className: 'hint', textContent: `${photo.providerLabel || 'A contributor'}: ${photo.label}` })]),
+        ),
+      ]);
+      let loaded = false;
+      section.addEventListener('toggle', async () => {
+        if (!section.open || loaded) return;
+        loaded = true;
+        const token = photoToken;
+        for (const { photo, slot } of items) {
+          let url = null;
+          try {
+            const response = await source.asset(photo.asset.viewId, photo.asset.name, controller?.signal);
+            if (response?.ok) url = URL.createObjectURL(await response.blob());
+          } catch {
+            url = null;
+          }
+          if (mine !== generation || token !== photoToken) {
+            if (url) URL.revokeObjectURL(url);
+            return;
+          }
+          if (url) photoUrls.push(url);
+          slot.replaceChildren(
+            url
+              ? el('img', { className: 'space-proposal', src: url, alt: `Photo supplied by ${photo.providerLabel || 'a contributor'}`, width: photo.width, height: photo.height })
+              : el('p', { className: 'hint', textContent: 'This photo could not be loaded.' }),
+          );
+        }
+      });
+      photoBox.replaceChildren(section);
+    };
     const showView = (id) => {
       currentId = id;
       const view = views.get(id);
@@ -257,6 +313,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         );
       }
       renderStories(id);
+      renderContributorPhotos(id);
       for (const button of buttons.children) button.setAttribute('aria-pressed', String(button.viewId === id));
     };
     for (const view of manifest.views) {
@@ -305,6 +362,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           buttons,
           ...(objects ? [objectButtons, evidenceBox] : []),
           details,
+          photoBox,
           storyBox,
           el('p', { className: 'hint', textContent: DEVICE_NOTE }),
         ]),

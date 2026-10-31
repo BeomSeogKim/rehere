@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pcmWav } from './audio-derivative.mjs';
 import { OBJECT_IDS, assertObjectsConfirmed, isTwoObject, objectMarker } from './arrangements.mjs';
-import { dependenciesBlocked } from './collaboration.mjs';
+import { contributionAllows, dependenciesBlocked } from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
 import { savedView } from './shares.mjs';
 
@@ -176,7 +176,11 @@ export class StoryStore {
     if (dependenciesBlocked(manifest, context.dependencies)) return 'contribution';
     if (purpose === 'share') {
       const contributions = manifest.collaboration?.contributions ?? [];
-      if (context.dependencies.some((id) => contributions.find((item) => item.id === id)?.permissions.share !== true)) return 'contribution';
+      const shareable = (id) => {
+        const item = contributions.find((entry) => entry.id === id);
+        return Boolean(item) && contributionAllows(item, 'share');
+      };
+      if (!context.dependencies.every(shareable)) return 'contribution';
     }
     const resolved = savedView(manifest, context.view);
     if (!resolved) return 'view';

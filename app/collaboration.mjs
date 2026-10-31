@@ -1,9 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   OBJECT_IDS, arrangementOf, assertObjectsConfirmed, assertRelationship, isTwoObject, withTarget,
 } from './arrangements.mjs';
 import { RequestError } from './drafts.mjs';
 import { ACTIVE_PROPOSAL } from './memory-proposals.mjs';
+import {
+  PHOTO_BUSY, PHOTO_PREPARE_FAILED, REVIEW_NAME, contributionsDir, parsePhotoFacts, photoAttested, photoDir, readReviewPhoto, reviewJpegInfo,
+} from './contribution-photos.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // Plain text: tab, newline and carriage return are the only control characters allowed.
@@ -20,6 +25,8 @@ const ERA_KINDS = new Set(['unknown', 'exact', 'range', 'relative']);
 const RELATIONS = new Set(['before', 'after', 'same-time']);
 
 export const BLOCKED_MESSAGE = 'This scene depends on a contribution that was withdrawn. Restore an earlier saved version that does not depend on it.';
+// Integrity failures and photo grants never claim that the provider withdrew.
+export const UNAVAILABLE_MESSAGE = 'A contributor photo this scene depends on is not available for this use right now. Restore an earlier saved version that does not depend on it, or try again later.';
 
 const fail = (status, message) => new RequestError(status, message);
 const UNREADABLE = 'The request could not be read.';
@@ -56,38 +63,59 @@ export function versionDependencies(manifest, version) {
 
 export const currentDependencies = (manifest) => versionDependencies(manifest, manifest.edit.version);
 
+// A text+photo bundle allows a purpose only when both of its grants do.
+export function contributionAllows(contribution, purpose) {
+  return contribution.permissions[purpose] === true && (!contribution.photo || contribution.photo.source.permissions[purpose] === true);
+}
+
 // Grants apply per purpose to every inherited contribution. Any use needs each
 // one present, not withdrawn, and granted for place construction; a hosted model
 // use also needs each model grant, because the saved transform itself carries
-// the memory. Returns 'withdrawn', 'model' or null.
+// the memory. A photo bundle also needs its photo's place grant and a current
+// attestation of its stored files. Returns 'withdrawn', 'unavailable', 'model' or null.
 export function dependencyIssue(manifest, ids, purpose = 'place') {
   const contributions = manifest.collaboration?.contributions ?? [];
   let issue = null;
   for (const id of ids) {
     const contribution = contributions.find((item) => item.id === id);
     if (!contribution || contribution.withdrawnAt !== null || contribution.permissions.place !== true) return 'withdrawn';
-    if (purpose === 'model' && contribution.permissions.model !== true) issue = 'model';
+    if (contribution.photo && (contribution.photo.source.permissions.place !== true || !photoAttested(manifest, contribution))) issue = 'unavailable';
+    else if (purpose === 'model' && !contributionAllows(contribution, 'model') && issue === null) issue = 'model';
   }
   return issue;
+}
+
+export function issueMessage(issue) {
+  if (issue === 'model') return MODEL_BLOCKED_MESSAGE;
+  return issue === 'unavailable' ? UNAVAILABLE_MESSAGE : BLOCKED_MESSAGE;
+}
+
+// Throws a 409 unless every listed dependency may be used for place construction.
+function assertDependencies(manifest, ids) {
+  const issue = dependencyIssue(manifest, ids);
+  if (issue) throw fail(409, issueMessage(issue));
 }
 
 export const dependenciesBlocked = (manifest, ids) => dependencyIssue(manifest, ids) !== null;
 export const usageBlocked = (manifest) => manifest.status === 'ready' && dependenciesBlocked(manifest, currentDependencies(manifest));
 export const modelBlocked = (manifest) => manifest.status === 'ready' && dependencyIssue(manifest, currentDependencies(manifest), 'model') !== null;
 
+const UNAVAILABLE_PHOTO = 'This contributor photo is not available right now.';
 const SOURCE_STOPPED_MESSAGE = 'The owner stopped using this photo or turned off its place use, so no version of this scene can be changed.';
 
 export const REDACTED_PROPOSAL_MESSAGE = 'This proposal was made from a saved version that depends on a withdrawn contribution, so its content is no longer shown.';
+const UNAVAILABLE_PROPOSAL_MESSAGE = 'This proposal was made from a saved version that depends on a contributor photo that is not available right now, so its content is not shown.';
 
 // Every proposal leaving the server goes through this projection. A proposal
 // made from a version with a withdrawn dependency carries that memory in its
 // message and plan, so only audit metadata is shown and it cannot be previewed
 // or applied. The full record stays on disk.
 export function projectProposal(manifest, proposal) {
-  if (!dependenciesBlocked(manifest, versionDependencies(manifest, proposal.baseVersion))) return proposal;
+  const issue = dependencyIssue(manifest, versionDependencies(manifest, proposal.baseVersion));
+  if (!issue) return proposal;
   return {
     ...proposal, statement: { ...proposal.statement, text: null }, result: null, question: null,
-    status: 'stale', error: REDACTED_PROPOSAL_MESSAGE, redacted: true,
+    status: 'stale', error: issue === 'unavailable' ? UNAVAILABLE_PROPOSAL_MESSAGE : REDACTED_PROPOSAL_MESSAGE, redacted: true,
   };
 }
 
@@ -96,8 +124,8 @@ export const MODEL_BLOCKED_MESSAGE = 'This scene includes a contribution that wa
 // Throws unless the current saved version may be used for `purpose` ('place' or 'model').
 export function assertSceneUsable(manifest, purpose) {
   const issue = dependencyIssue(manifest, currentDependencies(manifest), purpose);
-  if (issue === 'withdrawn') throw new RequestError(409, BLOCKED_MESSAGE);
   if (issue === 'model') throw new RequestError(403, MODEL_BLOCKED_MESSAGE);
+  if (issue) throw new RequestError(409, issueMessage(issue));
 }
 
 
@@ -125,8 +153,11 @@ function parseTransform(transform, twoObjects) {
 // The saved edit fields of a scene version, in its own shape.
 const editFields = (edit) => (Array.isArray(edit.objects) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw });
 
+// photoReviewed is accepted only as an extra key; whether it is required or
+// refused depends on the contribution, checked by the caller.
 function parseReview(body, twoObjects) {
-  if (!exactKeys(body, ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'])) throw fail(400, UNREADABLE);
+  const keys = ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'];
+  if (!exactKeys(body, keys) && !exactKeys(body, [...keys, 'photoReviewed'])) throw fail(400, UNREADABLE);
   const { requestId, baseVersion, baseRevision, decision, reason, conflict } = body;
   const valid = isId(requestId) && Number.isInteger(baseVersion) && baseVersion >= 1 && Number.isInteger(baseRevision) && baseRevision >= 1
     && Object.hasOwn(DECISIONS, decision) && plain(reason, COLLABORATION_LIMITS.reason) && CONFLICTS.has(conflict);
@@ -134,7 +165,16 @@ function parseReview(body, twoObjects) {
   const geometry = decision === 'adopt' || decision === 'alternative';
   const transform = body.transform === null ? null : parseTransform(body.transform, twoObjects);
   if (geometry ? !transform : body.transform !== null) throw fail(400, 'The candidate position and turn could not be read.');
-  return { requestId, baseVersion, baseRevision, decision, reason, conflict, transform };
+  const request = { requestId, baseVersion, baseRevision, decision, reason, conflict, transform };
+  if (Object.hasOwn(body, 'photoReviewed')) request.photoReviewed = body.photoReviewed;
+  return request;
+}
+
+// The multipart payload: the existing text submission plus the photo's facts.
+function parsePhotoSubmit(body) {
+  if (!exactKeys(body, ['requestId', 'text', 'permissions', 'periodClaim', 'photo'])) throw fail(400, UNREADABLE);
+  const { photo, ...text } = body;
+  return { ...parseSubmit(text), photo: parsePhotoFacts(photo) };
 }
 
 function parseWithdraw(body) {
@@ -180,7 +220,10 @@ const UNKNOWN_ERA = Object.freeze({
 // sees only the fixed decision, linked variant and timestamps. After withdrawal
 // the owner's free-form reason may quote the original, so it is not projected
 // either; it stays on disk.
-function projectContribution(contribution, owner) {
+// The providing principal (an owner too) also sees the request ID, for receipt
+// lookup after a lost response. Photo source IDs, checksums and names stay private.
+function projectContribution(manifest, contribution, principal) {
+  const owner = principal.role === 'owner';
   const withdrawn = contribution.withdrawnAt !== null;
   const review = contribution.review && {
     decision: contribution.review.decision,
@@ -204,6 +247,28 @@ function projectContribution(contribution, owner) {
     status: contribution.status,
     review,
     withdrawnAt: contribution.withdrawnAt,
+    ...(contribution.principalId === principal.id && { requestId: contribution.requestId }),
+    photo: projectPhoto(manifest, contribution),
+  };
+}
+
+function projectPhoto(manifest, contribution) {
+  if (!contribution.photo) return null;
+  const { source, review } = contribution.photo;
+  const withdrawn = contribution.withdrawnAt !== null;
+  const available = !withdrawn && photoAttested(manifest, contribution);
+  return {
+    available,
+    type: source.type,
+    width: source.width,
+    height: source.height,
+    review: { width: review.width, height: review.height },
+    // Withdrawn free text and dates are never projected again.
+    origin: { kind: source.origin.kind, reference: withdrawn ? '' : source.origin.reference },
+    dates: withdrawn ? null : { ...source.dates },
+    permissions: { ...source.permissions },
+    receivedAt: source.receivedAt,
+    url: available ? `/api/drafts/${manifest.draftId}/reconstructions/${manifest.id}/contributions/${contribution.id}/photo` : null,
   };
 }
 
@@ -237,13 +302,55 @@ function projectVariant(manifest, variant, sourceBlocked) {
 
 const collaborationOf = (manifest) => manifest.collaboration ?? { revision: 0, contributions: [], variants: [], receipts: [] };
 
+// A new contribution record; the first one also freezes the saved scene as the
+// baseline to compare against: its whole current arrangement and rule for a
+// two-object scene.
+function addContribution(manifest, collaboration, principal, request, now, extra = {}) {
+  const contribution = {
+    id: extra.id ?? randomUUID(),
+    requestId: request.requestId,
+    principalId: principal.id,
+    provider: { displayName: principal.displayName },
+    text: request.text,
+    textSha256: sha256(request.text),
+    periodClaim: request.periodClaim,
+    permissions: request.permissions,
+    createdAt: now,
+    revision: 1,
+    status: 'submitted',
+    review: null,
+    reviews: [],
+    withdrawnAt: null,
+    ...(extra.photo && { photo: extra.photo }),
+  };
+  const variants = collaboration.variants.length > 0 ? collaboration.variants : [{
+    id: randomUUID(),
+    kind: 'baseline',
+    label: 'Saved reconstruction',
+    parentVersion: manifest.edit.version,
+    edit: { version: manifest.edit.version, ...editFields(manifest.edit) },
+    contributionIds: currentDependencies(manifest),
+    createdAt: now,
+    createdBy: null,
+    eraAssertions: [],
+    eraRevision: 0,
+  }];
+  return { contribution, collaboration: { ...collaboration, contributions: [...collaboration.contributions, contribution], variants } };
+}
+
 
 // Written recollections, review decisions, immutable alternatives and owner
 // time assertions live in the reconstruction manifest, so every change uses the
 // reconstruction store's mutex and single atomic manifest write.
 export class CollaborationStore {
-  constructor({ reconstructions }) {
+  // decodePhoto prepares the private inspection JPEG; tests may inject one,
+  // which does not change the stored-photo or privacy rules.
+  constructor({ reconstructions, decodePhoto = null }) {
     this.reconstructions = reconstructions;
+    this.decodePhoto = decodePhoto;
+    // Photo submissions being prepared, keyed by principal, place, scene and
+    // request ID, so an identical retry joins the same work.
+    this.inflight = new Map();
   }
 
   // Scope is checked before any ID, body or existence check.
@@ -272,10 +379,10 @@ export class CollaborationStore {
 
   // Returns the receipt for an exact replay, throws for a reused request ID
   // with other values, and returns null for a new request.
-  #receipt(collaboration, request, action, principalId, target) {
+  #receipt(collaboration, request, action, principalId, target, requestDigest = digest(request)) {
     const receipt = collaboration.receipts.find((item) => item.requestId === request.requestId);
     if (!receipt) return null;
-    if (receipt.action !== action || receipt.principalId !== principalId || receipt.target !== target || receipt.digest !== digest(request)) {
+    if (receipt.action !== action || receipt.principalId !== principalId || receipt.target !== target || receipt.digest !== requestDigest) {
       throw fail(409, REUSED);
     }
     return receipt;
@@ -313,7 +420,7 @@ export class CollaborationStore {
     // only spatial use follows the photo's current restrictions.
     return {
       revision: collaboration.revision,
-      contributions: collaboration.contributions.filter((item) => owner || item.principalId === principal.id).map((item) => projectContribution(item, owner)),
+      contributions: collaboration.contributions.filter((item) => owner || item.principalId === principal.id).map((item) => projectContribution(manifest, item, principal)),
       variants: owner ? collaboration.variants.map((item) => projectVariant(manifest, item, !uses.place)) : [],
       blocked: !uses.place || contributionBlocked,
       modelBlocked: !uses.model || modelBlocked(manifest),
@@ -330,47 +437,160 @@ export class CollaborationStore {
       const manifest = await this.#scene(draftId, jobId);
       const collaboration = collaborationOf(manifest);
       const replay = this.#receipt(collaboration, request, 'submit', principal.id, `${draftId}/${jobId}`);
-      if (replay) return projectContribution(collaboration.contributions.find((item) => item.id === replay.contributionId), principal.role === 'owner');
+      if (replay) return projectContribution(manifest, collaboration.contributions.find((item) => item.id === replay.contributionId), principal);
       this.#ready(manifest);
-      if (collaboration.contributions.length >= COLLABORATION_LIMITS.contributions) {
-        throw fail(409, 'This scene has reached the number of contributions it can hold.');
-      }
-      const now = new Date().toISOString();
-      const contribution = {
-        id: randomUUID(),
-        requestId: request.requestId,
-        principalId: principal.id,
-        provider: { displayName: principal.displayName },
-        text: request.text,
-        textSha256: sha256(request.text),
-        periodClaim: request.periodClaim,
-        permissions: request.permissions,
-        createdAt: now,
-        revision: 1,
-        status: 'submitted',
-        review: null,
-        reviews: [],
-        withdrawnAt: null,
-      };
-      // The first contribution freezes the saved scene as the baseline to compare
-      // against: its whole current arrangement and rule for a two-object scene.
-      const variants = collaboration.variants.length > 0 ? collaboration.variants : [{
-        id: randomUUID(),
-        kind: 'baseline',
-        label: 'Saved reconstruction',
-        parentVersion: manifest.edit.version,
-        edit: { version: manifest.edit.version, ...editFields(manifest.edit) },
-        contributionIds: currentDependencies(manifest),
-        createdAt: now,
-        createdBy: null,
-        eraAssertions: [],
-        eraRevision: 0,
-      }];
-      const { write } = this.#save(manifest, { ...collaboration, contributions: [...collaboration.contributions, contribution], variants }, {
-        requestId: request.requestId, action: 'submit', principalId: principal.id, target: `${draftId}/${jobId}`, digest: digest(request), contributionId: contribution.id,
+      this.#roomFor(collaboration);
+      const added = addContribution(manifest, collaboration, principal, request, new Date().toISOString());
+      const { write } = this.#save(manifest, added.collaboration, {
+        requestId: request.requestId, action: 'submit', principalId: principal.id, target: `${draftId}/${jobId}`, digest: digest(request), contributionId: added.contribution.id,
       });
-      await write();
-      return projectContribution(contribution, principal.role === 'owner');
+      const stored = await write();
+      return projectContribution(stored, added.contribution, principal);
+    });
+  }
+
+  #roomFor(collaboration) {
+    if (collaboration.contributions.length >= COLLABORATION_LIMITS.contributions) {
+      throw fail(409, 'This scene has reached the number of contributions it can hold.');
+    }
+  }
+
+  // Writing plus one photo, as one indivisible contribution. The photo is
+  // decoded outside the manifest mutex in the one preparation slot, staged
+  // beside the scene, and published with its manifest record in one write.
+  async submitPhoto(draftId, jobId, principal, form) {
+    this.#scope(principal, draftId);
+    const request = parsePhotoSubmit(form.body);
+    const original = form;
+    const photoSha256 = createHash('sha256').update(original.bytes).digest('hex');
+    const requestDigest = digest({ ...request, photoSha256 });
+    const target = `${draftId}/${jobId}`;
+    await this.reconstructions.recover();
+    const joined = this.#running(principal, draftId, jobId, request, requestDigest);
+    if (joined) return joined;
+    // An exact replay of published work answers before any busy check.
+    const current = await this.#scene(draftId, jobId);
+    const replay = this.#receipt(collaborationOf(current), request, 'submit', principal.id, target, requestDigest);
+    if (replay) return projectContribution(current, collaborationOf(current).contributions.find((item) => item.id === replay.contributionId), principal);
+    // Checked after the read too: work that finished before it was read as a
+    // receipt, and work started meanwhile is joined.
+    const running = this.#running(principal, draftId, jobId, request, requestDigest);
+    if (running) return running;
+    if (this.reconstructions.closed) throw fail(503, 'The app is shutting down. Try again later.');
+    this.#ready(current);
+    this.#roomFor(collaborationOf(current));
+    if (this.reconstructions.activePhoto) throw fail(409, PHOTO_BUSY);
+    const controller = new AbortController();
+    const promise = this.#preparePhoto(draftId, jobId, principal, request, original, photoSha256, requestDigest, controller.signal);
+    const slot = { controller, done: promise.catch(() => {}) };
+    this.reconstructions.activePhoto = slot;
+    const key = JSON.stringify([principal.id, draftId, jobId, request.requestId]);
+    this.inflight.set(key, { digest: requestDigest, promise });
+    slot.done.finally(() => {
+      this.inflight.delete(key);
+      if (this.reconstructions.activePhoto === slot) this.reconstructions.activePhoto = null;
+    });
+    return promise;
+  }
+
+  // The same principal's identical request in progress is joined; a changed one is refused.
+  #running(principal, draftId, jobId, request, requestDigest) {
+    const running = this.inflight.get(JSON.stringify([principal.id, draftId, jobId, request.requestId]));
+    if (!running) return null;
+    if (running.digest !== requestDigest) throw fail(409, REUSED);
+    return running.promise;
+  }
+
+  async #preparePhoto(draftId, jobId, principal, request, original, photoSha256, requestDigest, signal) {
+    const decode = this.decodePhoto;
+    if (!decode) throw fail(503, PHOTO_PREPARE_FAILED);
+    const reviewBytes = await decode({ bytes: original.bytes, signal });
+    if (signal.aborted) throw fail(503, 'The app is shutting down. Try again later.');
+    const reviewInfo = reviewJpegInfo(reviewBytes);
+    if (!reviewInfo) throw fail(503, PHOTO_PREPARE_FAILED);
+    const jobDir = this.reconstructions.jobDir(draftId, jobId);
+    const parent = contributionsDir(jobDir);
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+    const staging = path.join(parent, `.staging-${request.requestId}-${randomUUID()}`);
+    const originalName = `original.${original.extension}`;
+    let published = false;
+    try {
+      await mkdir(staging, { mode: 0o700 });
+      await writeFile(path.join(staging, originalName), original.bytes, { mode: 0o600, flag: 'wx' });
+      await writeFile(path.join(staging, REVIEW_NAME), reviewBytes, { mode: 0o600, flag: 'wx' });
+      return await this.reconstructions.serialize(async () => {
+        if (this.reconstructions.closed || signal.aborted) throw fail(503, 'The app is shutting down. Try again later.');
+        this.#scope(principal, draftId);
+        const manifest = await this.#scene(draftId, jobId);
+        const collaboration = collaborationOf(manifest);
+        const target = `${draftId}/${jobId}`;
+        const replay = this.#receipt(collaboration, request, 'submit', principal.id, target, requestDigest);
+        if (replay) return projectContribution(manifest, collaboration.contributions.find((item) => item.id === replay.contributionId), principal);
+        this.#ready(manifest);
+        this.#roomFor(collaboration);
+        if (await this.#sourceBlocked(manifest)) throw fail(409, SOURCE_STOPPED_MESSAGE);
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        const sourceId = randomUUID();
+        const photo = {
+          source: {
+            id: sourceId, kind: 'photo', role: 'original', parentSourceId: null, name: originalName,
+            sha256: photoSha256, size: original.bytes.length, type: original.type, width: original.width, height: original.height,
+            provider: { principalId: principal.id, displayName: principal.displayName },
+            origin: request.photo.origin, dates: request.photo.dates, permissions: request.photo.permissions, receivedAt: now,
+          },
+          review: {
+            id: randomUUID(), kind: 'photo', role: 'derived', parentSourceId: sourceId, name: REVIEW_NAME,
+            sha256: createHash('sha256').update(reviewBytes).digest('hex'), size: reviewBytes.length, type: 'image/jpeg', ...reviewInfo,
+          },
+        };
+        const added = addContribution(manifest, collaboration, principal, request, now, { id, photo });
+        const { write } = this.#save(manifest, added.collaboration, {
+          requestId: request.requestId, action: 'submit', principalId: principal.id, target, digest: requestDigest, contributionId: id,
+        });
+        const final = photoDir(jobDir, id);
+        await rename(staging, final);
+        published = true;
+        // Commit boundary: closing during the awaits above refuses here, and
+        // nothing is awaited between this check and starting the manifest
+        // write. Once that write starts it may finish as committed.
+        if (this.reconstructions.closed || signal.aborted) {
+          await rm(final, { recursive: true, force: true }).catch(() => {});
+          throw fail(503, 'The app is shutting down. Try again later.');
+        }
+        const writing = write();
+        try {
+          await writing;
+        } catch (error) {
+          // No manifest record refers to these files, so they are removed.
+          await rm(final, { recursive: true, force: true }).catch(() => {});
+          throw error;
+        }
+        // The attestation covers only verified records, so the published
+        // manifest is read again before projecting the new bundle.
+        const stored = await this.#scene(draftId, jobId);
+        return projectContribution(stored, stored.collaboration.contributions.find((item) => item.id === id), principal);
+      });
+    } finally {
+      if (!published) await rm(staging, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  // The private inspection JPEG, for the owner or the providing principal,
+  // rehashed against its record in the same mutex slot as the checks.
+  async photo(draftId, jobId, principal, contributionId) {
+    this.#scope(principal, draftId);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const contribution = collaborationOf(manifest).contributions.find((item) => item.id === contributionId);
+      const visible = contribution && (principal.role === 'owner' || contribution.principalId === principal.id);
+      if (!visible || !contribution.photo || contribution.withdrawnAt !== null) throw fail(404, 'This photo could not be found.');
+      const bytes = photoAttested(manifest, contribution)
+        ? await readReviewPhoto(this.reconstructions.jobDir(draftId, jobId), contribution)
+        : null;
+      if (!bytes) throw fail(409, UNAVAILABLE_PHOTO);
+      return { name: REVIEW_NAME, type: 'image/jpeg', body: bytes };
     });
   }
 
@@ -385,7 +605,13 @@ export class CollaborationStore {
       const contribution = collaboration.contributions.find((item) => item.id === contributionId);
       if (!contribution) throw fail(404, CONTRIBUTION_NOT_FOUND);
       const replay = this.#receipt(collaboration, request, 'review', principal.id, contributionId);
-      if (replay) return this.#reviewResult(manifest, collaboration, contributionId, replay, await this.#sourceBlocked(manifest));
+      if (replay) return this.#reviewResult(manifest, collaboration, contributionId, replay, await this.#sourceBlocked(manifest), principal);
+      // A photo-backed adoption or alternative needs the owner's explicit
+      // acknowledgment that they reviewed the photo; nothing else accepts it.
+      const photoGeometry = Boolean(contribution.photo) && request.transform !== null;
+      if (photoGeometry ? request.photoReviewed !== true : Object.hasOwn(request, 'photoReviewed')) {
+        throw fail(400, photoGeometry ? 'Confirm that you reviewed the contributor photo beside the scene.' : UNREADABLE);
+      }
       if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was withdrawn by the person who provided it.');
       if (!REVIEWABLE.has(contribution.status)) throw fail(409, 'This contribution already has a final decision.');
       if (request.baseRevision !== contribution.revision) throw fail(409, 'This contribution changed. Reload it before deciding.');
@@ -394,17 +620,19 @@ export class CollaborationStore {
       const review = {
         decision: request.decision, reason: request.reason, conflict: request.conflict,
         reviewedBy: principal.id, reviewedAt: now, baseRevision: request.baseRevision, variantId: null, version: null,
+        ...(photoGeometry && { photoReviewed: true }),
       };
       let variant = null;
       let edit = null;
       let editReceipt = null;
       if (request.transform) {
         this.#ready(manifest);
-        if (contribution.permissions.place !== true) throw fail(403, 'This contribution was not shared with permission to change the place.');
+        if (!contributionAllows(contribution, 'place')) throw fail(403, 'This contribution was not shared with permission to change the place.');
+        if (!photoAttested(manifest, contribution)) throw fail(409, UNAVAILABLE_PHOTO);
         await this.reconstructions.permittedPhoto(draftId, manifest.sourceId);
         if (request.baseVersion !== manifest.edit.version) throw fail(409, 'The scene was changed elsewhere. Reload the saved version before deciding.');
         const parent = currentDependencies(manifest);
-        if (dependenciesBlocked(manifest, parent)) throw fail(409, BLOCKED_MESSAGE);
+        assertDependencies(manifest, parent);
         const dependencies = [contribution.id, ...parent.filter((id) => id !== contribution.id)];
         const adopt = request.decision === 'adopt';
         let fields = request.transform;
@@ -449,7 +677,7 @@ export class CollaborationStore {
       const stored = edit
         ? await this.reconstructions.saveVersion(manifest, edit, editReceipt, manifest.proposals ?? [], { collaboration: next })
         : await this.reconstructions.update(manifest, { collaboration: next });
-      return this.#reviewResult(stored, next, contributionId, next.receipts.at(-1), false);
+      return this.#reviewResult(stored, next, contributionId, next.receipts.at(-1), false, principal);
     });
   }
 
@@ -457,14 +685,15 @@ export class CollaborationStore {
     return !(await this.reconstructions.sourceUses(manifest.draftId, manifest.sourceId)).place;
   }
 
-  #reviewResult(manifest, collaboration, contributionId, receipt, sourceBlocked) {
+  #reviewResult(manifest, collaboration, contributionId, receipt, sourceBlocked, principal) {
     const contribution = collaboration.contributions.find((item) => item.id === contributionId);
     const variant = receipt.variantId && collaboration.variants.find((item) => item.id === receipt.variantId);
     const edit = manifest.edits.find((item) => item.requestId === receipt.requestId && item.kind === 'contribution');
     return {
-      contribution: projectContribution(contribution, true),
+      contribution: projectContribution(manifest, contribution, principal),
       variant: variant ? projectVariant(manifest, variant, sourceBlocked) : null,
-      edit: edit ? { version: edit.version, ...editFields(edit) } : null,
+      // The adopted geometry is withheld while that version cannot be used.
+      edit: edit && !dependencyIssue(manifest, versionDependencies(manifest, edit.version)) ? { version: edit.version, ...editFields(edit) } : null,
     };
   }
 
@@ -479,7 +708,7 @@ export class CollaborationStore {
       // A contributor cannot learn whether someone else's contribution exists.
       if (!contribution || (principal.role !== 'owner' && contribution.principalId !== principal.id)) throw fail(404, CONTRIBUTION_NOT_FOUND);
       if (contribution.principalId !== principal.id) throw fail(403, 'Only the person who provided this contribution can withdraw it.');
-      if (this.#receipt(collaboration, request, 'withdraw', principal.id, contributionId)) return projectContribution(contribution, principal.role === 'owner');
+      if (this.#receipt(collaboration, request, 'withdraw', principal.id, contributionId)) return projectContribution(manifest, contribution, principal);
       if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was already withdrawn.');
       const withdrawn = {
         ...contribution, status: 'withdrawn', statusBeforeWithdrawal: contribution.status, withdrawnAt: new Date().toISOString(), revision: contribution.revision + 1,
@@ -502,9 +731,9 @@ export class CollaborationStore {
       if (affected.length > 0) {
         changes.proposals = manifest.proposals.map((item) => (affected.includes(item.id) ? { ...item, status: 'failed', error: BLOCKED_MESSAGE, updatedAt: now } : item));
       }
-      await this.reconstructions.update(manifest, changes);
+      const stored = await this.reconstructions.update(manifest, changes);
       if (active && dependsHere(active)) this.reconstructions.activeProposal?.controller.abort();
-      return projectContribution(withdrawn, principal.role === 'owner');
+      return projectContribution(stored, withdrawn, principal);
     });
   }
 
@@ -522,11 +751,11 @@ export class CollaborationStore {
       if (request.baseRevision !== variant.eraRevision) throw fail(409, 'The time for this version changed. Reload it before saving.');
       if (sourceBlocked) throw fail(409, SOURCE_STOPPED_MESSAGE);
       // A time label never makes a withdrawn dependency usable again.
-      if (dependenciesBlocked(manifest, variant.contributionIds)) throw fail(409, BLOCKED_MESSAGE);
+      assertDependencies(manifest, variant.contributionIds);
       if (request.relativeToVariantId !== null) {
         const other = collaboration.variants.find((item) => item.id === request.relativeToVariantId);
         if (!other || other.id === variantId) throw fail(400, 'The other version for this time relation could not be found.');
-        if (dependenciesBlocked(manifest, other.contributionIds)) throw fail(409, BLOCKED_MESSAGE);
+        assertDependencies(manifest, other.contributionIds);
       }
       const { requestId, baseRevision, ...era } = request;
       const assertion = { id: randomUUID(), requestId, ...era, assertedBy: principal.id, assertedAt: new Date().toISOString() };

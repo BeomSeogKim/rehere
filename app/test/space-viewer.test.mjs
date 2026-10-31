@@ -121,6 +121,8 @@ let posts;
 let heldGets;
 let proposals;
 let collaboration;
+// Every URL fetched, in order.
+let gets = [];
 let storyList;
 let history;
 
@@ -129,6 +131,7 @@ before(async () => {
   globalThis.window = { devicePixelRatio: 1 };
   globalThis.ResizeObserver = FakeResizeObserver;
   globalThis.fetch = async (url, options = {}) => {
+    gets.push(url);
     if (options.method === 'POST') {
       let respond;
       const promise = new Promise((resolve) => (respond = resolve));
@@ -162,6 +165,7 @@ beforeEach(() => {
   globalThis.viewerFail = null;
   posts = [];
   heldGets = null;
+  gets = [];
   proposals = [];
   collaboration = { revision: 0, contributions: [], variants: [], blocked: false, currentVersion: 1 };
   storyList = [];
@@ -715,7 +719,7 @@ describe('stories and sharing in one scene', () => {
     await settle();
     assert.equal(storyOption(), undefined, 'the withdrawn story is no longer offered');
     assert.equal(inShare('Issue a visitor link'), undefined, 'the unissued preview was discarded');
-    assert.match(sharePanel.textContent, /Recorded stories changed\. Make a new preview before issuing a link\./);
+    assert.match(sharePanel.textContent, /Saved views, recollections or recorded stories changed\. Make a new preview before issuing a link\./);
     view.space.dispose();
   });
 });
@@ -901,6 +905,22 @@ describe('see the photographed side', () => {
     globalThis.viewerFail = 'webgl';
     const view = await openScene();
     assert.equal(view.button('See photographed side').disabled, true);
+    view.space.dispose();
+  });
+});
+
+describe('sharing follows the recollection panel (one-object scene)', () => {
+  it('reads the share choices again when a fresh read finds a new alternative', async () => {
+    const view = await openScene();
+    const historyReads = () => gets.filter((url) => url.endsWith('/history')).length;
+    const sharePanel = () => view.find((node) => node.tag === 'details' && /Share a saved view with visitors/.test(node.textContent))[0];
+    const before = historyReads();
+    collaboration = { ...collaboration, variants: [{ id: 'vvvvvvvv-vvvv-4vvv-8vvv-vvvvvvvvvvvv', label: 'Kept from Mina', parentVersion: 1, edit: { version: null, offset: [0.2, 0, 0], yaw: 0 }, contributionIds: [], era: null, eraRevision: 0, blocked: false }] };
+    view.find((node) => node.tag === 'button' && node.textContent === 'Refresh')[0].dispatch('click');
+    await settle();
+    await settle();
+    assert.ok(historyReads() > before, 'the share choices were read again');
+    assert.match(sharePanel().textContent, /Kept from Mina/);
     view.space.dispose();
   });
 });

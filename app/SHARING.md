@@ -13,6 +13,13 @@ and any permitted recollections to quote. Label synthetic test material as
 synthetic. Capture the camera from the actual scene, then preview the visitor
 screen. Switching arrangements preserves that camera for comparison.
 
+You can also select inspection photos contributed to one of the chosen
+arrangements. A selected photo appears only with the views that depend on it;
+it is labelled as contributor-supplied and not automatically matched or
+verified history. The provider's original, source reference and raw date
+metadata stay private. The inspection JPEG removes file metadata but still
+shows visible people and text. Review the actual pixels before issuing a link.
+
 A current saved version has unknown time. Explicitly selected immutable
 alternatives can carry the owner's separate time assertion. If an assertion
 relates one alternative to another, both must be selected. A disagreement does
@@ -24,6 +31,11 @@ visitor-sharing permission. Omitting a quotation does not remove the spatial
 result's dependencies or bypass those grants. Recollections that allow manual
 construction and sharing can be used without a model-processing grant; they
 cannot thereby authorize later hosted processing.
+
+For a contribution containing a photo, both the writing and photo need place
+and share grants. Omitting the image does not make its dependent arrangement
+independent or bypass either grant. Missing or corrupt contributed photos
+also make their dependent snapshots unavailable.
 
 The preview is an actual read-only visitor screen, not a live link. It expires
 after fifteen minutes. Confirm that visitors may see the chosen reconstruction
@@ -50,6 +62,8 @@ and remains a separate way to read the permitted material.
 
 A link lasts up to seven days or until revoked. It preserves its selected
 transforms, source-derived assets, quotations, time assertions and camera.
+Selected contributor inspection photos are pinned by checksum with the views
+they support; later submissions do not silently replace them.
 For a [two-object scene](OBJECTS.md) it keeps both objects' transforms and the
 relationship rule of each selected arrangement, plus the owner's object names
 and source boxes so visitors can tell the objects apart.

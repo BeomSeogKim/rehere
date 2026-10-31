@@ -2,7 +2,8 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { OBJECT_IDS, arrangementOf, assertObjectsConfirmed, isTwoObject } from './arrangements.mjs';
-import { versionDependencies } from './collaboration.mjs';
+import { contributionAllows, versionDependencies } from './collaboration.mjs';
+import { photoAttested, readReviewPhoto } from './contribution-photos.mjs';
 import { RequestError } from './drafts.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -12,8 +13,10 @@ const MINUTE = 60_000;
 
 export const SHARE_LIMITS = Object.freeze({
   title: 120, views: 8, quotes: 20, cameraCoordinate: 50, cameraDistance: [0.5, 8],
-  previewMs: 15 * MINUTE, snapshotMs: 7 * 24 * 60 * MINUTE, snapshotsPerScene: 50, stories: 8,
+  previewMs: 15 * MINUTE, snapshotMs: 7 * 24 * 60 * MINUTE, snapshotsPerScene: 50, stories: 8, contributorPhotos: 20,
 });
+const CONTRIBUTOR_PHOTO_LABEL = 'Photo supplied by a contributor. Not automatically matched; not verified history.';
+const EVIDENCE_ASSET = /^([1-9][0-9]?)\.jpg$/;
 // Only these derived files are ever served to a preview or a visitor.
 export const SHARED_ASSETS = Object.freeze({ 'surface.json': 'application/json', 'texture.jpg': 'image/jpeg' });
 const QUOTABLE = new Set(['submitted', 'adopted', 'alternative']);
@@ -23,6 +26,7 @@ const REASONS = {
   source: [403, 'The photo is not marked as public material with permission to build and share the place.'],
   grant: [403, 'A contribution used by a selected view or quote was not shared with permission to build and share the place.'],
   withdrawn: [409, 'A contribution used by a selected view or quote was withdrawn.'],
+  unavailable: [409, 'A contributor photo used by a selected view or quote is not available for this use right now. Make a new preview later.'],
   era: [409, 'The time assertion for a selected alternative changed. Make a new preview.'],
   changed: [409, 'The saved scene changed after this preview. Make a new preview.'],
   asset: [409, 'The scene files no longer match this preview. Make a new preview.'],
@@ -78,19 +82,23 @@ function parseViews(views) {
 const PREVIEW_KEYS = ['requestId', 'title', 'views', 'startViewId', 'camera', 'contributionIds', 'synthetic'];
 const uniqueIds = (values, max) => Array.isArray(values) && values.length <= max && values.every(isId) && new Set(values).size === values.length;
 
-// storyIds is optional so earlier callers keep working; absent means none.
+// storyIds and evidencePhotoIds are optional so earlier callers keep working;
+// absent means none.
 function parsePreview(body) {
-  if (!exactKeys(body, PREVIEW_KEYS) && !exactKeys(body, [...PREVIEW_KEYS, 'storyIds'])) throw fail(400, UNREADABLE);
+  const optional = ['storyIds', 'evidencePhotoIds'].filter((key) => body !== null && typeof body === 'object' && Object.hasOwn(body, key));
+  if (!exactKeys(body, [...PREVIEW_KEYS, ...optional])) throw fail(400, UNREADABLE);
   const views = parseViews(body.views);
   const camera = parseCamera(body.camera);
   const quotes = body.contributionIds;
   const storyIds = body.storyIds ?? [];
+  const evidencePhotoIds = body.evidencePhotoIds ?? [];
   const valid = isId(body.requestId) && plain(body.title, SHARE_LIMITS.title) && body.title.trim() !== '' && views && camera
     && views.some((view) => view.id === body.startViewId) && typeof body.synthetic === 'boolean'
-    && uniqueIds(quotes, SHARE_LIMITS.quotes) && uniqueIds(storyIds, SHARE_LIMITS.stories);
+    && uniqueIds(quotes, SHARE_LIMITS.quotes) && uniqueIds(storyIds, SHARE_LIMITS.stories) && uniqueIds(evidencePhotoIds, SHARE_LIMITS.contributorPhotos);
   if (!valid) throw fail(400, UNREADABLE);
   return {
     requestId: body.requestId, title: body.title, views, startViewId: body.startViewId, camera, contributionIds: [...quotes], synthetic: body.synthetic, storyIds: [...storyIds],
+    evidencePhotoIds: [...evidencePhotoIds],
   };
 }
 
@@ -126,6 +134,13 @@ export function visitorSurface(surface) {
     },
     source: { image_size: [...source.image_size] },
   };
+}
+
+function contributionIssue(manifest, contribution) {
+  if (!contribution || contribution.withdrawnAt !== null) return 'withdrawn';
+  if (!photoAttested(manifest, contribution)) return 'unavailable';
+  if (!contributionAllows(contribution, 'place') || !contributionAllows(contribution, 'share')) return 'grant';
+  return null;
 }
 
 const sharesOf = (manifest) => manifest.shares ?? { previews: [], snapshots: [], receipts: [] };
@@ -208,13 +223,14 @@ export class ShareStore {
     return null;
   }
 
-  // Every dependency and quote needs a live record with place and share grants.
+  // Every dependency and quote needs a live record with place and share
+  // grants, for its photo too, whether or not that photo is displayed.
   #contributionIssue(manifest, ids) {
     const contributions = contributionsOf(manifest);
     for (const id of ids) {
       const contribution = contributions.find((item) => item.id === id);
-      if (!contribution || contribution.withdrawnAt !== null) return 'withdrawn';
-      if (contribution.permissions.place !== true || contribution.permissions.share !== true) return 'grant';
+      const issue = contributionIssue(manifest, contribution);
+      if (issue) return issue;
     }
     return null;
   }
@@ -233,6 +249,14 @@ export class ShareStore {
     const ids = [...frozen.views.flatMap((view) => view.dependencies), ...frozen.quotes.map((quote) => quote.contributionId)];
     const grants = this.#contributionIssue(manifest, ids);
     if (grants) return grants;
+    // Shown contributor photos: the pinned record and inspection bytes.
+    for (const pinned of frozen.contributorPhotos ?? []) {
+      const contribution = contributions.find((item) => item.id === pinned.contributionId);
+      if (!contribution || contribution.withdrawnAt !== null) return 'withdrawn';
+      const photo = contribution.photo;
+      if (!photo || photo.source.id !== pinned.sourceId || photo.review.sha256 !== pinned.reviewSha256 || photo.review.size !== pinned.reviewSize) return 'unavailable';
+      if (!photoAttested(manifest, contribution)) return 'unavailable';
+    }
     for (const view of frozen.views) {
       if (view.kind === 'version' && !savedView(manifest, view)) return 'changed';
       if (view.kind === 'variant') {
@@ -286,8 +310,25 @@ export class ShareStore {
       if (!contribution) throw fail(404, 'This contribution could not be found.');
       if (contribution.withdrawnAt !== null) this.#throwReason('withdrawn');
       if (!QUOTABLE.has(contribution.status)) throw fail(409, 'Only submitted, adopted or alternative recollections can be quoted.');
-      if (contribution.permissions.place !== true || contribution.permissions.share !== true) this.#throwReason('grant');
+      const issue = contributionIssue(manifest, contribution);
+      if (issue) this.#throwReason(issue);
       return contribution;
+    });
+
+    // A contributor photo can be shown only beside a selected view that
+    // depends on it; a quoted statement alone never makes its photo eligible.
+    const frozenPhotos = [];
+    const contributorPhotos = request.evidencePhotoIds.map((id, index) => {
+      const viewIds = selected.filter((item) => item.dependencies.includes(id)).map((item) => item.view.id);
+      const contribution = contributions.find((item) => item.id === id);
+      if (viewIds.length === 0 || !contribution?.photo) throw fail(400, 'Only a contributor photo that a selected view depends on can be shown.');
+      const { source, review } = contribution.photo;
+      const publicId = `e${index + 1}`;
+      frozenPhotos.push({ publicId, contributionId: id, sourceId: source.id, reviewSha256: review.sha256, reviewSize: review.size, viewIds });
+      return {
+        id: publicId, providerLabel: contribution.provider.displayName, label: CONTRIBUTOR_PHOTO_LABEL, viewIds: [...viewIds],
+        asset: { viewId: 'evidence', name: `${index + 1}.jpg` }, width: review.width, height: review.height,
+      };
     });
 
     const views = selected.map(({ view, edit, dependencies, era, label }) => {
@@ -337,6 +378,7 @@ export class ShareStore {
     const publicView = {
       id: null, title: request.title, createdAt: null, synthetic: request.synthetic, startViewId: request.startViewId,
       camera: { position: [...request.camera.position], target: [...request.camera.target] }, views, stories: publicStories,
+      ...(contributorPhotos.length > 0 && { contributorPhotos }),
       // The owner's names and source boxes for the two objects, as visible evidence.
       ...(isTwoObject(manifest) && { objects: manifest.objects.map(({ id, label, box }) => ({ id, label, box: [...box] })) }),
     };
@@ -353,6 +395,7 @@ export class ShareStore {
       views: selected.map(({ view, dependencies, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision })),
       quotes: quotes.map((item) => ({ contributionId: item.id, textSha256: item.textSha256 })),
       stories: pinnedStories,
+      ...(frozenPhotos.length > 0 && { contributorPhotos: frozenPhotos }),
     };
     return { publicView, frozen };
   }
@@ -360,6 +403,7 @@ export class ShareStore {
   // Returns the fixed binding for an allowlisted asset after checking it still
   // matches the frozen checksum. Never a source path or a sibling file.
   async #asset(manifest, frozen, viewId, name) {
+    if (viewId === 'evidence') return this.#evidence(manifest, frozen, name);
     if (!frozen.views.some((view) => view.id === viewId) || !Object.hasOwn(SHARED_ASSETS, name)) return null;
     const file = path.join(this.reconstructions.jobDir(manifest.draftId, manifest.id), 'assets', name);
     const binding = frozen.assets[name];
@@ -372,6 +416,18 @@ export class ShareStore {
     const info = await stat(file);
     if (!info.isFile() || info.size !== binding.size) return null;
     return { name, type: SHARED_ASSETS[name], file, size: info.size };
+  }
+
+  // A pinned contributor photo's inspection JPEG, rehashed against the pinned
+  // checksum on every read. Never the original.
+  async #evidence(manifest, frozen, name) {
+    const match = EVIDENCE_ASSET.exec(name);
+    const pinned = match && (frozen.contributorPhotos ?? []).find((item) => item.publicId === `e${match[1]}`);
+    const contribution = pinned && contributionsOf(manifest).find((item) => item.id === pinned.contributionId);
+    if (!contribution?.photo) return null;
+    const jobDir = this.reconstructions.jobDir(manifest.draftId, manifest.id);
+    const body = await readReviewPhoto(jobDir, contribution, { sha256: pinned.reviewSha256, size: pinned.reviewSize });
+    return body && { name, type: 'image/jpeg', body };
   }
 
   #previewResult(preview) {

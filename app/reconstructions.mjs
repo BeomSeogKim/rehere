@@ -3,8 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { attestPhotos, contributionsDir } from './contribution-photos.mjs';
 import {
-  BLOCKED_MESSAGE, MODEL_BLOCKED_MESSAGE, assertSceneUsable, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, usageBlocked, versionDependencies,
+  assertSceneUsable, issueMessage, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, usageBlocked, versionDependencies,
 } from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
 import {
@@ -270,6 +271,32 @@ async function writeJsonAtomic(file, value) {
   }
 }
 
+// A replayed receipt returns its saved geometry only while that version's own
+// dependencies may still be used; an unrelated later blockage does not matter.
+function assertReplayUsable(manifest, version) {
+  const issue = dependencyIssue(manifest, versionDependencies(manifest, version));
+  if (issue) throw new RequestError(409, issueMessage(issue));
+}
+
+// Removes contributor photo folders that no manifest record refers to: staging
+// left by an interrupted submission, or a folder renamed before its manifest
+// write failed. Referenced folders are never touched.
+async function sweepContributionPhotos(jobDir, manifest) {
+  const referenced = new Set((manifest.collaboration?.contributions ?? []).filter((item) => item?.photo).map((item) => item.id));
+  let names;
+  try {
+    names = await readdir(contributionsDir(jobDir));
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  for (const name of names) {
+    if (name.startsWith('.staging-') || (UUID_PATTERN.test(name) && !referenced.has(name))) {
+      await rm(path.join(contributionsDir(jobDir), name), { recursive: true, force: true });
+    }
+  }
+}
+
 async function listDirs(dir) {
   try {
     return (await readdir(dir)).filter((name) => UUID_PATTERN.test(name));
@@ -391,6 +418,9 @@ export class ReconstructionStore {
     // The one story decode in progress, set and cleared by the story store:
     // { draftId, sourceIds, controller, done }.
     this.activeStory = null;
+    // The one contributor photo being prepared, set and cleared by the
+    // collaboration store: { controller, done }.
+    this.activePhoto = null;
     this.rootDir = path.join(dataDir, 'reconstructions');
     this.stagingDir = path.join(dataDir, 'reconstruction-staging');
     this.queue = Promise.resolve();
@@ -419,6 +449,7 @@ export class ReconstructionStore {
           await rm(path.join(this.jobDir(draftId, jobId), 'story-staging'), { recursive: true, force: true });
           const manifest = await readJson(file).catch(() => null);
           if (!manifest) continue;
+          await sweepContributionPhotos(this.jobDir(draftId, jobId), manifest);
           const now = new Date().toISOString();
           const unfinished = (manifest.proposals ?? []).some((item) => ACTIVE_PROPOSAL.has(item.status));
           const changes = {};
@@ -436,9 +467,12 @@ export class ReconstructionStore {
     return this.recovered;
   }
 
+  // The one read path for scene manifests. It also attests contributor photo
+  // bundles, which every sync dependency check then requires.
   async readManifest(draftId, jobId) {
     if (!UUID_PATTERN.test(draftId) || !UUID_PATTERN.test(jobId)) return null;
-    return readJson(path.join(this.jobDir(draftId, jobId), 'manifest.json'));
+    const manifest = await readJson(path.join(this.jobDir(draftId, jobId), 'manifest.json'));
+    return manifest && attestPhotos(manifest, draftId, jobId, this.jobDir(draftId, jobId));
   }
 
   // Current uses of a scene's photo under the owner's restrictions.
@@ -473,10 +507,14 @@ export class ReconstructionStore {
   }
 
   async asset(draftId, jobId, name) {
-    const manifest = await this.get(draftId, jobId);
+    await this.recover();
+    const raw = await this.readManifest(draftId, jobId);
+    const manifest = raw && publicManifest(raw, await this.sourceUses(draftId, raw.sourceId));
     if (manifest?.status !== 'ready' || !Object.hasOwn(OUTPUTS, name)) return null;
     // Derived pixels and surfaces reproduce the blocked transform's scene.
-    if (manifest.usageBlocked) throw new RequestError(409, manifest.blockedReason === 'source' ? SOURCE_BLOCKED_MESSAGE : BLOCKED_MESSAGE);
+    if (manifest.usageBlocked) {
+      throw new RequestError(409, manifest.blockedReason === 'source' ? SOURCE_BLOCKED_MESSAGE : issueMessage(dependencyIssue(raw, currentDependencies(raw))));
+    }
     const entry = manifest.derivedAssets.find((item) => item.name === name);
     return entry ? { ...entry, file: path.join(this.jobDir(draftId, jobId), 'assets', name) } : null;
   }
@@ -739,6 +777,7 @@ export class ReconstructionStore {
         if ((previous.kind ?? 'manual') !== 'manual' || previous.baseVersion !== request.baseVersion || !sameValues(previous.offset, request.offset) || previous.yaw !== request.yaw) {
           throw new RequestError(409, 'This edit request was already used with different values.');
         }
+        assertReplayUsable(manifest, previous.version);
         return { version: previous.version, offset: previous.offset, yaw: previous.yaw };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
@@ -772,6 +811,7 @@ export class ReconstructionStore {
       const same = previous.kind === 'manual' && previous.baseVersion === request.baseVersion && previous.targetId === request.targetId
         && sameValues(previous.request, { offset: request.offset, yaw: request.yaw });
       if (!same) throw new RequestError(409, 'This edit request was already used with different values.');
+      assertReplayUsable(manifest, previous.version);
       return { version: previous.version, ...arrangementOf(previous) };
     }
     await this.#objectVersionAllowed(manifest, request.baseVersion);
@@ -876,7 +916,10 @@ export class ReconstructionStore {
     const manifest = await this.editableScene(draftId, jobId);
     // Owner-only audit: whether restoring each version is still allowed.
     const { place } = await this.sourceUses(draftId, manifest.sourceId);
-    return editHistory(manifest).map((entry) => ({ ...entry, blocked: !place || dependenciesBlocked(manifest, versionDependencies(manifest, entry.version)) }));
+    return editHistory(manifest).map((entry) => {
+      const dependencies = versionDependencies(manifest, entry.version);
+      return { ...entry, dependencies: [...dependencies], blocked: !place || dependenciesBlocked(manifest, dependencies) };
+    });
   }
 
   async createProposal(draftId, jobId, body) {
@@ -957,7 +1000,7 @@ export class ReconstructionStore {
         if (current.status !== 'queued') return null;
         if (!allowed) return { status: 'failed', error: PROPOSAL_MESSAGES.restricted };
         const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
-        if (issue) return { status: 'failed', error: issue === 'model' ? MODEL_BLOCKED_MESSAGE : BLOCKED_MESSAGE };
+        if (issue) return { status: 'failed', error: issueMessage(issue) };
         return { status: 'processing' };
       }); });
       if (started.status !== 'processing') return;
@@ -987,7 +1030,7 @@ export class ReconstructionStore {
         }
         const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
         if (issue) {
-          await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: issue === 'model' ? MODEL_BLOCKED_MESSAGE : BLOCKED_MESSAGE }));
+          await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: issueMessage(issue) }));
           return null;
         }
         // Each outbound request the model makes is admitted here, under the
@@ -1013,7 +1056,7 @@ export class ReconstructionStore {
         if (signal.aborted || this.closed) return { ...record, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
         if (manifest.edit.version !== current.baseVersion) return { ...record, status: 'stale' };
         const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
-        if (issue) return { ...record, status: 'failed', error: issue === 'model' ? MODEL_BLOCKED_MESSAGE : BLOCKED_MESSAGE };
+        if (issue) return { ...record, status: 'failed', error: issueMessage(issue) };
         if (!outcome?.ok) {
           return { ...record, status: 'failed', error: PROPOSAL_MESSAGES[outcome?.reason] ?? PROPOSAL_MESSAGES.provider };
         }
@@ -1070,6 +1113,7 @@ export class ReconstructionStore {
         if (previous.kind !== 'proposal' || previous.proposalId !== proposalId || previous.baseVersion !== request.baseVersion || previous.frontConfirmed !== request.frontConfirmed) {
           throw new RequestError(409, 'This apply request was already used with different values.');
         }
+        assertReplayUsable(manifest, previous.version);
         const replayed = isTwoObject(manifest) ? { version: previous.version, ...arrangementOf(previous) } : { version: previous.version, offset: previous.offset, yaw: previous.yaw };
         return { edit: replayed, proposal: await this.projectProposal(manifest, proposal) };
       }
@@ -1120,6 +1164,7 @@ export class ReconstructionStore {
           || (twoObjects && previous.ruleChangeConfirmed !== request.ruleChangeConfirmed)) {
           throw new RequestError(409, 'This undo request was already used with different values.');
         }
+        assertReplayUsable(manifest, previous.version);
         return twoObjects ? { version: previous.version, ...arrangementOf(previous) } : { version: previous.version, offset: previous.offset, yaw: previous.yaw };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
@@ -1132,7 +1177,9 @@ export class ReconstructionStore {
       if (!target || target.version >= manifest.edit.version) throw new RequestError(409, 'Only an earlier saved version can be restored.');
       // Undo is the way out of a blocked scene, so it checks the target, not the current version.
       const dependencies = versionDependencies(manifest, target.version);
-      if (dependenciesBlocked(manifest, dependencies)) throw new RequestError(409, 'That saved version depends on a withdrawn contribution and cannot be restored.');
+      const issue = dependencyIssue(manifest, dependencies);
+      if (issue === 'unavailable') throw new RequestError(409, 'That saved version depends on a contributor photo that is not available right now and cannot be restored.');
+      if (issue) throw new RequestError(409, 'That saved version depends on a withdrawn contribution and cannot be restored.');
       if (twoObjects) {
         // Restoring a version also restores its rule; a different rule needs explicit confirmation.
         const arrangement = arrangementOf(target);
@@ -1229,7 +1276,8 @@ export class ReconstructionStore {
     this.active?.controller.abort();
     this.activeProposal?.controller.abort();
     this.activeStory?.controller.abort();
+    this.activePhoto?.controller.abort();
     await this.serialize(() => {});
-    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done]);
+    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activePhoto?.done]);
   }
 }

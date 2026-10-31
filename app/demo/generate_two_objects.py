@@ -21,7 +21,7 @@ CASES = HERE / "two-object-cases.json"
 DEFAULT_OUTPUT = HERE / "generated" / "two-objects"
 
 
-def draw_room(name, window, door):
+def draw_room(name, window, door, counter_dx=0):
     image = Image.new("RGB", (1024, 768), (230, 220, 202))
     draw = ImageDraw.Draw(image)
     draw.polygon([(0, 768), (170, 380), (850, 380), (1024, 768)], fill=(143, 122, 98))
@@ -38,9 +38,9 @@ def draw_room(name, window, door):
     for leg in [(220, 550, 237, 675), (355, 550, 372, 660), (247, 580, 264, 695), (386, 568, 403, 680)]:
         draw.rectangle(leg, fill=(43, 67, 88))
     # Counter (object-2): top and two visible sides.
-    draw.polygon([(575, 495), (812, 454), (895, 517), (650, 566)], fill=(174, 100, 61), outline=(57, 41, 32), width=6)
-    draw.polygon([(575, 495), (650, 566), (650, 677), (575, 602)], fill=(119, 66, 42))
-    draw.polygon([(650, 566), (895, 517), (895, 630), (650, 677)], fill=(144, 77, 45), outline=(57, 41, 32), width=6)
+    draw.polygon([(x + counter_dx, y) for x, y in [(575, 495), (812, 454), (895, 517), (650, 566)]], fill=(174, 100, 61), outline=(57, 41, 32), width=6)
+    draw.polygon([(x + counter_dx, y) for x, y in [(575, 495), (650, 566), (650, 677), (575, 602)]], fill=(119, 66, 42))
+    draw.polygon([(x + counter_dx, y) for x, y in [(650, 566), (895, 517), (895, 630), (650, 677)]], fill=(144, 77, 45), outline=(57, 41, 32), width=6)
     draw.text((30, 25), f"SYNTHETIC TWO-OBJECT TEST {name} - NO HISTORICAL CLAIM", fill=(20, 20, 20))
     return image
 

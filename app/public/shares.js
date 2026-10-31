@@ -26,6 +26,25 @@ export const visitLink = (origin, token) => `${origin}/#/visit/${token}`;
 
 // A recollection can be quoted only if its writer allowed both reconstruction
 // and sharing and it is still in use.
+// The contributions a saved view depends on: a version's recorded
+// dependencies, or an alternative's contributions.
+export function viewDependencies(view, { history = [], variants = [] }) {
+  if (view.kind === 'version') return history.find((entry) => entry.version === view.version)?.dependencies ?? [];
+  return variants.find((variant) => variant.id === view.variantId)?.contributionIds ?? [];
+}
+
+// A contributor photo can be shown with a view only if that view depends on its
+// recollection, it is still in use and available, and both the words and the
+// photo allow reconstruction and sharing. The server checks again.
+export const photoShareable = (entry) =>
+  QUOTABLE.has(entry.status) &&
+  entry.photo?.available === true &&
+  entry.permissions?.place === true &&
+  entry.permissions?.share === true &&
+  entry.photo.permissions?.place === true &&
+  entry.photo.permissions?.share === true;
+export const PHOTO_EVIDENCE_LIMIT = 20;
+
 export const quotable = (entry) => QUOTABLE.has(entry.status) && typeof entry.text === 'string' && entry.permissions?.place === true && entry.permissions?.share === true;
 
 // Every retained saved version that is still usable, newest first, then each
@@ -49,7 +68,7 @@ export function viewChoices({ history = [], variants = [], currentVersion }) {
 export const storyMatchesView = (story, view) =>
   story.view?.kind === view.kind && (view.kind === 'version' ? story.view.version === view.version : story.view.variantId === view.variantId);
 
-export function previewProblem({ title, views, startViewId, camera, contributionIds }) {
+export function previewProblem({ title, views, startViewId, camera, contributionIds, evidencePhotoIds }) {
   if (!title.trim()) return 'Give the shared view a title.';
   if ([...title].length > TITLE_LIMIT) return `Keep the title to ${TITLE_LIMIT} characters or fewer.`;
   if (views.length < 1) return 'Choose at least one view to share.';
@@ -57,6 +76,7 @@ export function previewProblem({ title, views, startViewId, camera, contribution
   if (!views.some((view) => view.id === startViewId)) return 'Choose which view visitors see first.';
   if (!camera) return 'Capture the camera view first, from the 3D scene above.';
   if (contributionIds.length > QUOTE_LIMIT) return `Quote ${QUOTE_LIMIT} recollections or fewer.`;
+  if ((evidencePhotoIds ?? []).length > PHOTO_EVIDENCE_LIMIT) return `Show ${PHOTO_EVIDENCE_LIMIT} contributor photos or fewer.`;
   return null;
 }
 
@@ -124,6 +144,7 @@ export function mountShares(container, bridge) {
   const startSelect = el('select');
   const quoteList = el('div');
   const storyList = el('div');
+  const photoList = el('div');
   const cameraNote = el('p', { className: 'hint', textContent: 'No camera view captured yet.' });
   const captureButton = el('button', { type: 'button', className: 'secondary', textContent: 'Use the current camera view' });
   const previewButton = el('button', { type: 'button', textContent: 'Preview what visitors will see' });
@@ -133,6 +154,7 @@ export function mountShares(container, bridge) {
   const list = el('ul', { className: 'collab-list' });
   let viewBoxes = [];
   let quoteBoxes = [];
+  let photoBoxes = [];
 
   container.replaceChildren(
     el('details', { className: 'source-details share-panel' }, [
@@ -150,6 +172,15 @@ export function mountShares(container, bridge) {
         el('legend', { textContent: 'Recollections to quote (optional)' }),
         el('p', { className: 'hint', textContent: 'Quoting shows the person’s own words. Only recollections whose writers allowed both reconstruction and sharing can be quoted.' }),
         quoteList,
+      ]),
+      el('fieldset', { className: 'source-permissions' }, [
+        el('legend', { textContent: 'Contributor photos to show (optional)' }),
+        el('p', {
+          className: 'hint',
+          textContent:
+            'Only photos from recollections the chosen views depend on can be shown, and only where both the words and the photo allow sharing. Showing a photo is optional; a view that depends on a recollection with a photo still needs both permissions to be shared even when the photo is not shown.',
+        }),
+        photoList,
       ]),
       el('fieldset', { className: 'source-permissions' }, [
         el('legend', { textContent: 'Recorded stories to include (optional)' }),
@@ -207,6 +238,20 @@ export function mountShares(container, bridge) {
     for (const { box } of storyBoxes) box.addEventListener('change', () => discardPreview());
   }
 
+  // Nothing is chosen by default; a choice that is no longer offered is dropped.
+  function renderPhotos() {
+    const dependencies = new Set(selectedViews().flatMap((view) => viewDependencies(view, { history, variants: collaboration?.variants ?? [] })));
+    const chosen = new Set(photoBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id));
+    const offered = (collaboration?.contributions ?? []).filter((entry) => dependencies.has(entry.id) && photoShareable(entry));
+    photoBoxes = offered.map((entry) => ({ id: entry.id, box: el('input', { type: 'checkbox', checked: chosen.has(entry.id) }), entry }));
+    photoList.replaceChildren(
+      ...(photoBoxes.length
+        ? photoBoxes.map(({ box, entry }) => el('label', {}, [box, ` Photo supplied by ${entry.provider?.displayName || 'someone'}`]))
+        : [el('p', { className: 'hint', textContent: 'No contributor photo can be shown with the chosen views.' })]),
+    );
+    for (const { box } of photoBoxes) box.addEventListener('change', () => discardPreview());
+  }
+
   function renderChoices() {
     const currentVersion = bridge.editor().version;
     const choices = viewChoices({ history, variants: collaboration?.variants ?? [], currentVersion });
@@ -218,11 +263,13 @@ export function mountShares(container, bridge) {
       box.addEventListener('change', () => {
         renderStart();
         renderStories();
+        renderPhotos();
         discardPreview();
       });
     }
     renderStart();
     renderStories();
+    renderPhotos();
 
     const chosenQuotes = new Set(quoteBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id));
     const eligible = (collaboration?.contributions ?? []).filter(quotable);
@@ -243,6 +290,8 @@ export function mountShares(container, bridge) {
       camera,
       contributionIds: quoteBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id),
       storyIds: storyBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id),
+      // Optional: sent only when a contributor photo is chosen.
+      ...(photoBoxes.some(({ box }) => box.checked === true) ? { evidencePhotoIds: photoBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id) } : {}),
       synthetic: synthetic.checked === true,
     };
   }
@@ -451,12 +500,12 @@ export function mountShares(container, bridge) {
   loadList();
 
   return {
-    // Stories were saved or withdrawn: the choices are read again, keeping the
+    // Stories, alternatives or recollections changed: the choices are read again, keeping the
     // owner's selections that are still offered and never selecting a story.
     // A preview not yet issued no longer matches and is discarded; a link
     // already issued stays on screen.
     refreshOptions() {
-      if (preview && issuedFor !== preview.id) discardPreview('Recorded stories changed. Make a new preview before issuing a link.');
+      if (preview && issuedFor !== preview.id) discardPreview('Saved views, recollections or recorded stories changed. Make a new preview before issuing a link.');
       loadChoices();
     },
     // The saved version changed: views and quotes are chosen again.

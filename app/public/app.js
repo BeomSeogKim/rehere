@@ -927,7 +927,7 @@ function stopOwner() {
   if (/^#\/memories\//.test(location.hash)) history.replaceState(null, '', location.pathname);
 }
 
-const access = mountAccess(els.access, { onOwner: startOwner, onSignedOut: stopOwner, renderContributor: (node) => mountContributor(node) });
+const access = mountAccess(els.access, { onOwner: startOwner, onSignedOut: stopOwner, renderContributor: (node, principal) => mountContributor(node, { principal }) });
 
 // Any private request answered 401 means the session expired or was replaced,
 // including requests made by the scene and proposal modules.
