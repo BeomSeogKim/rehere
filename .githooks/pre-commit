@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+branch=$(git symbolic-ref --short -q HEAD) || {
+  echo "pre-commit: check out a named work branch before committing" >&2
+  exit 1
+}
+case "$branch" in
+  main|master)
+    echo "pre-commit: do not commit on $branch; create a branch first: git switch -c <type>/<slug>" >&2
+    exit 1
+    ;;
+esac
+"$root/tools/git-conventions.sh" branch "$branch"
+git diff --cached --check
+exec python3 "$root/tools/check-repository.py" --staged

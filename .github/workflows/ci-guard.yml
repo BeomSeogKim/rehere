@@ -1,0 +1,48 @@
+name: CI Guard
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-guard-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check repository foundation
+        run: |
+          git diff --check
+          git diff --cached --check
+          for file in .githooks/* tools/*.sh; do bash -n "$file"; done
+          python3 tools/check-repository.py
+      - name: Test repository guards
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Check pull request branch
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: tools/git-conventions.sh branch "$PR_BRANCH"
+      - name: Check pull request title and description
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: tools/git-conventions.sh pr
+      - name: Check commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        run: tools/git-conventions.sh range "$RANGE"
