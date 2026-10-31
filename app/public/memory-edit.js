@@ -59,7 +59,7 @@ export function proposalStatusText(proposal) {
     case 'stale':
       return 'This proposal was made for an older saved version and can no longer be applied. Plan again.';
     case 'applied':
-      return `Applied and saved as version ${proposal.appliedVersion}.`;
+      return `This proposal was applied as version ${proposal.appliedVersion}.`;
     case 'interrupted':
       return 'Interrupted before it finished. Nothing was changed; any cost already counted remains counted.';
     default:
@@ -240,7 +240,10 @@ export function mountMemoryEdit(container, bridge) {
     // Compared with the saved state of the plan's own object, never the one
     // chosen now; the version is the scene's.
     const editor = bridge.editor(bridge.targets ? targetOf(current) : undefined);
-    const nodes = [el('p', { className: 'memory-status', textContent: proposalStatusText(current) })];
+    // An applied proposal is a receipt: it says which version it made and, once
+    // the scene has moved on, which version is saved now.
+    const moved = current.status === 'applied' && current.appliedVersion !== editor.version ? ` The saved scene is now version ${editor.version}.` : '';
+    const nodes = [el('p', { className: 'memory-status', textContent: `${proposalStatusText(current)}${moved}` })];
     nodes.push(el('p', { className: 'memory-statement' }, [el('strong', { textContent: 'Your memory: ' }), `“${current.statement.text}”`]));
     // A plan stays with the object it was made for, whatever is chosen now.
     if (bridge.targets && targetOf(current)) nodes.push(el('p', { className: 'hint', textContent: `Planned for ${bridge.targets.nameOf(targetOf(current))}.` }));
@@ -527,7 +530,7 @@ export function mountMemoryEdit(container, bridge) {
       }
       setPreview(false);
       current = result.body.proposal ?? current;
-      if (adopt(result.body.edit)) status.textContent = `Applied and saved as version ${result.body.edit.version}.`;
+      if (adopt(result.body.edit)) status.textContent = `Saved new arrangement version ${result.body.edit.version}.`;
     });
   }
 

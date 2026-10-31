@@ -205,6 +205,7 @@ describe('memory proposals on a two-object scene', () => {
       ui.button('Preview on the scene').dispatch('click');
       assert.notEqual(badge('A: Counter'), beforeA, 'the preview moves A');
       assert.equal(badge('B: Flour stack'), beforeB, 'B is not moved');
+      assert.match(ui.text(), /Shown now, a preview from the memory or recollection panel, not saved: From the original photo, A: Counter is left of B: Flour stack\./, 'the strip names the memory preview as what is drawn');
       assert.equal(ui.button('B: Flour stack').attributes['aria-pressed'], 'true');
     } finally {
       mock.timers.reset();
@@ -316,6 +317,48 @@ describe('recollection candidates per object', () => {
     await settle();
     const [sent] = ui.posts(`/contributions/${CID}/review`);
     assert.deepEqual(sent.body.transform, { targetId: 'object-1', offset: [-0.4, 0, 0], yaw: 0 });
+  });
+});
+
+describe('the relation strip describes what is drawn', () => {
+  const SAVED_ORDER = 'From the original photo, A: Counter is left of B: Flour stack.';
+  const CROSSED = 'From the original photo, B: Flour stack is left of A: Counter.';
+  const strip = (ui) => ui.find((node) => node.className === 'relation-strip')[0].textContent;
+
+  it('names a recollection candidate as what is shown, and the saved order once it stops', async () => {
+    const entry = { id: CID, principalId: 'p', provider: { displayName: 'Mina' }, kind: 'human_recollection', text: 'The flour was on the left.', textSha256: 'a'.repeat(64), permissions: { place: true, model: false, share: false }, periodClaim: null, createdAt: '2026-11-01T00:00:00.000Z', revision: 1, status: 'submitted', review: null, withdrawnAt: null };
+    routes[`GET ${JOB_URL}/collaboration`] = () => Promise.resolve(json(200, { contributions: [entry], variants: [], blocked: false }));
+    const ui = await open();
+    ui.button('Review').dispatch('click');
+    const decision = ui.find((node) => node.tag === 'select' && node.children.some((option) => option.value === 'alternative'))[0];
+    decision.value = 'alternative';
+    decision.dispatch('change');
+    ui.button('B: Flour stack').dispatch('click');
+    const x = ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === 'Candidate Left / right')[0];
+    x.value = '-1.5';
+    x.dispatch('input');
+    ui.button('Preview candidate on the scene').dispatch('click');
+    assert.ok(strip(ui).includes(`Saved: ${SAVED_ORDER}`));
+    assert.ok(strip(ui).includes(`Shown now, a preview from the memory or recollection panel, not saved: ${CROSSED}`));
+    assert.doesNotMatch(strip(ui), /same as saved/);
+    decision.value = 'hold';
+    decision.dispatch('change');
+    assert.ok(strip(ui).includes(`Shown now, the saved arrangement: ${SAVED_ORDER}`));
+  });
+
+  it('follows Show saved and Show your preview for an unsaved change that crosses the order', async () => {
+    const ui = await open();
+    ui.button('A: Counter').dispatch('click');
+    const x = ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === 'Left / right')[0];
+    x.value = '1.5';
+    x.dispatch('input');
+    assert.ok(strip(ui).includes(`Shown now, your unsaved change: ${CROSSED}`));
+    ui.button('Show saved arrangement').dispatch('click');
+    assert.ok(strip(ui).includes(`Shown now, the saved arrangement: ${SAVED_ORDER}`));
+    assert.ok(strip(ui).includes(`Your unsaved change (not shown): ${CROSSED}`));
+    ui.button('Show your preview').dispatch('click');
+    assert.ok(strip(ui).includes(`Shown now, your unsaved change: ${CROSSED}`));
+    assert.doesNotMatch(strip(ui), /not shown/);
   });
 });
 

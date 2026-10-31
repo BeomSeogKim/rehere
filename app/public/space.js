@@ -1162,10 +1162,18 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       toggle.textContent = showingSaved ? 'Show your preview' : 'Show saved arrangement';
       toggle.disabled = !dirty && !showingSaved;
       pick.forEach((button, i) => button.setAttribute('aria-pressed', String(objects[i].id === selected)));
+      // Describes what the view actually draws, named by the same choice that
+      // picked it; an unsaved change that is not drawn is listed as such.
+      const shownLabel = proposalPreview
+        ? 'a preview from the memory or recollection panel, not saved'
+        : !showingSaved && dirty
+          ? 'your unsaved change'
+          : 'the saved arrangement';
       strip.replaceChildren(
         el('p', { className: 'hint', textContent: 'An aid, not proof: the left–right order of the two visible centres as seen from the original camera.' }),
         el('p', { textContent: `Saved: ${orderText(session.saved)}` }),
-        el('p', { textContent: dirty ? `Your preview: ${orderText(session.preview)}` : 'Your preview: same as saved.' }),
+        el('p', { textContent: `Shown now, ${shownLabel}: ${orderText(shown)}` }),
+        ...(dirty && (proposalPreview || showingSaved) ? [el('p', { textContent: `Your unsaved change (not shown): ${orderText(session.preview)}` })] : []),
       );
       const rule = session.saved.relationship;
       ruleState.textContent = `Current rule: ${ruleText(rule)}. ${rule ? 'It compares where the visible centres appear from the original camera; it does not detect collisions or measure distances.' : ''}`.trim();

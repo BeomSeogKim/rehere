@@ -209,7 +209,7 @@ describe('two-object scene', () => {
     const x = ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === 'Left / right')[0];
     x.value = '1.5';
     x.dispatch('input');
-    assert.match(ui.text(), /Your preview: From the original photo, B: Flour stack is left of A: Counter\./);
+    assert.match(ui.text(), /Shown now, your unsaved change: From the original photo, B: Flour stack is left of A: Counter\./);
     assert.match(ui.text(), /This change would break your rule/);
     assert.equal(ui.button('Apply and save').disabled, true);
     ui.button('Apply and save').dispatch('click');

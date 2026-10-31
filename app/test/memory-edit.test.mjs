@@ -274,6 +274,21 @@ describe('memory proposal panel', () => {
     assert.deepEqual(view.calls.at(-1), ['setLocked', false]);
     assert.match(view.container.textContent, /Version 2 \(current\): Change from a memory/);
     assert.match(view.container.textContent, /AI suggestion: The memory says/);
+    const count = (text) => view.container.textContent.split(text).length - 1;
+    const live = view.find((node) => node.role === 'status' && node.parent === view.container)[0];
+    assert.equal(live.textContent, 'Saved new arrangement version 2.', 'the live status confirms the save once');
+    assert.equal(count('Saved new arrangement version 2.'), 1);
+    assert.equal(count('This proposal was applied as version 2.'), 1, 'the review is a receipt, not a second confirmation');
+    assert.doesNotMatch(view.container.textContent, /Applied and saved as version/);
+
+    view.button('Return to version 1').dispatch('click');
+    assert.deepEqual(posts[1].body, { requestId: posts[1].body.requestId, baseVersion: 2, targetVersion: 1 });
+    state.history.push({ version: 3, offset: [0, 0, 0], yaw: 0, kind: 'undo', targetVersion: 1 });
+    posts[1].respond(json(200, { version: 3, offset: [0, 0, 0], yaw: 0 }));
+    await settle();
+    assert.match(live.textContent, /^Returned to the position of version 1, saved as version 3\./);
+    assert.match(view.container.textContent, /This proposal was applied as version 2\. The saved scene is now version 3\./);
+    assert.doesNotMatch(view.container.textContent, /Applied and saved as version 2|Saved new arrangement version 2/, 'no stale confirmation reads as current');
     view.handle.dispose();
   });
 
