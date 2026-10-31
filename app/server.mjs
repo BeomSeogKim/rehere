@@ -4,6 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AccessStore, isToken } from './access.mjs';
+import { CollaborationStore } from './collaboration.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest, parseProposalRequest, parseUndoRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
@@ -14,6 +15,9 @@ const DEFAULT_DATA_DIR = fileURLToPath(new URL('./data/', import.meta.url));
 const DEFAULT_PORT = 4317;
 const THREE_DIR = fileURLToPath(new URL('./node_modules/three/', import.meta.url));
 const JSON_BODY_BYTES = 16 * 1024;
+// A written recollection may hold 10,000 UTF-16 code units; even with every
+// unit escaped as \uXXXX (6 bytes) the body stays under this cap.
+const CONTRIBUTION_BODY_BYTES = 64 * 1024;
 
 // A fixed list keeps request paths from ever reaching the file system directly.
 const STATIC_FILES = new Map([
@@ -27,6 +31,7 @@ const STATIC_FILES = new Map([
   ['/photo-scene.js', ['photo-scene.js', 'text/javascript; charset=utf-8']],
   ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
   ['/access-ui.js', ['access-ui.js', 'text/javascript; charset=utf-8']],
+  ['/collaboration.js', ['collaboration.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // Pinned local Three.js files. OrbitControls imports the bare specifier
@@ -59,6 +64,10 @@ const PROPOSAL_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\
 const HISTORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/history$/;
 const UNDO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/undo$/;
 const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
+const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/(contributions|collaboration)$/;
+const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw)$/;
+const ERA_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/era$/;
+const NOT_FOUND = 'This scene could not be found.';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
@@ -179,13 +188,13 @@ async function readForm(req, maxBytes) {
   }
 }
 
-async function readJsonBody(req) {
+async function readJsonBody(req, maxBytes = JSON_BODY_BYTES) {
   if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] ?? '')) {
     throw new RequestError(415, 'The request could not be read.');
   }
   const declared = Number(req.headers['content-length']);
-  if (declared > JSON_BODY_BYTES) throw new RequestError(413, 'The request is too large.');
-  const body = await readBody(req, JSON_BODY_BYTES).catch((error) => {
+  if (declared > maxBytes) throw new RequestError(413, 'The request is too large.');
+  const body = await readBody(req, maxBytes).catch((error) => {
     throw error instanceof RequestError ? new RequestError(413, 'The request is too large.') : error;
   });
   try {
@@ -274,6 +283,7 @@ export function createAppServer({
   const reconstructions = new ReconstructionStore({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage,
   });
+  const collaboration = new CollaborationStore({ reconstructions });
 
   async function handle(req, res) {
     const { port } = server.address();
@@ -306,10 +316,21 @@ export function createAppServer({
       const token = sessionToken();
       return token ? accessStore.session(token) : null;
     };
-    const requireOwner = async () => {
+    const requirePrincipal = async () => {
       const current = await principal();
       if (!current) throw new RequestError(401, UNAUTHORIZED);
+      return current;
+    };
+    const requireOwner = async () => {
+      const current = await requirePrincipal();
       if (current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
+      return current;
+    };
+    // A contributor may reach only the memories they were invited to. The raw
+    // path segment is compared, so a malformed ID is refused before any lookup.
+    const requireScope = async (draftId) => {
+      const current = await requirePrincipal();
+      if (current.role !== 'owner' && !current.draftIds.includes(draftId)) throw new RequestError(403, FORBIDDEN);
       return current;
     };
     // Rejected attempts count toward the limit whatever the reason.
@@ -383,6 +404,48 @@ export function createAppServer({
       const owner = await requireOwner();
       strictBody(await readJsonBody(req), []);
       sendJson(res, 200, await accessStore.revokeInvitation(owner.id, revokeMatch[1]));
+      return;
+    }
+    if (pathname === '/api/contributor/places') {
+      const current = await requirePrincipal();
+      if (!reading) throw new RequestError(405, 'Method not allowed.');
+      sendJson(res, 200, await collaboration.places(current));
+      return;
+    }
+    const sceneCollaboration = SCENE_COLLABORATION_PATH.exec(pathname);
+    const contributionAction = CONTRIBUTION_ACTION_PATH.exec(pathname);
+    const eraMatch = ERA_PATH.exec(pathname);
+    const collaborationMatch = sceneCollaboration ?? contributionAction ?? eraMatch;
+    if (collaborationMatch) {
+      const [, draftId, jobId, third, fourth] = collaborationMatch;
+      const current = await requireScope(draftId);
+      const ownerOnly = eraMatch || fourth === 'review';
+      if (ownerOnly && current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
+      const writing = req.method === 'POST' && (!sceneCollaboration || third === 'contributions');
+      if (!(sceneCollaboration && reading) && !writing) throw new RequestError(405, 'Method not allowed.');
+      if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
+      if (sceneCollaboration && reading) {
+        sendJson(res, 200, await collaboration.get(draftId, jobId, current));
+        return;
+      }
+      if (sceneCollaboration) {
+        const body = strictBody(await readJsonBody(req, CONTRIBUTION_BODY_BYTES), ['requestId', 'text', 'permissions', 'periodClaim']);
+        sendJson(res, 200, await collaboration.submit(draftId, jobId, current, body));
+        return;
+      }
+      if (!UUID.test(third)) throw new RequestError(404, eraMatch ? 'This version could not be found.' : 'This contribution could not be found.');
+      if (eraMatch) {
+        const body = strictBody(await readJsonBody(req), ['requestId', 'baseRevision', 'kind', 'label', 'start', 'end', 'statement', 'relation', 'relativeToVariantId', 'confirmed']);
+        sendJson(res, 200, await collaboration.era(draftId, jobId, current, third, body));
+        return;
+      }
+      if (fourth === 'review') {
+        const body = strictBody(await readJsonBody(req), ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform']);
+        sendJson(res, 200, await collaboration.review(draftId, jobId, current, third, body));
+        return;
+      }
+      const body = strictBody(await readJsonBody(req), ['requestId']);
+      sendJson(res, 200, await collaboration.withdraw(draftId, jobId, current, third, body));
       return;
     }
     // Every other API route serves private content: the owner session is

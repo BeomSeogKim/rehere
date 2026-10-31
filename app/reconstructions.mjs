@@ -3,6 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  BLOCKED_MESSAGE, MODEL_BLOCKED_MESSAGE, assertSceneUsable, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, usageBlocked, versionDependencies,
+} from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
 import {
   ACTIVE_PROPOSAL, PROPOSAL_MESSAGES, editHistory, newProposal, pythonImagePreparer, staleProposals, validatePlan,
@@ -141,10 +144,11 @@ function sameValues(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-// Internal request records stay on disk; clients see the manifest contract only.
+// Internal request and collaboration records stay on disk; clients see the
+// manifest contract plus whether withdrawn or ungranted contributions block use.
 export function publicManifest(manifest) {
-  const { edits, proposals, ...rest } = manifest;
-  return rest;
+  const { edits, proposals, collaboration, ...rest } = manifest;
+  return { ...rest, usageBlocked: usageBlocked(manifest), modelBlocked: modelBlocked(manifest) };
 }
 
 async function readJson(file) {
@@ -295,9 +299,16 @@ export class ReconstructionStore {
     return manifests.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
+  async draftIds() {
+    await this.recover();
+    return listDirs(this.rootDir);
+  }
+
   async asset(draftId, jobId, name) {
     const manifest = await this.get(draftId, jobId);
     if (manifest?.status !== 'ready' || !Object.hasOwn(OUTPUTS, name)) return null;
+    // Derived pixels and surfaces reproduce the blocked transform's scene.
+    if (manifest.usageBlocked) throw new RequestError(409, BLOCKED_MESSAGE);
     const entry = manifest.derivedAssets.find((item) => item.name === name);
     return entry ? { ...entry, file: path.join(this.jobDir(draftId, jobId), 'assets', name) } : null;
   }
@@ -515,16 +526,18 @@ export class ReconstructionStore {
       if (request.baseVersion !== manifest.edit.version) {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before applying this edit.');
       }
+      assertSceneUsable(manifest, 'place');
       const edit = { version: manifest.edit.version + 1, offset: request.offset, yaw: request.yaw };
-      await this.saveVersion(manifest, edit, { requestId: request.requestId, baseVersion: request.baseVersion, ...edit });
+      await this.saveVersion(manifest, edit, { requestId: request.requestId, baseVersion: request.baseVersion, ...edit, dependencies: currentDependencies(manifest) });
       return edit;
     });
   }
 
   // One manifest write holds the new transform, its request receipt and every
   // proposal status change, so no partial apply can be observed or persisted.
-  saveVersion(manifest, edit, receipt, proposals = manifest.proposals ?? []) {
-    const changes = { edit, edits: [...manifest.edits, receipt] };
+  // Every receipt names the contributions its transform depends on.
+  saveVersion(manifest, edit, receipt, proposals = manifest.proposals ?? [], extra = {}) {
+    const changes = { ...extra, edit, edits: [...manifest.edits, receipt] };
     if (manifest.proposals || proposals.length > 0) changes.proposals = staleProposals(proposals, edit.version, new Date().toISOString());
     return this.update(manifest, changes);
   }
@@ -538,7 +551,7 @@ export class ReconstructionStore {
   async proposals(draftId, jobId) {
     await this.recover();
     const manifest = await this.editableScene(draftId, jobId);
-    return [...(manifest.proposals ?? [])].reverse();
+    return [...(manifest.proposals ?? [])].reverse().map((item) => projectProposal(manifest, item));
   }
 
   async proposal(draftId, jobId, proposalId) {
@@ -549,7 +562,9 @@ export class ReconstructionStore {
 
   async history(draftId, jobId) {
     await this.recover();
-    return editHistory(await this.editableScene(draftId, jobId));
+    const manifest = await this.editableScene(draftId, jobId);
+    // Owner-only audit: whether restoring each version is still allowed.
+    return editHistory(manifest).map((entry) => ({ ...entry, blocked: dependenciesBlocked(manifest, versionDependencies(manifest, entry.version)) }));
   }
 
   async createProposal(draftId, jobId, request) {
@@ -562,7 +577,7 @@ export class ReconstructionStore {
         if (existing.baseVersion !== request.baseVersion || existing.statement.text !== request.text) {
           throw new RequestError(409, 'This proposal request was already used with a different message or version.');
         }
-        return { proposal: existing, start: false };
+        return { proposal: projectProposal(manifest, existing), start: false };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
       const { source, imagePath, size } = await this.verifiedOriginal(draftId, manifest.sourceId);
@@ -572,6 +587,7 @@ export class ReconstructionStore {
       if (request.baseVersion !== manifest.edit.version) {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before asking for a proposal.');
       }
+      assertSceneUsable(manifest, 'model');
       if (!this.proposalModel) throw new RequestError(503, 'Memory-based editing with the hosted model is not set up on this computer.');
       if (this.closed) throw new RequestError(503, 'The app is shutting down. Try again later.');
       if (this.activeProposal) throw new RequestError(409, 'Another proposal is being prepared right now. Try again when it finishes.');
@@ -614,7 +630,13 @@ export class ReconstructionStore {
     const { signal } = controller;
     const finish = (changes) => this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current) => (current.status === 'processing' ? changes : null)));
     try {
-      const started = await this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current) => (current.status === 'queued' ? { status: 'processing' } : null)));
+      // Grants are checked again at dispatch: a withdrawal may have arrived since creation.
+      const started = await this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
+        if (current.status !== 'queued') return null;
+        const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
+        if (issue) return { status: 'failed', error: issue === 'model' ? MODEL_BLOCKED_MESSAGE : BLOCKED_MESSAGE };
+        return { status: 'processing' };
+      }));
       if (started.status !== 'processing') return;
       const surface = JSON.parse(await readFile(path.join(this.jobDir(draftId, jobId), 'assets', 'surface.json'), 'utf8'));
       let image;
@@ -625,7 +647,26 @@ export class ReconstructionStore {
         await finish(signal.aborted ? { status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted } : { status: 'failed', error: PROPOSAL_MESSAGES.image });
         return;
       }
-      const outcome = await this.proposalModel({ text: proposal.statement.text, image, selection, sourceId, baseVersion: proposal.baseVersion, saved, signal });
+      // Last check before anything reaches the provider: under the mutex, the
+      // proposal must still be processing and every inherited grant still valid.
+      // The call starts inside the slot but is awaited outside it.
+      const dispatched = await this.serialize(async () => {
+        const manifest = await this.editableScene(draftId, jobId);
+        const current = (manifest.proposals ?? []).find((item) => item.id === proposal.id);
+        if (current?.status !== 'processing') return null;
+        if (signal.aborted || this.closed) {
+          await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted }));
+          return null;
+        }
+        const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
+        if (issue) {
+          await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: issue === 'model' ? MODEL_BLOCKED_MESSAGE : BLOCKED_MESSAGE }));
+          return null;
+        }
+        return { call: this.proposalModel({ text: proposal.statement.text, image, selection, sourceId, baseVersion: proposal.baseVersion, saved, signal }) };
+      });
+      if (!dispatched) return;
+      const outcome = await dispatched.call;
       await this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
         const record = { model: outcome?.model ?? null, usage: outcome?.usage ?? null, responseId: outcome?.responseId ?? null };
         // A canceled or stale proposal keeps its status; only what was spent is recorded.
@@ -633,6 +674,8 @@ export class ReconstructionStore {
         // Still processing after an abort means shutdown: a late success is not offered.
         if (signal.aborted || this.closed) return { ...record, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
         if (manifest.edit.version !== current.baseVersion) return { ...record, status: 'stale' };
+        const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
+        if (issue) return { ...record, status: 'failed', error: issue === 'model' ? MODEL_BLOCKED_MESSAGE : BLOCKED_MESSAGE };
         if (!outcome?.ok) {
           return { ...record, status: 'failed', error: PROPOSAL_MESSAGES[outcome?.reason] ?? PROPOSAL_MESSAGES.provider };
         }
@@ -664,7 +707,7 @@ export class ReconstructionStore {
         return { status: 'canceled', error: PROPOSAL_MESSAGES.canceled };
       });
       if (this.activeProposal?.id === proposalId) this.activeProposal.controller.abort();
-      return proposal;
+      return projectProposal(await this.editableScene(draftId, jobId), proposal);
     });
   }
 
@@ -680,7 +723,7 @@ export class ReconstructionStore {
         if (previous.kind !== 'proposal' || previous.proposalId !== proposalId || previous.baseVersion !== request.baseVersion || previous.frontConfirmed !== request.frontConfirmed) {
           throw new RequestError(409, 'This apply request was already used with different values.');
         }
-        return { edit: { version: previous.version, offset: previous.offset, yaw: previous.yaw }, proposal };
+        return { edit: { version: previous.version, offset: previous.offset, yaw: previous.yaw }, proposal: projectProposal(manifest, proposal) };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
       await this.permittedPhoto(draftId, manifest.sourceId);
@@ -695,10 +738,14 @@ export class ReconstructionStore {
       if (proposal.result.action === 'face_anchor' && request.frontConfirmed !== true) {
         throw new RequestError(409, 'Confirm that the visible side of the object is its front before applying this turn.');
       }
+      assertSceneUsable(manifest, 'model');
       const { offset, yaw } = proposal.result.transform;
       const edit = { version: manifest.edit.version + 1, offset: [...offset], yaw };
       const applied = { ...proposal, status: 'applied', appliedVersion: edit.version, updatedAt: new Date().toISOString() };
-      const receipt = { requestId: request.requestId, kind: 'proposal', proposalId, frontConfirmed: request.frontConfirmed, baseVersion: request.baseVersion, ...edit };
+      const receipt = {
+        requestId: request.requestId, kind: 'proposal', proposalId, frontConfirmed: request.frontConfirmed, baseVersion: request.baseVersion, ...edit,
+        dependencies: currentDependencies(manifest),
+      };
       await this.saveVersion(manifest, edit, receipt, proposals.map((item) => (item.id === proposalId ? applied : item)));
       return { edit, proposal: applied };
     });
@@ -722,8 +769,11 @@ export class ReconstructionStore {
       }
       const target = editHistory(manifest).find((item) => item.version === request.targetVersion);
       if (!target || target.version >= manifest.edit.version) throw new RequestError(409, 'Only an earlier saved version can be restored.');
+      // Undo is the way out of a blocked scene, so it checks the target, not the current version.
+      const dependencies = versionDependencies(manifest, target.version);
+      if (dependenciesBlocked(manifest, dependencies)) throw new RequestError(409, 'That saved version depends on a withdrawn contribution and cannot be restored.');
       const edit = { version: manifest.edit.version + 1, offset: [...target.offset], yaw: target.yaw };
-      await this.saveVersion(manifest, edit, { requestId: request.requestId, kind: 'undo', targetVersion: target.version, baseVersion: request.baseVersion, ...edit });
+      await this.saveVersion(manifest, edit, { requestId: request.requestId, kind: 'undo', targetVersion: target.version, baseVersion: request.baseVersion, ...edit, dependencies });
       return edit;
     });
   }

@@ -139,14 +139,17 @@ const unclear = (result) => result.status === 0 || result.status >= 500;
 const reasonOf = (result) => (typeof result.body?.error === 'string' ? result.body.error.trim() : '');
 
 // onOwner(principal) starts the owner app; onSignedOut() must tear down every
-// private view synchronously. Returns { start(), sessionEnded() }.
-export function mountAccess(container, { onOwner, onSignedOut }) {
+// private view synchronously. renderContributor(node, principal), when given,
+// fills a contributor's screen and returns { dispose() }, called on any screen
+// change. Returns { start(), sessionEnded() }.
+export function mountAccess(container, { onOwner, onSignedOut, renderContributor = null }) {
   // Bumped on every screen change, so a late response for an earlier screen or
   // session is dropped.
   let generation = 0;
   let principal = null;
   let unsavedKeys = false;
   let cardUrl = null;
+  let contributorView = null;
 
   window.addEventListener('beforeunload', (event) => {
     if (!unsavedKeys) return;
@@ -157,6 +160,8 @@ export function mountAccess(container, { onOwner, onSignedOut }) {
   const status = el('p', { className: 'form-message', role: 'alert' });
   const show = (...nodes) => {
     generation += 1;
+    contributorView?.dispose();
+    contributorView = null;
     if (cardUrl) URL.revokeObjectURL(cardUrl);
     cardUrl = null;
     container.replaceChildren(...nodes);
@@ -507,14 +512,16 @@ export function mountAccess(container, { onOwner, onSignedOut }) {
       return;
     }
     const places = principal.draftIds.length;
+    const holder = el('div');
     show(
       accountBar(),
       el('section', { className: 'panel access' }, [
         el('h1', { textContent: 'You are a contributor' }),
-        el('p', { textContent: `Your invitation gives you access to ${places} place${places === 1 ? '' : 's'} in this workspace.` }),
-        el('p', { className: 'hint', textContent: 'Adding your own memories to a place is not available yet. Your access and your recovery key stay valid.' }),
+        el('p', { textContent: `Your invitation gives you access to ${places} place${places === 1 ? '' : 's'} in this workspace. Your access and your recovery key stay valid even if the invitation is closed.` }),
       ]),
+      holder,
     );
+    if (renderContributor) contributorView = renderContributor(holder, principal);
   }
 
   // Private views are torn down before the request leaves, so nothing private

@@ -18,8 +18,10 @@ proposals, explore the visible surfaces, preview foreground changes and save
 versioned transforms. A separately enabled Meta planner connects written
 memories to bounded changes with explicit approval and preserved version
 history. Unseen areas remain empty. Local owner sessions, scoped contributor
-credentials and recovery protect private content. Contributions, visitor sharing
-and multi-view alignment are not connected yet.
+credentials and recovery protect private content. Written contributions stay
+attributed through owner review, immutable alternatives and explicit time
+assertions; withdrawal blocks dependent uses. Visitor sharing, photo or voice
+contributions and multi-view alignment are not connected yet.
 
 The production deployment stack is not selected.
 

@@ -136,6 +136,7 @@ describe('proposal helpers', () => {
     assert.match(proposalStatusText({ status: 'applied', appliedVersion: 3 }), /version 3/);
     assert.match(proposalStatusText({ status: 'interrupted' }), /cost already counted/);
     assert.equal(historyLabel({ kind: 'undo', targetVersion: 2 }), 'Return to version 2');
+    assert.equal(historyLabel({ kind: 'contribution' }), 'Change from a recollection');
     assert.equal(formatTransform({ offset: [0.5, 0, -0.25], yaw: Math.PI / 2 }), 'left/right 0.50, down/up 0.00, away/toward -0.25, turn 90°');
   });
 });
@@ -504,6 +505,20 @@ describe('memory proposal panel', () => {
     reads[0](json(200, proposal()));
     await settle();
     assert.match(view.container.textContent, /Canceled\. Nothing was changed\./);
+    assert.equal(view.button('Preview on the scene'), undefined);
+    view.handle.dispose();
+  });
+
+  it('shows a redacted proposal and its history entry without any words, result or preview', async () => {
+    const redacted = proposal({ status: 'stale', redacted: true, statement: { id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', kind: 'human_memory', text: null, sha256: 'a'.repeat(64), modelConsent: true }, result: null, question: null, error: 'This proposal is no longer available.' });
+    state.proposals = [redacted];
+    state.history.push({ version: 2, offset: [0, 0, 0], yaw: 0.5, kind: 'proposal', proposalId: PROPOSAL_ID });
+    const view = mount({ editor: { version: 2, offset: [0, 0, 0], yaw: 0.5, clean: true } });
+    await settle();
+    const textNow = view.container.textContent;
+    assert.match(textNow, /no longer shown, because the scene they were made for depends on a withdrawn recollection/);
+    assert.match(textNow, /The memory for this change is no longer shown\./);
+    assert.doesNotMatch(textNow, /null|AI suggestion|Your memory: /);
     assert.equal(view.button('Preview on the scene'), undefined);
     view.handle.dispose();
   });

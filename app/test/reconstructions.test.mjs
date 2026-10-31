@@ -150,7 +150,9 @@ describe('reconstruction builds', () => {
       assert.equal(job.sourceId, second.id);
       assert.equal(job.sourceSha256, second.sha256);
       assert.deepEqual(job.box, [1, 2, 60, 40]);
-      assert.deepEqual(Object.keys(job).sort(), ['box', 'createdAt', 'derivedAssets', 'draftId', 'edit', 'error', 'id', 'requestId', 'sourceId', 'sourceSha256', 'status', 'updatedAt']);
+      assert.deepEqual(Object.keys(job).sort(), ['box', 'createdAt', 'derivedAssets', 'draftId', 'edit', 'error', 'id', 'modelBlocked', 'requestId', 'sourceId', 'sourceSha256', 'status', 'updatedAt', 'usageBlocked']);
+      assert.equal(job.usageBlocked, false);
+      assert.equal(job.modelBlocked, false);
 
       assert.equal(runner.calls.length, 1);
       assert.deepEqual(runner.calls[0].bytes, OTHER_PHOTO, 'the selected uploaded image reaches the runner');

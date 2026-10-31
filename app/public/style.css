@@ -296,3 +296,23 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
 .access-key span { font-weight: 600; }
 .access-key code { overflow-wrap: anywhere; user-select: all; }
 .access-download { display: inline-block; margin: 8px 0; color: var(--accent); font-weight: 600; }
+
+.collab h1 { margin-top: 0; }
+.collab textarea, .collab input[type="text"], .collab select,
+.collab-owner textarea, .collab-owner input[type="text"], .collab-owner input[type="date"], .collab-owner select {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.collab-list { list-style: none; padding: 0; margin: 12px 0 0; }
+.collab-list > li { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.collab-list > li > span { display: block; }
+.collab-status { margin: 0 0 4px; }
+.collab-review:empty, .collab-compare:empty { display: none; }
+.collab-review { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.collab-invitations { margin: 16px 0; }

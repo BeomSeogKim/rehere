@@ -160,6 +160,30 @@ describe('session gate', () => {
     assert.equal(requests.length, 1);
   });
 
+  it('gives a contributor the recollection screen and disposes it on sign-out', async () => {
+    routes['GET /api/session'] = () => Promise.resolve(json(200, { initialized: true, principal: contributor }));
+    routes['POST /api/session/logout'] = () => Promise.resolve(json(200, { ok: true }));
+    const container = new FakeElement('div');
+    const log = [];
+    const access = mountAccess(container, {
+      onOwner: () => log.push('owner'),
+      onSignedOut: () => log.push('signedOut'),
+      renderContributor: (node, principal) => {
+        node.append('recollection screen');
+        log.push(['render', principal.id]);
+        return { dispose: () => log.push('dispose') };
+      },
+    });
+    access.start();
+    await settle();
+    assert.match(container.textContent, /recollection screen/);
+    assert.deepEqual(log, [['render', 'p-contrib']]);
+    container.findAll((node) => node.tag === 'button' && node.textContent === 'Sign out')[0].dispatch('click');
+    await settle();
+    assert.deepEqual(log, [['render', 'p-contrib'], 'dispose']);
+    assert.doesNotMatch(container.textContent, /recollection screen/);
+  });
+
   it('tears down the owner app before the sign-out request, and drops a late login screen', async () => {
     routes['GET /api/session'] = () => Promise.resolve(json(200, { initialized: true, principal: owner }));
     let respond;

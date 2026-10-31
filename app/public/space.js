@@ -13,6 +13,7 @@ import {
   jobStatusText,
   surfacePoint,
 } from './photo-scene.js';
+import { mountBlockedScene, mountCollaboration, mountInvitations } from './collaboration.js';
 import { mountMemoryEdit } from './memory-edit.js';
 
 const POLL_MS = 2000;
@@ -201,6 +202,8 @@ export function mountSpace(container, { draft, sourceFor }) {
   let pollingJob = null;
   let viewer = null;
   let memoryEdit = null;
+  let collaborationPanel = null;
+  let blockedPanel = null;
   // Bumped whenever the panel is closed or replaced; a response for an older
   // selection or scene must not change the panel that replaced it.
   let panelGeneration = 0;
@@ -215,6 +218,7 @@ export function mountSpace(container, { draft, sourceFor }) {
   const panel = el('div', { className: 'space-panel' });
 
   const choices = el('ul', { className: 'space-choices' });
+  const invitationsSection = el('div');
   for (const [index, photo] of draft.photos.entries()) {
     const reason = buildBlockedReason(sourceFor(photo.sourceId));
     const item = el('li', {}, [el('span', { className: 'space-choice-label', textContent: `Photo ${index + 1}` })]);
@@ -238,8 +242,10 @@ export function mountSpace(container, { draft, sourceFor }) {
     choices,
     status,
     buildList,
+    invitationsSection,
     panel,
   );
+  const invitations = mountInvitations(invitationsSection, { draftId: draft.id });
 
   function stopPolling() {
     clearTimeout(pollTimer);
@@ -251,6 +257,10 @@ export function mountSpace(container, { draft, sourceFor }) {
     panelGeneration += 1;
     memoryEdit?.dispose();
     memoryEdit = null;
+    collaborationPanel?.dispose();
+    collaborationPanel = null;
+    blockedPanel?.dispose();
+    blockedPanel = null;
     viewer?.dispose();
     viewer = null;
     panel.replaceChildren();
@@ -265,6 +275,9 @@ export function mountSpace(container, { draft, sourceFor }) {
           el('span', { className: 'space-choice-label', textContent: `Photo ${number || '?'} · ${when}` }),
           el('span', { className: 'hint', textContent: jobStatusText(job) }),
         ]);
+        if (job.status === 'ready' && job.usageBlocked) {
+          item.append(el('span', { className: 'hint', textContent: 'Not shown: it depends on a withdrawn recollection or a use that is no longer allowed.' }));
+        }
         if (job.status === 'ready') {
           const open = el('button', { type: 'button', className: 'secondary', textContent: 'Open scene' });
           open.setAttribute('aria-label', `Open the partial scene from photo ${number} built ${when}`);
@@ -463,14 +476,29 @@ export function mountSpace(container, { draft, sourceFor }) {
     const heading = el('h3', { textContent: 'Opening the scene…', tabIndex: -1 });
     panel.replaceChildren(heading);
     heading.focus();
-    const [jobResult, surfaceResult] = await Promise.all([request(`${base}/${jobId}`), request(assetUrl(jobId, 'surface.json'))]);
+    const jobResult = await request(`${base}/${jobId}`);
     if (disposed || token !== panelGeneration) return;
     const job = jobResult.body;
-    if (!jobResult.ok || job?.status !== 'ready' || !surfaceResult.ok) {
+    if (!jobResult.ok || job?.status !== 'ready') {
       heading.textContent = 'This scene could not be opened.';
       return;
     }
     const number = photoNumber(job.sourceId);
+    // A scene whose current version depends on a withdrawn recollection is not
+    // loaded at all; only restoring an unaffected saved version is offered.
+    if (job.usageBlocked) {
+      heading.textContent = `Partial scene from photo ${number} is blocked`;
+      const holder = el('div');
+      panel.append(holder);
+      blockedPanel = mountBlockedScene(holder, { jobUrl: `${base}/${jobId}`, currentVersion: job.edit.version, onRestored: () => openScene(jobId) });
+      return;
+    }
+    const surfaceResult = await request(assetUrl(jobId, 'surface.json'));
+    if (disposed || token !== panelGeneration) return;
+    if (!surfaceResult.ok) {
+      heading.textContent = 'This scene could not be opened.';
+      return;
+    }
     heading.textContent = `Partial scene from photo ${number}`;
 
     const viewport = el('div', { className: 'space-viewport' });
@@ -507,14 +535,16 @@ export function mountSpace(container, { draft, sourceFor }) {
     const reset = el('button', { type: 'button', className: 'secondary', textContent: 'Reset object position' });
     const reload = el('button', { type: 'button', className: 'secondary', textContent: 'Load saved version', hidden: true });
     const memorySection = el('section', { className: 'memory-edit' });
+    const collaborationSection = el('section', { className: 'memory-edit collab-owner' });
     let saving = false;
     // A save and a reload never overlap, so an older saved state read by a
     // reload cannot replace a newer one confirmed by a save.
     let reloading = false;
     let conflict = false;
-    // Set while a memory proposal is previewed or being saved; manual changes
-    // pause so the two editors never write from different states.
-    let locked = false;
+    // Set while the memory panel or the collaboration panel previews or saves;
+    // manual changes pause, and each panel sees the editor as busy while the
+    // other holds it, so no two editors write from different states.
+    const lockedBy = new Set();
     let proposalPreview = null;
 
     const toDegrees = (radians) => Math.round((radians * 180) / Math.PI);
@@ -527,6 +557,7 @@ export function mountSpace(container, { draft, sourceFor }) {
       viewer?.applyEdit(proposalPreview ?? session.preview);
       const { version } = session.saved;
       const dirty = session.isDirty();
+      const locked = lockedBy.size > 0;
       const busy = saving || reloading || locked;
       editStatus.textContent = saving
         ? 'Saving…'
@@ -548,6 +579,7 @@ export function mountSpace(container, { draft, sourceFor }) {
       reload.hidden = !(session.uncertain || conflict);
       reload.disabled = busy;
       memoryEdit?.sync();
+      collaborationPanel?.sync();
     };
     const readControls = (source) => {
       const values = controls.map((control) => (control[source].value.trim() === '' ? NaN : Number(control[source].value)));
@@ -593,6 +625,7 @@ export function mountSpace(container, { draft, sourceFor }) {
       editMessage.textContent = 'Loaded the saved version. Your unsaved preview was replaced.';
       showEdit();
       memoryEdit?.refresh();
+      collaborationPanel?.refresh();
     });
     save.addEventListener('click', async () => {
       if (saving || reloading || conflict) return;
@@ -607,6 +640,7 @@ export function mountSpace(container, { draft, sourceFor }) {
         session.confirm(result.body);
         conflict = false;
         memoryEdit?.refresh();
+        collaborationPanel?.refresh();
       } else if (result.status === 409) {
         editMessage.textContent = `${serverError(result, 'The saved version changed.')} Your preview is kept but not saved.`;
         conflict = true;
@@ -634,13 +668,23 @@ export function mountSpace(container, { draft, sourceFor }) {
         el('div', { className: 'actions' }, [reload, reset, revert, save]),
       ]),
       memorySection,
+      collaborationSection,
       proposals,
     );
+    const editorFor = (name) => () => ({
+      ...session.saved,
+      clean: !session.isDirty() && !session.uncertain && !conflict && !saving && !reloading && ![...lockedBy].some((holder) => holder !== name),
+    });
+    const lockFor = (name) => (value) => {
+      if (value) lockedBy.add(name);
+      else lockedBy.delete(name);
+      showEdit();
+    };
     memoryEdit = mountMemoryEdit(memorySection, {
       jobUrl: `${base}/${jobId}`,
       textureUrl: assetUrl(jobId, 'texture.jpg'),
       source: sourceFor(job.sourceId),
-      editor: () => ({ ...session.saved, clean: !session.isDirty() && !session.uncertain && !conflict && !saving && !reloading }),
+      editor: editorFor('memory'),
       // Returns the shown facing relation for a face-anchor point, or null when
       // there is no 3D view to show it in.
       showTransform(transform, point = null) {
@@ -648,15 +692,46 @@ export function mountSpace(container, { draft, sourceFor }) {
         showEdit();
         return viewer ? viewer.showGuide(transform, point) : null;
       },
-      setLocked(value) {
-        locked = value;
+      setLocked: lockFor('memory'),
+      saved(edit) {
+        session.replaceSaved(edit);
+        conflict = false;
+        editMessage.textContent = '';
         showEdit();
+        collaborationPanel?.refresh();
+      },
+      unconfirmed() {
+        session.markUncertain();
+        showEdit();
+      },
+      conflict() {
+        conflict = true;
+        showEdit();
+      },
+    });
+    collaborationPanel = mountCollaboration(collaborationSection, {
+      jobUrl: `${base}/${jobId}`,
+      editor: editorFor('collaboration'),
+      // True only when the 3D view actually drew the transform.
+      showTransform(transform) {
+        proposalPreview = transform;
+        showEdit();
+        viewer?.showGuide(null, null);
+        return Boolean(viewer && transform);
+      },
+      setLocked: lockFor('collaboration'),
+      // The current version now depends on a withdrawn recollection: reopen,
+      // which reads usageBlocked, disposes this viewer and offers a restore.
+      blocked() {
+        if (disposed || token !== panelGeneration) return;
+        openScene(jobId);
       },
       saved(edit) {
         session.replaceSaved(edit);
         conflict = false;
         editMessage.textContent = '';
         showEdit();
+        memoryEdit?.refresh();
       },
       unconfirmed() {
         session.markUncertain();
@@ -696,6 +771,7 @@ export function mountSpace(container, { draft, sourceFor }) {
       disposed = true;
       stopPolling();
       closePanel();
+      invitations.dispose();
     },
   };
 }

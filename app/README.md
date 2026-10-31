@@ -35,8 +35,13 @@ move or rotation before saving it. Unseen areas stay empty. This is a local
 model reconstruction from one photograph, not a complete room or calibrated
 geometry.
 
-Not included: transcription, multi-view alignment, sharing, hosted account
-integration, and recovery of unsaved input.
+Scoped contributors can submit written recollections. Owners can preview a
+manual change, adopt it or preserve an alternative, and record a separate
+explicit time assertion. Withdrawal blocks dependent spatial uses. See the
+[collaboration guide](COLLABORATION.md) for grants, review and restoration.
+
+Not included: transcription, multi-view alignment, photo or voice contributions,
+visitor sharing, hosted account integration, and recovery of unsaved input.
 
 ## Getting started
 

@@ -115,6 +115,7 @@ let surfaceBody;
 let posts;
 let heldGets;
 let proposals;
+let collaboration;
 let history;
 
 before(async () => {
@@ -131,6 +132,8 @@ before(async () => {
     if (url.endsWith('/surface.json')) return json(200, surfaceBody);
     if (url.endsWith('/reconstructions')) return json(200, [job]);
     if (url.endsWith('/proposals')) return json(200, proposals);
+    if (url.endsWith('/collaboration')) return json(200, collaboration);
+    if (url === '/api/invitations') return json(200, []);
     if (url.endsWith('/history')) return json(200, history);
     if (heldGets) {
       let respond;
@@ -153,6 +156,7 @@ beforeEach(() => {
   posts = [];
   heldGets = null;
   proposals = [];
+  collaboration = { revision: 0, contributions: [], variants: [], blocked: false, currentVersion: 1 };
   history = [{ version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial' }];
   surfaceBody = surface();
   job = {
@@ -178,7 +182,11 @@ async function openScene() {
   button('Open scene').dispatch('click');
   await settle();
   const editStatus = () => find((node) => node.tag === 'p' && node.role === 'status' && node.parent?.className === 'space-edit')[0].textContent;
-  const viewMessage = () => find((node) => node.className === 'form-message')[0].textContent;
+  // The scene's own message follows its viewport.
+  const viewMessage = () => {
+    const viewport = find((node) => node.className === 'space-viewport')[0];
+    return viewport.parent.children[viewport.parent.children.indexOf(viewport) + 1].textContent;
+  };
   const axis = (label) => find((node) => node.tag === 'input' && node.attributes['aria-label'] === label)[0];
   const canvases = () => find((node) => node.tag === 'canvas');
   return { space, button, editStatus, viewMessage, axis, canvases, find };
@@ -484,5 +492,78 @@ describe('face-anchor preview in the scene', () => {
     assert.match(view.find((node) => node.className === 'memory-review')[0].textContent, /3D preview is not available/);
     assert.equal(view.button('Apply and save this proposal').disabled, true);
     view.space.dispose();
+  });
+});
+
+describe('recollections and blocked scenes', () => {
+  it('does not load a blocked scene, and offers only an unaffected restore', async () => {
+    job.usageBlocked = true;
+    job.edit = { version: 2, offset: [1, 0, 0], yaw: 0 };
+    history = [
+      { version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial', blocked: false },
+      { version: 2, offset: [1, 0, 0], yaw: 0, kind: 'contribution', blocked: true },
+    ];
+    const view = await openScene();
+    assert.equal(count('renderer'), 0, 'no viewer for a blocked scene');
+    assert.equal(count('texture'), 0);
+    assert.equal(view.canvases().length, 0);
+    assert.ok(view.button('Restore version 1'));
+    assert.equal(view.button('Restore version 2'), undefined);
+    assert.equal(view.button('Apply and save'), undefined, 'no manual editing of a blocked scene');
+    view.space.dispose();
+  });
+
+  it('stops showing a loaded scene when a refresh finds it blocked by a withdrawal', async () => {
+    const view = await openScene();
+    assert.equal(view.canvases().length, 1);
+    // Another person withdrew a recollection the current version depends on.
+    job.usageBlocked = true;
+    job.edit = { version: 2, offset: [1, 0, 0], yaw: 0 };
+    collaboration = { ...collaboration, blocked: true, currentVersion: 2 };
+    history = [
+      { version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial', blocked: false },
+      { version: 2, offset: [1, 0, 0], yaw: 0, kind: 'contribution', blocked: true },
+    ];
+    view.button('Refresh').dispatch('click');
+    await settle();
+    assert.equal(view.canvases().length, 0, 'the dependent scene is no longer drawn');
+    assert.equal(count('renderer.dispose'), 1);
+    assert.ok(view.button('Restore version 1'));
+    assert.equal(view.button('Apply and save'), undefined);
+    view.space.dispose();
+  });
+
+  it('pauses manual editing and memory planning while a recollection candidate is previewed', async () => {
+    collaboration = {
+      revision: 1,
+      contributions: [
+        { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', principalId: 'p-contrib', provider: { displayName: 'Mina' }, kind: 'human_recollection', text: 'It stood by the door.', textSha256: 'a'.repeat(64), permissions: { place: true, model: false, share: false }, periodClaim: '', createdAt: '2026-10-31T00:00:00.000Z', revision: 1, status: 'submitted', review: null, withdrawnAt: null },
+      ],
+      variants: [],
+      blocked: false,
+      currentVersion: 1,
+    };
+    const view = await openScene();
+    const owner = view.find((node) => node.className === 'memory-edit collab-owner')[0];
+    const inOwner = (text) => owner.findAll((node) => node.tag === 'button' && node.textContent === text)[0];
+    inOwner('Review').dispatch('click');
+    const decision = owner.findAll((node) => node.tag === 'select')[0];
+    decision.value = 'adopt';
+    decision.dispatch('change');
+    owner.findAll((node) => node.tag === 'input' && node.type === 'number')[0].value = '0.5';
+    inOwner('Preview candidate on the scene').dispatch('click');
+    assert.match(view.editStatus(), /Manual changes are paused/);
+    assert.equal(view.axis('Left / right').disabled, true);
+    assert.equal(view.axis('Left / right').value, '0', 'the manual preview is untouched');
+    const text = view.find((node) => node.tag === 'textarea')[0];
+    text.value = 'It faced the door.';
+    text.dispatch('input');
+    const consent = view.find((node) => node.tag === 'input' && node.type === 'checkbox')[0];
+    consent.checked = true;
+    consent.dispatch('change');
+    assert.equal(view.button('Plan a change').disabled, true, 'memory planning waits for the candidate preview to end');
+    assert.equal(inOwner('Save decision').disabled, false, 'a drawn preview allows the explicit save');
+    view.space.dispose();
+    assert.equal(posts.filter((post) => post.body?.decision).length, 0, 'nothing was saved without the explicit action');
   });
 });

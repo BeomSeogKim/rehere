@@ -63,10 +63,16 @@ export function proposalStatusText(proposal) {
   }
 }
 
+// The server redacts a proposal whose scene depends on a withdrawn
+// recollection: its words, result and question are no longer available.
+export const isRedacted = (proposal) => proposal.redacted === true || typeof proposal.statement?.text !== 'string';
+export const REDACTED_TEXT = 'This memory and its proposal are no longer shown, because the scene they were made for depends on a withdrawn recollection.';
+
 export function historyLabel(entry) {
   if (entry.kind === 'initial') return 'Original position';
   if (entry.kind === 'manual') return 'Manual change';
   if (entry.kind === 'proposal') return 'Change from a memory';
+  if (entry.kind === 'contribution') return 'Change from a recollection';
   if (entry.kind === 'undo') return `Return to version ${entry.targetVersion}`;
   return 'Change';
 }
@@ -214,6 +220,10 @@ export function mountMemoryEdit(container, bridge) {
       review.replaceChildren();
       return;
     }
+    if (isRedacted(current)) {
+      review.replaceChildren(el('p', { className: 'memory-status', textContent: REDACTED_TEXT }));
+      return;
+    }
     const editor = bridge.editor();
     const nodes = [el('p', { className: 'memory-status', textContent: proposalStatusText(current) })];
     nodes.push(el('p', { className: 'memory-statement' }, [el('strong', { textContent: 'Your memory: ' }), `“${current.statement.text}”`]));
@@ -320,7 +330,9 @@ export function mountMemoryEdit(container, bridge) {
             el('span', { className: 'hint', textContent: formatTransform(entry) }),
           ]);
           const source = entry.proposalId ? byId.get(entry.proposalId) : null;
-          if (source) {
+          if (source && isRedacted(source)) {
+            item.append(el('span', { className: 'hint', textContent: 'The memory for this change is no longer shown.' }));
+          } else if (source) {
             item.append(
               el('span', { className: 'hint', textContent: `Your memory: “${source.statement.text}”` }),
               el('span', { className: 'hint', textContent: `AI suggestion: ${source.result?.reason ?? 'not available'}` }),

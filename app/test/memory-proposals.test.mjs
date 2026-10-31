@@ -199,8 +199,8 @@ describe('memory proposals', () => {
       assert.deepEqual(job.edit, edit);
       assert.equal(job.proposals, undefined);
       assert.deepEqual(await app.history(), [
-        { version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial' },
-        { version: 2, offset: [0.5, 0, -0.25], yaw: 0, kind: 'proposal', proposalId: ready.id },
+        { version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial', blocked: false },
+        { version: 2, offset: [0.5, 0, -0.25], yaw: 0, kind: 'proposal', proposalId: ready.id, blocked: false },
       ]);
     } finally {
       await app.close();

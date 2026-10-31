@@ -1,4 +1,5 @@
 import { mountAccess } from './access-ui.js';
+import { mountContributor } from './collaboration.js';
 import { latestOnly } from './latest.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import {
@@ -489,7 +490,7 @@ function stopOwner() {
   if (location.hash) history.replaceState(null, '', location.pathname);
 }
 
-const access = mountAccess(els.access, { onOwner: startOwner, onSignedOut: stopOwner });
+const access = mountAccess(els.access, { onOwner: startOwner, onSignedOut: stopOwner, renderContributor: (node) => mountContributor(node) });
 
 // Any private request answered 401 means the session expired or was replaced,
 // including requests made by the scene and proposal modules.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
-import { after, before, describe, it } from 'node:test';
+import { after, afterEach, before, describe, it } from 'node:test';
 import { FakeElement } from './fake-dom.mjs';
 
 // The browser loads Three.js from the server's /vendor routes; map those to the
@@ -51,6 +51,7 @@ before(async () => {
       sizeRequests.push(url);
       return sizeResponse(url);
     }
+    if (url === '/api/invitations') return json(200, []);
     if (url.endsWith('/reconstructions')) return json(200, jobs);
     return json(200, jobs.find((job) => url.endsWith(job.id)) ?? manifest('ready'));
   };
@@ -62,6 +63,13 @@ after(() => {
   delete globalThis.fetch;
 });
 
+// Every mounted view is disposed after its test, even when an assertion
+// fails, so no poll timer outlives the test.
+const mounted = [];
+afterEach(() => {
+  for (const space of mounted.splice(0)) space.dispose();
+});
+
 function mount(sources = { [SOURCE_A]: granted, [SOURCE_B]: granted }) {
   posts = [];
   jobs = [];
@@ -70,7 +78,10 @@ function mount(sources = { [SOURCE_A]: granted, [SOURCE_B]: granted }) {
   const container = new FakeElement('section');
   const draft = { id: DRAFT_ID, photos: [{ name: 'photo-1.jpg', sourceId: SOURCE_A }, { name: 'photo-2.jpg', sourceId: SOURCE_B }] };
   const space = mountSpace(container, { draft, sourceFor: (id) => sources[id] ?? null });
+  mounted.push(space);
   const find = (predicate) => container.findAll(predicate);
+  // Messages of the build or scene panel, not of the invitation manager.
+  const panel = () => find((node) => node.className === 'space-panel')[0];
   const button = (text) => find((node) => node.tag === 'button' && node.textContent === text);
   const heading = () => find((node) => node.tag === 'h3')[0]?.textContent;
   const image = () => find((node) => node.tag === 'img')[0];
@@ -90,7 +101,7 @@ function mount(sources = { [SOURCE_A]: granted, [SOURCE_B]: granted }) {
     typeBox(box);
   };
   const buildButton = () => button('Build partial scene')[0];
-  const message = () => find((node) => node.className === 'form-message')[0]?.textContent;
+  const message = () => panel().findAll((node) => node.className === 'form-message')[0]?.textContent;
   return { space, container, find, button, heading, select, open, typeBox, image, inputs, buildButton, message };
 }
 
@@ -112,7 +123,7 @@ describe('partial scene build panel', () => {
     await settle();
 
     assert.equal(view.heading(), 'Choose an object in photo 2');
-    const message = view.find((node) => node.className === 'form-message');
+    const message = view.find((node) => node.className === 'space-panel')[0].findAll((node) => node.className === 'form-message');
     assert.ok(message.every((node) => node.textContent === ''));
     assert.ok(view.find((node) => node.className === 'space-builds')[0].children.length === 1, 'accepted job is listed');
     view.space.dispose();
