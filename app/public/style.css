@@ -180,6 +180,8 @@ audio { width: 100%; margin-top: 12px; }
 .memory-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 20px 0; }
 
 .source-details { margin-top: 8px; font-size: 0.875rem; }
+.viewer-materials { margin-top: 16px; }
+.viewer-materials > summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: 8px 0; }
 .source-details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
 .source-summary { display: block; color: var(--muted); font-weight: 400; overflow-wrap: anywhere; }
 .source-field { margin-top: 10px; }

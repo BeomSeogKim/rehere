@@ -65,7 +65,10 @@ const serverError = (result, fallback) => (typeof result.body?.error === 'string
 // Mounts partial-scene building and viewing for one saved memory. Every request
 // is bound to this draft; dispose() stops polling and releases the 3D view so
 // nothing from this memory updates the screen after navigation.
-export function mountSpace(container, { draft, sourceFor, durationHintMs = () => null }) {
+// sceneId opens that exact saved scene once, never another one. onScene(id)
+// reports the scene whose panel is shown after an open, and null after an
+// explicit build choice; dispose never calls it.
+export function mountSpace(container, { draft, sourceFor, durationHintMs = () => null, sceneId = null, onScene = () => {} }) {
   let disposed = false;
   let pollTimer = null;
   let pollingJob = null;
@@ -81,6 +84,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   const base = `/api/drafts/${draft.id}/reconstructions`;
   const assetUrl = (jobId, name) => `${base}/${jobId}/assets/${encodeURIComponent(name)}`;
   const photoAsset = (photo) => `/api/drafts/${draft.id}/assets/${encodeURIComponent(photo.name)}`;
+  // A short saved-scene reference that tells apart builds of one photo made in the same minute.
+  const sceneRef = (jobId) => `Scene ${jobId.slice(0, 8)}`;
   const photoNumber = (sourceId) => draft.photos.findIndex((photo) => photo.sourceId === sourceId) + 1;
 
   const status = el('p', { className: 'hint', role: 'status' });
@@ -106,6 +111,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     choices.append(item);
   }
 
+  // Building or choosing another scene is secondary to the selected scene.
+  const others = el('details', { className: 'space-others', open: sceneId === null }, [
+    el('summary', { textContent: 'Build or choose another scene' }),
+    choices,
+    buildList,
+  ]);
   container.replaceChildren(
     el('h2', { textContent: 'Partial scenes' }),
     el('p', {
@@ -113,11 +124,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       textContent:
         'A partial scene turns one photo into the surfaces visible in it, so you can look around them. You choose an object in front; a local model proposes its outline and the depth. It does not add what the photo did not show, and it does not confirm what the place was like.',
     }),
-    choices,
-    status,
-    buildList,
-    invitationsSection,
     panel,
+    status,
+    others,
+    invitationsSection,
   );
   const invitations = mountInvitations(invitationsSection, { draftId: draft.id });
 
@@ -150,7 +160,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         const number = photoNumber(job.sourceId);
         const when = new Date(job.createdAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
         const item = el('li', {}, [
-          el('span', { className: 'space-choice-label', textContent: `${number ? `Photo ${number}` : 'A photo no longer shown'} · ${when}` }),
+          el('span', { className: 'space-choice-label', textContent: `${number ? `Photo ${number}` : 'A photo no longer shown'} · ${when} · ${sceneRef(job.id)}` }),
           el('span', { className: 'hint', textContent: jobStatusText(job) }),
         ]);
         if (job.status === 'ready' && job.usageBlocked) {
@@ -158,7 +168,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         }
         if (job.status === 'ready') {
           const open = el('button', { type: 'button', className: 'secondary', textContent: 'Open scene' });
-          open.setAttribute('aria-label', `Open the partial scene from photo ${number} built ${when}`);
+          open.setAttribute('aria-label', `Open the partial scene from ${number ? `photo ${number}` : 'a photo no longer shown'} built ${when}, ${sceneRef(job.id)}`);
           open.addEventListener('click', () => openScene(job.id));
           item.append(open);
         }
@@ -208,6 +218,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
   function openSelection(photo, index) {
     closePanel();
+    onScene(null);
     const token = panelGeneration;
     const sourceId = photo.sourceId;
     let box = null;
@@ -360,11 +371,23 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const heading = el('h3', { textContent: 'Opening the scene…', tabIndex: -1 });
     panel.replaceChildren(heading);
     heading.focus();
+    // Brings the admitted scene, or its truthful status, to the top of the
+    // viewport. Called only right after the current-selection check.
+    const land = () => heading.scrollIntoView?.({ block: 'start' });
     const jobResult = await request(`${base}/${jobId}`);
     if (disposed || token !== panelGeneration) return;
+    // The address names the scene shown here, whatever its state.
+    onScene(jobId);
     const job = jobResult.body;
     if (!jobResult.ok || job?.status !== 'ready') {
-      heading.textContent = 'This scene could not be opened.';
+      // A truthful status, and the other scenes and builds to choose from.
+      others.open = true;
+      if (jobResult.status === 404) heading.textContent = 'This scene could not be found.';
+      else if (jobResult.ok && job?.status) {
+        heading.textContent = 'This scene is not ready to open.';
+        panel.append(el('p', { className: 'hint', textContent: jobStatusText(job) }));
+      } else heading.textContent = 'This scene could not be opened.';
+      land();
       return;
     }
     const number = photoNumber(job.sourceId);
@@ -372,13 +395,15 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     // loaded at all; only restoring an unaffected saved version is offered.
     // Every version depends on the photo, so a stopped or no-longer-allowed photo
     // leaves nothing to restore.
+    if (job.usageBlocked) others.open = true;
     if (job.usageBlocked && sourceBlocked(job)) {
-      heading.textContent = 'This scene is no longer shown';
+      heading.textContent = `This scene is no longer shown · ${sceneRef(jobId)}`;
       panel.append(el('p', { textContent: SOURCE_BLOCKED_TEXT }));
+      land();
       return;
     }
     if (job.usageBlocked) {
-      heading.textContent = `Partial scene from photo ${number} is blocked`;
+      heading.textContent = `Partial scene from photo ${number} is blocked · ${sceneRef(jobId)}`;
       const holder = el('div');
       panel.append(holder);
       const names = Array.isArray(job.edit?.objects) ? objectNames(job.objects) : null;
@@ -388,15 +413,20 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         onRestored: () => openScene(jobId),
         ...(names ? { describe: (entry) => describeArrangement(entry, names), ruleText: (rule) => ruleWords(rule, names), currentRule: job.edit.relationship ?? null } : {}),
       });
+      land();
       return;
     }
     const surfaceResult = await request(assetUrl(jobId, 'surface.json'));
     if (disposed || token !== panelGeneration) return;
     if (!surfaceResult.ok) {
+      others.open = true;
       heading.textContent = 'This scene could not be opened.';
+      land();
       return;
     }
-    heading.textContent = `Partial scene from photo ${number}`;
+    others.open = false;
+    heading.textContent = `Partial scene from photo ${number} · ${sceneRef(jobId)}`;
+    land();
     if (surfaceResult.body?.schema_version === 2) {
       await openObjectScene({ job, jobId, surface: surfaceResult.body, token, heading, number });
       return;
@@ -769,6 +799,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   // proposes an outline inside each box; the person checks both after the build.
   function openTwoSelection(photo, index) {
     closePanel();
+    onScene(null);
     const token = panelGeneration;
     const sourceId = photo.sourceId;
     let requestId = null;
@@ -1587,6 +1618,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   }
 
   loadJobs();
+  if (sceneId !== null) openScene(sceneId);
   return {
     dispose() {
       disposed = true;

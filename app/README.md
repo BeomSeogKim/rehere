@@ -79,6 +79,19 @@ reconstruction from the same original viewpoint, then return to your previous
 camera. Labels keep source pixels, chosen positions and inferred surfaces
 distinct; comparison stops story playback and never edits a saved arrangement.
 
+The saved-place screen puts the scene workspace first. Original photos,
+writing, recordings and source-use controls remain under **Original materials
+and allowed uses**. Opening that disclosure keeps the scene and camera in
+place. A memory without a photo opens its materials for inspection.
+
+Opening a scene updates its local address to
+`#/memories/<memory-id>/scenes/<scene-id>`. Reloading or reopening that address
+checks the same scene and its current access rules. It does not choose another
+build or recover an unsaved preview or selected alternative. Build and photo
+choices remain explicit under **Build or choose another scene**; navigation
+does not start inference, change grants or issue a visitor link. A blocked or
+unfinished scene keeps its own status rather than opening a substitute.
+
 ## Getting started
 
 Requires Node.js 26 or later. Three.js is pinned for the spatial viewer.

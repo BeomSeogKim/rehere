@@ -331,7 +331,8 @@ describe('resumable saving in the app', () => {
     await save();
     assert.deepEqual(intakePosts().filter((request) => request.includes('/parts/')), [`POST /api/intakes/${OLD}/parts/${P2}`], 'only the reselected photo is sent');
     assert.equal(intakePosts().filter((request) => request === 'POST /api/intakes').length, 0, 'the same intake, never a new one');
-    assert.match(message(), /^Saved\. View what you saved/);
+    // The saved input held photos, so the next step offered is building the place.
+    assert.match(message(), /^Saved\. Continue to building this place/);
     assert.equal(byId('photo-list').children.length, 0, 'the form resets only after the final answer');
     assert.equal(storage.size, 0);
   });

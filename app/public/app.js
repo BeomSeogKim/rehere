@@ -56,6 +56,7 @@ const els = {
   viewerVoice: $('viewer-voice'),
   viewerVoiceSource: $('viewer-voice-source'),
   viewerSpace: $('viewer-space'),
+  viewerMaterials: $('viewer-materials'),
   savedEmpty: $('saved-empty'),
   savedList: $('saved-list'),
   intakeResume: $('intake-resume'),
@@ -307,11 +308,13 @@ function sourceProblem(voice) {
   return null;
 }
 
-function savedNotice(id) {
+// hasPhoto: true only when the saved input is known to have held a photo; a
+// scene can then be built from it. The link is navigation only.
+function savedNotice(id, hasPhoto = false) {
   const fragment = document.createDocumentFragment();
   const link = document.createElement('a');
   link.href = `#/memories/${id}`;
-  link.textContent = 'View what you saved';
+  link.textContent = hasPhoto ? 'Continue to building this place' : 'View what you saved';
   fragment.append('Saved. ', link);
   return fragment;
 }
@@ -360,7 +363,7 @@ async function save(includeVoice) {
     const session = intake;
     const outcome = await session.save(intended, files, renderIntake);
     if (!stillOwner(generation) || session !== intake) return;
-    settleIntake(outcome);
+    settleIntake(outcome, intended.parts.some((part) => part.kind === 'photo'));
   } catch (error) {
     if (error?.name !== 'AbortError') throw error;
   } finally {
@@ -375,11 +378,11 @@ async function save(includeVoice) {
 }
 
 // What the form says after an attempt. Only a final draft ID means Saved.
-function settleIntake(outcome) {
+function settleIntake(outcome, hasPhoto = false) {
   switch (outcome.kind) {
     case 'saved':
       resetForm();
-      setMessage(savedNotice(outcome.draftId), 'success');
+      setMessage(savedNotice(outcome.draftId, hasPhoto), 'success');
       loadSaved();
       break;
     case 'discarded':
@@ -563,7 +566,17 @@ function disposeSourceViews() {
 
 // notice: a message to keep showing after the memory is re-read, such as a
 // saved restriction and whether work in progress stopped.
-async function showDraft(id, notice = '') {
+// The memory and scene the owner route names. A scene route opens exactly that
+// reconstruction; the address is updated only for an explicit choice there.
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const MEMORY_ROUTE = new RegExp(`^#/memories/(${UUID})(?:/scenes/(${UUID}))?$`);
+let routeDraft = null;
+let routeScene = null;
+// The memory whose materials disclosure is shown, so a re-read of the same
+// memory keeps it open or closed as the owner left it.
+let materialsFor = null;
+
+async function showDraft(id, notice = '', sceneId = null) {
   disposeSourceViews();
   els.viewerDate.textContent = '';
   els.viewerMessage.textContent = '';
@@ -588,6 +601,12 @@ async function showDraft(id, notice = '') {
     els.viewerMessage.textContent = 'This memory could not be opened.';
     return;
   }
+  // A memory without photos opens on its materials; otherwise the scene comes
+  // first and the materials stay one press away.
+  if (materialsFor !== draft.id) {
+    materialsFor = draft.id;
+    els.viewerMaterials.open = draft.photos.length === 0;
+  }
   const asset = (name) => `/api/drafts/${draft.id}/assets/${encodeURIComponent(name)}`;
   els.viewerDate.textContent = `Saved ${formatDate(draft.createdAt)}`;
   els.viewerMessage.textContent = notice;
@@ -599,7 +618,7 @@ async function showDraft(id, notice = '') {
   // scene is reopened under the current policy.
   const refresh = (notice) => {
     closeSpace();
-    showDraft(draft.id, notice);
+    showDraft(draft.id, notice, routeScene);
   };
   const controls = (record, label) => {
     const holder = document.createElement('div');
@@ -648,13 +667,28 @@ async function showDraft(id, notice = '') {
   } else if (isStopped(voiceRecord)) {
     els.viewerVoiceSource.append(renderStoppedMarker(voiceRecord));
   }
-  if (draft.photos.length) openSpace(draft, source);
+  // A scene route mounts the workspace even when every photo is stopped, so
+  // that exact reconstruction shows its own state.
+  if (draft.photos.length || sceneId) openSpace(draft, source, sceneId);
 }
 
 // The 3D module loads only for a memory with photos; if it cannot load, the
 // rest of the memory stays readable.
-async function openSpace(draft, source) {
+async function openSpace(draft, source, sceneId = null) {
   const generation = spaceGeneration;
+  const session = sessionGeneration;
+  // An explicit scene choice names it in the address without a new history
+  // entry or a remount; nothing late, closed or from another memory may.
+  const onScene = (id) => {
+    if (!stillOwner(session) || generation !== spaceGeneration || routeDraft !== draft.id) return;
+    // The address must still be the route this workspace was opened for: a
+    // newer address typed before its hashchange event wins over a late open.
+    const tracked = routeScene ? `#/memories/${routeDraft}/scenes/${routeScene}` : `#/memories/${routeDraft}`;
+    if (location.hash !== tracked) return;
+    routeScene = id ?? null;
+    const next = routeScene ? `#/memories/${draft.id}/scenes/${routeScene}` : `#/memories/${draft.id}`;
+    if (location.hash !== next) history.replaceState(null, '', next);
+  };
   els.viewerSpace.hidden = false;
   try {
     const module = await import('./space.js');
@@ -663,7 +697,7 @@ async function openSpace(draft, source) {
     // metadata; the server checks the converted recording itself.
     const durationHintMs = (sourceId) =>
       draft.voice?.sourceId === sourceId && Number.isFinite(els.viewerVoice.duration) ? Math.round(els.viewerVoice.duration * 1000) : null;
-    space = module.mountSpace(els.viewerSpace, { draft, sourceFor: source, durationHintMs });
+    space = module.mountSpace(els.viewerSpace, { draft, sourceFor: source, durationHintMs, sceneId, onScene });
   } catch {
     if (generation !== spaceGeneration) return;
     const message = document.createElement('p');
@@ -683,18 +717,28 @@ function closeSpace() {
 
 function route() {
   if (!ownerActive) return;
-  const match = /^#\/memories\/([0-9a-f-]{36})$/.exec(location.hash);
+  // Parsed strictly before anything is fetched; a malformed memory or scene
+  // address opens nothing.
+  const memoryLink = location.hash.startsWith('#/memories/');
+  const match = MEMORY_ROUTE.exec(location.hash);
   viewRequests.invalidate();
   closeSpace();
+  routeDraft = match?.[1] ?? null;
+  routeScene = match?.[2] ?? null;
+  // A navigation starts the materials disclosure from its default; only a
+  // re-read of the same memory keeps the owner's choice.
+  materialsFor = null;
   if (!match) {
     stopViewerVoice();
     disposeSourceViews();
   }
-  els.compose.hidden = Boolean(match);
-  els.viewer.hidden = !match;
-  if (match) {
-    recorder.leave();
-    showDraft(match[1]);
+  els.compose.hidden = memoryLink;
+  els.viewer.hidden = !memoryLink;
+  if (memoryLink) recorder.leave();
+  if (match) showDraft(match[1], '', match[2] ?? null);
+  else if (memoryLink) {
+    clearViewer();
+    els.viewerMessage.textContent = 'This address is not a valid memory or scene link.';
   }
 }
 
@@ -950,6 +994,9 @@ function stopOwner() {
   els.intakeResume.replaceChildren();
   viewRequests.invalidate();
   closeSpace();
+  routeDraft = null;
+  routeScene = null;
+  materialsFor = null;
   resetForm();
   renderActions();
   setMessage('');
