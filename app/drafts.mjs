@@ -5,8 +5,9 @@ import { parseSourceMetadata, sourceRecord } from './sources.mjs';
 
 const MIB = 1024 * 1024;
 
-// Transport limits for this endpoint only. Final supported formats and content
-// checks belong to the upload-validation requirement and are not settled here.
+// Request and per-file limits. The checks here (size, count and leading
+// signature) are only the cheap preflight; every accepted photo and recording
+// is then decoded in full by media-verification.mjs before it is stored.
 export const LIMITS = Object.freeze({
   requestBytes: 64 * MIB,
   photoCount: 20,
@@ -143,7 +144,9 @@ export class DraftStore {
   // failed save leaves no partial draft and existing drafts are never touched.
   // An intake commit passes its reserved ID and a receipt, which lands in the
   // same rename as draft.json; the receipt is never listed or served.
-  async create({ text, photos, voice, sources }, { id = randomUUID(), receipt = null } = {}) {
+  // `signal` is checked last before the final rename, which is the commit
+  // boundary: once that rename has started the draft may be saved.
+  async create({ text, photos, voice, sources }, { id = randomUUID(), receipt = null, signal = null } = {}) {
     const staging = path.join(this.tempDir, id);
     const draft = {
       id,
@@ -184,6 +187,7 @@ export class DraftStore {
       if (receipt) await writeFile(path.join(staging, INTAKE_RECEIPT), JSON.stringify(receipt, null, 2), { mode: 0o600 });
       await writeFile(path.join(staging, 'draft.json'), JSON.stringify(draft, null, 2));
       await mkdir(this.draftsDir, { recursive: true });
+      if (signal?.aborted) throw new RequestError(503, 'The app is shutting down. Nothing was saved.');
       await rename(staging, path.join(this.draftsDir, id));
     } catch (error) {
       await rm(staging, { recursive: true, force: true }).catch(() => {});

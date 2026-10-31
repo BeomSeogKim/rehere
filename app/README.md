@@ -9,7 +9,8 @@ presses Record, and declining it never blocks saving.
 
 - Add and remove photo previews, write a memory, and optionally record, stop,
   listen back to and discard a voice recording. Recording stops automatically
-  after five minutes.
+  just before five minutes (4:59), leaving room for encoder padding under the
+  server's five-minute decoded-audio limit.
 - While a recording is in progress, saving offers either **Stop and save**,
   which waits for the recorder's final data, or **Save without voice**, which
   discards the recording. A pending microphone request never blocks saving.
@@ -83,6 +84,12 @@ The server listens on the loopback interface only. Saved memories and workspace
 authority are written to `app/data/`, which is ignored by Git. Deleting that
 folder removes both, including any access card kept inside it. Keep a separate
 secure copy of the current card.
+
+Saving a photo requires Pillow in the prepared Python environment. Saving a
+recording requires local FFmpeg, found on `PATH` or selected for this process
+with `REHERE_FFMPEG`. These checks run locally and do not load model weights or
+send files to a provider. If a checker is unavailable or busy, received files
+stay in place and saving again retries the missing file.
 
 Photo reconstruction additionally requires the isolated Python environment
 and locally cached model weights described in [the worker guide](spatial/README.md).
@@ -299,15 +306,15 @@ served at `/vendor/THREE-LICENSE`. The project license remains undecided.
 
 ## Upload limits
 
-These are transport limits, not the final upload-validation
-policy. Supported formats, decoding checks and processing failures still need
-to be decided against the processing pipeline.
+Both the resumable entry screen and the legacy multipart endpoint check the
+actual file content before accepting a new original. Decoded pixels and audio
+are discarded; the original bytes and their checksums remain unchanged.
 
 | Item | Limit and check |
 |---|---|
 | Whole request | 64 MiB, counted while streaming and before multipart parsing |
-| Photos | Up to 20, 20 MiB each, JPEG or PNG by file signature; HEIC is refused |
-| Voice | One recording, 50 MiB, WebM, Ogg or MP4 container by signature |
+| Photos | Up to 20, 20 MiB each, JPEG or PNG, fully decoded within 32 megapixels; HEIC is refused |
+| Voice | One recording, 50 MiB, WebM, Ogg or MP4, with a decodable first audio track of at most 300 seconds |
 | Text | 10,000 characters before trimming; whitespace-only text is empty |
 | Empty save | Refused unless there is a photo, text or a recording |
 
@@ -315,8 +322,33 @@ An intake plan also limits aggregate original bytes to 64 MiB. Its create and
 plan-update JSON bodies are limited to 512 KiB; each file has the limits above.
 An empty planned file fails individually without losing received files.
 
-The five-minute recording length is enforced in the browser only. File content
-is checked by signature, not decoded.
+PNG checks include chunk checksums. Animated PNGs and 16-bit PNGs with a
+transparency colour key are refused; export a single still image as JPEG or
+8-bit PNG. Grayscale, CMYK and progressive JPEG are accepted. Dimensions use
+stored pixel order; validation does not rotate or rewrite the original.
+Pillow tolerates some JPEG corruption and trailing bytes, so acceptance means
+the image decodes with this decoder, not forensic proof of an intact file.
+
+Recordings are decoded to 16 kHz mono samples locally. Silence is valid; an
+empty or unreadable audio track is refused. Error-level decoder output causes
+refusal even if the process exits successfully. Input validation normalizes
+decoded PCM timestamps from sample counts, without changing the samples, so a
+valid browser recording is not refused for an output-muxer timestamp warning.
+Extra tracks are not checked.
+Pipe-only MP4 decoding cannot seek to a remote index; some end-index files may
+need to be recorded again. Synthetic-oscillator MediaRecorder samples from
+Chrome WebM and Safari WebM/MP4 exercise encoding compatibility; they are not
+real microphone tests. Firefox remains unverified. The browser stops at 4:59,
+but a delayed timer can still
+produce an overlong file that the server refuses.
+
+One owner-input validation runs at a time; there is no queue. A temporary
+checker failure does not mark a file damaged. A permanent failure marks only
+that file and offers a replacement step. Private per-part validation records
+bind the current policy to its kind, type, size and checksum. Old open uploads
+without a current record are checked before their received bytes can be
+restored or committed. A matching validated retry does not need a decoder
+again. Existing committed memories are not migrated or revalidated.
 
 Requests are refused unless the `Host` header names `127.0.0.1` or `localhost`
 on the server's port, and POST requests are refused when `Origin` names another site.
@@ -334,6 +366,12 @@ persistence across restarts, limits, malformed input, path handling and storage
 failure. `public/latest.js` keeps an earlier saved-memory request from
 replacing the one opened last. A real microphone grant is not covered by
 automated tests.
+
+Most domain HTTP tests inject a media verifier so synthetic signature-only
+fixtures exercise storage and permissions without requiring a codec runtime.
+The verifier tests and `spatial/test_verify_owner_photo.py` cover the actual
+content-checking boundary; real decoder checks report when a runtime is
+unavailable. They are distinct from fake-fixture domain coverage.
 
 [The synthetic relation fixture](demo/README.md) freezes window/door and
 clarification expectations before inference. Its drawing is a technical test,

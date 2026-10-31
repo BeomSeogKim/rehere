@@ -168,7 +168,8 @@ function missingSlot(photo, index) {
   slot.className = 'photo-missing';
   const note = document.createElement('p');
   note.className = 'hint';
-  note.textContent = `Photo ${index + 1}${photo.hints?.name ? ` (${photo.hints.name})` : ''} did not reach Rehere. Choose the file again to send it.`;
+  // Cause-neutral: the row above says whether it was never received or failed a check.
+  note.textContent = `Photo ${index + 1}${photo.hints?.name ? ` (${photo.hints.name})` : ''} is not in this form. Choose the file again, or remove it.`;
   const choose = document.createElement('input');
   choose.type = 'file';
   choose.accept = 'image/jpeg,image/png';
@@ -218,9 +219,9 @@ function renderVoice() {
   const { state, message, recording, startedAt } = recorder.snapshot();
   const statusText = {
     unavailable: message,
-    idle: 'Tell this memory in your own voice. Recording starts only when you press Record.',
+    idle: 'Tell this memory in your own voice. Recording starts only when you press Record and stops on its own just before five minutes.',
     requesting: 'Waiting for microphone permission. You can still save photos and writing.',
-    recording: `Recording ${formatTime(Date.now() - (startedAt ?? Date.now()))} of ${formatTime(MAX_RECORDING_MS)}`,
+    recording: `Recording ${formatTime(Date.now() - (startedAt ?? Date.now()))} of ${formatTime(MAX_RECORDING_MS)}; it stops on its own before five minutes`,
     finalizing: 'Finishing the recording...',
     recorded: 'Recording ready. Listen back before saving, or discard it.',
     denied: message,
@@ -397,7 +398,12 @@ function settleIntake(outcome) {
     default: {
       const parts = outcome.state?.parts ?? [];
       const received = parts.filter((part) => part.status === 'received').length;
-      setMessage(`Not saved yet: ${received} of ${parts.length} files reached Rehere. Saving again sends only the files still missing; you can also remove or replace a file first.`);
+      const failed = parts.some((part) => part.status === 'failed');
+      setMessage(
+        failed
+          ? `Not saved yet: ${received} of ${parts.length} files reached Rehere. Replace or remove the files marked Failed, then save again; files Rehere already received are kept and not sent again.`
+          : `Not saved yet: ${received} of ${parts.length} files reached Rehere. Saving again sends only the files still missing; you can also remove or replace a file first.`,
+      );
     }
   }
 }
@@ -409,7 +415,26 @@ const PART_TEXT = {
   failed: 'Failed',
   unknown: 'Sending result unclear; it will be checked',
 };
-const FAILURES = { empty: 'the file is empty', size: 'the size did not match', hash: 'the content did not match', type: 'not a supported photo or recording type' };
+// Why the server refused a file for good, and what the person can do. Only the
+// server's fixed codes are used; no decoder output is ever shown.
+const FAILURES = {
+  photo: {
+    empty: 'the file is empty. Remove it and add the photo again',
+    size: 'the file changed while it was sent. Remove it and add it again',
+    hash: 'the file changed while it was sent. Remove it and add it again',
+    type: 'it is not a JPEG or PNG photo. Remove it and add a JPEG or PNG copy',
+    content: 'Rehere could not read this photo. Remove it and add a JPEG or 8-bit PNG copy',
+    pixels: 'the photo is larger than 32 megapixels. Remove it and add a smaller copy',
+  },
+  voice: {
+    empty: 'the recording is empty. Discard it and record again',
+    size: 'the recording changed while it was sent. Discard it and record again',
+    hash: 'the recording changed while it was sent. Discard it and record again',
+    type: 'it is not a supported recording type. Discard it and record again',
+    content: 'Rehere could not read this recording. Discard it and record again',
+    duration: 'the recording is longer than five minutes. Discard it and record a shorter one',
+  },
+};
 
 // Per-file progress of the unfinished save, from the server's own record.
 function renderIntake() {
@@ -424,8 +449,11 @@ function renderIntake() {
     const row = intake.row(part.partId);
     const item = document.createElement('li');
     const label = part.kind === 'voice' ? 'The recording' : `Photo ${(photoNumber += 1)}`;
-    const failure = row.status === 'failed' ? `: ${FAILURES[part.error] ?? 'it could not be stored'}` : '';
-    item.textContent = `${label}${part.hints?.name ? ` (${part.hints.name})` : ''}: ${PART_TEXT[row.status] ?? PART_TEXT.missing}${failure}.`;
+    const failure = row.status === 'failed' ? `: ${FAILURES[part.kind]?.[part.error] ?? 'it could not be stored'}` : '';
+    // A busy or unavailable check left the file unsent; its fixed message is
+    // kept here until the next attempt.
+    const notice = row.status === 'missing' && row.notice ? ` (${row.notice.replace(/\.$/, '')}; saving again tries it again)` : '';
+    item.textContent = `${label}${part.hints?.name ? ` (${part.hints.name})` : ''}: ${PART_TEXT[row.status] ?? PART_TEXT.missing}${failure}${notice}.`;
     list.append(item);
   }
   const nodes = [list];
@@ -439,7 +467,7 @@ function renderIntake() {
       renderIntake();
     });
     const note = document.createElement('p');
-    note.textContent = 'The recording did not reach Rehere and cannot be recovered here. Remove it, or record a new one; a new recording starts with no uses allowed.';
+    note.textContent = 'The recording cannot be restored into this form. Remove it, or record a new one; a new recording starts with no uses allowed.';
     nodes.push(note, drop);
   }
   if (!saving && !intake.pending) {
@@ -883,8 +911,15 @@ async function resumeIntake(id) {
     renderVoice();
     renderIntake();
     els.intakeResume.replaceChildren();
-    const missing = state.parts.length - received.length;
-    setMessage(missing ? `Resumed. ${missing} file${missing === 1 ? '' : 's'} did not reach Rehere and must be chosen again or removed before saving.` : 'Resumed. Press Save to finish saving this memory.', 'success');
+    // What the person must do, not why: a part may never have arrived or may
+    // have failed a content check; its row says which.
+    const reselect = photoParts.filter((part) => part.status !== 'received').length;
+    const lostRecording = Boolean(voicePart) && voicePart.status !== 'received';
+    const steps = [
+      ...(reselect ? [`Choose ${reselect} file${reselect === 1 ? '' : 's'} again or remove ${reselect === 1 ? 'it' : 'them'} before saving.`] : []),
+      ...(lostRecording ? ['Remove the recording or record a new one before saving.'] : []),
+    ];
+    setMessage(steps.length ? `Resumed. ${steps.join(' ')}` : 'Resumed. Press Save to finish saving this memory.', 'success');
   } catch (error) {
     if (error?.name !== 'AbortError') throw error;
   } finally {

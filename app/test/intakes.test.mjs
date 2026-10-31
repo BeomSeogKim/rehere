@@ -6,7 +6,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { DraftStore } from '../drafts.mjs';
 import { IntakeStore } from '../intakes.mjs';
-import { client, enrolledContributor, png, startOwnerServer } from './auth-helper.mjs';
+import { acceptingTestMediaVerifier, client, enrolledContributor, png, startOwnerServer } from './auth-helper.mjs';
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 // Synthetic files only: two distinct PNGs and a WebM header.
@@ -234,7 +234,7 @@ describe('intake plans', () => {
   it('discards a late upload whose part was removed while its bytes were being checked', async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rehere-intake-'));
     tempDirs.push(dataDir);
-    const store = new IntakeStore({ dataDir, drafts: new DraftStore(dataDir) });
+    const store = new IntakeStore({ dataDir, drafts: new DraftStore(dataDir), verifier: acceptingTestMediaVerifier() /* disclosed media seam, see auth-helper */ });
     const owner = { id: randomUUID(), role: 'owner' };
     const late = part(PHOTO_1);
     const stay = part(PHOTO_2);
@@ -254,7 +254,7 @@ describe('late uploads after re-planning', () => {
   it('never publishes old bytes for a part ID that was removed and re-added for a different file', async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rehere-intake-'));
     tempDirs.push(dataDir);
-    const store = new IntakeStore({ dataDir, drafts: new DraftStore(dataDir) });
+    const store = new IntakeStore({ dataDir, drafts: new DraftStore(dataDir), verifier: acceptingTestMediaVerifier() /* disclosed media seam, see auth-helper */ });
     const owner = { id: randomUUID(), role: 'owner' };
     const original = part(PHOTO_1);
     const body = createBody([original]);

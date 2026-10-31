@@ -12,7 +12,7 @@ const WEBM_MAGIC = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0]);
 const code = (expected) => (error) => error instanceof AudioDecodeError && error.code === expected;
 
 // A child process stand-in: records its input and exits only when told to or killed.
-function fakeSpawn({ stdout = Buffer.alloc(0), exitCode = 0, hang = false } = {}) {
+function fakeSpawn({ stdout = Buffer.alloc(0), exitCode = 0, hang = false, stderr = 'private decoder detail /private-input/voice.webm' } = {}) {
   const calls = [];
   const spawnImpl = (executable, args, options) => {
     const child = new EventEmitter();
@@ -29,7 +29,7 @@ function fakeSpawn({ stdout = Buffer.alloc(0), exitCode = 0, hang = false } = {}
     calls.push({ executable, args, options, input, child });
     if (!hang) {
       child.stdin.on('finish', () => {
-        child.stderr.write('private decoder detail /private-input/voice.webm');
+        if (stderr) child.stderr.write(stderr);
         child.stdout.end(stdout);
         setImmediate(() => child.emit('close', exitCode));
       });
@@ -58,6 +58,33 @@ describe('playback WAV', () => {
       assert.throws(() => pcmWav(pcm), code('decode-failed'));
     }
     assert.equal(pcmWav(Buffer.alloc(MAX_PCM_BYTES)).length, MAX_PCM_BYTES + 44);
+  });
+});
+
+describe('strict input verification option', () => {
+  it('adds strict error detection before the input, fails on any decoder error output, and leaves playback defaults unchanged', async () => {
+    assert.deepEqual(decoderArgs('audio/webm', { strict: false }), decoderArgs('audio/webm'));
+    assert.ok(!decoderArgs('audio/webm').includes('-err_detect'), 'story playback arguments are unchanged');
+    const strict = decoderArgs('audio/ogg', { strict: true });
+    const at = strict.indexOf('-err_detect');
+    assert.deepEqual(strict.slice(at, at + 2), ['-err_detect', 'crccheck+bitstream+buffer+explode']);
+    assert.ok(at < strict.indexOf('-i'), 'an input option');
+    const filter = strict.indexOf('-af');
+    assert.deepEqual(strict.slice(filter, filter + 2), ['-af', 'asetpts=N/SR/TB'], 'timestamps renumbered from the sample count');
+    assert.ok(filter > strict.indexOf('-i') && filter < strict.indexOf('-ac'), 'an output filter before resampling');
+    assert.deepEqual(strict.filter((_, index) => ![at, at + 1, filter, filter + 1].includes(index)), decoderArgs('audio/ogg'));
+
+    const pcm = Buffer.alloc(3200);
+    // The default decode ignores error output when ffmpeg exits 0.
+    assert.equal((await createAudioDecoder({ spawnImpl: fakeSpawn({ stdout: pcm }) })({ bytes: WEBM_MAGIC, type: 'audio/webm' })).pcm.length, 3200);
+    const reported = fakeSpawn({ stdout: pcm });
+    const error = await createAudioDecoder({ spawnImpl: reported, strict: true })({ bytes: WEBM_MAGIC, type: 'audio/webm' }).catch((caught) => caught);
+    assert.ok(code('decode-failed')(error), 'strict: any error output fails even with exit 0');
+    assert.ok(!error.message.includes('private'));
+    assert.deepEqual(reported.calls[0].args, decoderArgs('audio/webm', { strict: true }));
+    const clean = await createAudioDecoder({ spawnImpl: fakeSpawn({ stdout: pcm, stderr: '' }), strict: true })({ bytes: WEBM_MAGIC, type: 'audio/webm' });
+    assert.deepEqual([clean.pcm.length, clean.durationMs], [3200, 100], 'silent samples are valid');
+    await assert.rejects(createAudioDecoder({ spawnImpl: fakeSpawn({ stdout: Buffer.alloc(0), stderr: '' }), strict: true })({ bytes: WEBM_MAGIC, type: 'audio/webm' }), code('decode-failed'));
   });
 });
 

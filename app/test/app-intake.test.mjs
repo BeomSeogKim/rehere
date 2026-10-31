@@ -26,6 +26,7 @@ const OLD = '0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f';
 const P1 = '1a1a1a1a-1a1a-4a1a-8a1a-1a1a1a1a1a1a';
 const P2 = '2b2b2b2b-2b2b-4b2b-8b2b-2b2b2b2b2b2b';
 const V = '3c3c3c3c-3c3c-4c3c-8c3c-3c3c3c3c3c3c';
+const P3 = '4d4d4d4d-4d4d-4d4d-8d4d-4d4d4d4d4d4d';
 const input = (overrides = {}) => ({
   provider: '',
   origin: { kind: 'unknown', reference: '' },
@@ -59,13 +60,16 @@ intakes.set(OLD, {
     photos: [
       input({ provider: 'Neighbour', origin: { kind: 'public', reference: 'archive' }, permissions: { place: true, model: true, share: false }, dates: { capturedOn: '1998-07-01', fileCreatedAt: null, fileModifiedAt: '2021-02-03T04:05:06.000Z', estimatedPeriod: '' } }),
       input(),
+      input(),
     ],
     text: input({ provider: 'Me', origin: { kind: 'own', reference: '' }, permissions: { place: true, model: false, share: true } }),
     voice: input({ provider: 'Me', origin: { kind: 'own', reference: '' }, permissions: { place: false, model: false, share: true } }),
   },
   parts: [
     { partId: P1, kind: 'photo', size: 3, sha256: sha('aaa'), hints: { name: 'kitchen.jpg', type: 'image/jpeg', lastModified: 5 }, status: 'received', error: null, detectedType: 'image/jpeg' },
-    { partId: P2, kind: 'photo', size: 3, sha256: sha('bbb'), hints: { name: 'shop.jpg', type: 'image/jpeg', lastModified: 6 }, status: 'missing', error: null, detectedType: null },
+    // Arrived, then refused by the content check: not "never received".
+    { partId: P2, kind: 'photo', size: 3, sha256: sha('bbb'), hints: { name: 'shop.jpg', type: 'image/jpeg', lastModified: 6 }, status: 'failed', error: 'content', detectedType: null },
+    { partId: P3, kind: 'photo', size: 3, sha256: sha('www'), hints: { name: 'back.jpg', type: 'image/jpeg', lastModified: 7 }, status: 'missing', error: null, detectedType: null },
     { partId: V, kind: 'voice', size: 3, sha256: sha('vvv'), hints: { name: 'voice', type: 'audio/webm', lastModified: null }, status: 'received', error: null, detectedType: 'audio/webm' },
   ],
 });
@@ -136,6 +140,13 @@ async function intakeRoute(path, method, options) {
           reject(new DOMException('aborted', 'AbortError'));
         });
       });
+    }
+    if (takeFault(`busy:${part.hints.name}`)) return json(503, { error: 'Rehere is checking another file. Try again shortly.' });
+    for (const code of ['content', 'pixels']) {
+      if (takeFault(`${code}:${part.hints.name}`)) {
+        Object.assign(part, { status: 'failed', error: code });
+        return json(code === 'pixels' ? 413 : 400, { error: 'Refused.' });
+      }
     }
     if (takeFault(`type:${part.hints.name}`)) {
       Object.assign(part, { status: 'failed', error: 'type' });
@@ -241,7 +252,7 @@ const jpeg = (content, name) => new File([content], name, { type: 'image/jpeg', 
 
 describe('resumable saving in the app', () => {
   it('offers the unfinished save, says when resuming replaces the form, and restores only what arrived', async () => {
-    assert.match(byId('intake-resume').textContent, /An unfinished save from .*: 2 of 3 files reached Rehere\. They are kept there, not saved as a memory/);
+    assert.match(byId('intake-resume').textContent, /An unfinished save from .*: 2 of 4 files reached Rehere\. They are kept there, not saved as a memory/);
     assert.ok(button('Resume it'));
     assert.equal(intakePosts().length, 0, 'nothing is sent on load');
     // A take in progress is unsent input: asking, recording, then discarded.
@@ -291,14 +302,23 @@ describe('resumable saving in the app', () => {
     assert.equal(byId('draft-form').inert, false);
 
     const items = byId('photo-list').children;
-    assert.equal(items.length, 2, 'the unsent input was replaced, as the button said');
+    assert.equal(items.length, 3, 'the unsent input was replaced, as the button said');
     assert.equal(items[0].findAll((node) => node.tag === 'img').length, 1);
-    assert.match(items[1].textContent, /Photo 2 \(shop\.jpg\) did not reach Rehere\. Choose the file again/);
+    // What to do, not a claim about why: one failed a check, one never arrived.
+    assert.match(items[1].textContent, /Photo 2 \(shop\.jpg\) is not in this form\. Choose the file again, or remove it\./);
+    assert.match(items[2].textContent, /Photo 3 \(back\.jpg\) is not in this form\. Choose the file again, or remove it\./);
+    assert.doesNotMatch(byId('photo-list').textContent + message(), /did not reach/);
+    assert.equal(message(), 'Resumed. Choose 2 files again or remove them before saving.');
     assert.equal(items[0].findAll((node) => node.tag === 'input' && node.type === 'checkbox')[0].checked, true, 'source settings come back as they were');
     assert.equal(byId('memory-text').value, 'Line one\n  two\n', 'the text comes back exactly');
     assert.ok(byId('voice-preview').src, 'the received recording is back');
     assert.equal(micRequests, micBefore, 'restoring a recording never asks for the microphone');
-    assert.deepEqual(rows(), ['Photo 1 (kitchen.jpg): Received by Rehere, not saved yet.', 'Photo 2 (shop.jpg): Not sent yet.', 'The recording (voice): Received by Rehere, not saved yet.']);
+    assert.deepEqual(rows(), [
+      'Photo 1 (kitchen.jpg): Received by Rehere, not saved yet.',
+      'Photo 2 (shop.jpg): Failed: Rehere could not read this photo. Remove it and add a JPEG or 8-bit PNG copy.',
+      'Photo 3 (back.jpg): Not sent yet.',
+      'The recording (voice): Received by Rehere, not saved yet.',
+    ]);
     assert.equal(byId('intake-resume').children.length, 0);
     assert.doesNotMatch(message(), /Saved/);
 
@@ -306,9 +326,10 @@ describe('resumable saving in the app', () => {
     choose.files = [jpeg('bbb', 'shop-again.jpg')];
     choose.dispatch('change');
     await settle();
+    byId('photo-list').children[2].findAll((node) => node.tag === 'button' && node.textContent === 'Remove')[0].dispatch('click');
     requests.length = 0;
     await save();
-    assert.deepEqual(intakePosts().filter((request) => request.includes('/parts/')), [`POST /api/intakes/${OLD}/parts/${P2}`], 'only the missing photo is sent');
+    assert.deepEqual(intakePosts().filter((request) => request.includes('/parts/')), [`POST /api/intakes/${OLD}/parts/${P2}`], 'only the reselected photo is sent');
     assert.equal(intakePosts().filter((request) => request === 'POST /api/intakes').length, 0, 'the same intake, never a new one');
     assert.match(message(), /^Saved\. View what you saved/);
     assert.equal(byId('photo-list').children.length, 0, 'the form resets only after the final answer');
@@ -321,7 +342,7 @@ describe('resumable saving in the app', () => {
     requests.length = 0;
     await save();
     assert.match(message(), /^Not saved yet: 1 of 2 files reached Rehere\./);
-    assert.deepEqual(rows(), ['Photo 1 (good.jpg): Received by Rehere, not saved yet.', 'Photo 2 (bad.jpg): Failed: not a supported photo or recording type.']);
+    assert.deepEqual(rows(), ['Photo 1 (good.jpg): Received by Rehere, not saved yet.', 'Photo 2 (bad.jpg): Failed: it is not a JPEG or PNG photo. Remove it and add a JPEG or PNG copy.']);
     assert.equal(byId('photo-list').children.length, 2);
     assert.equal(byId('photos-panel').inert, false, 'editing stays possible between attempts');
     const [entry] = JSON.parse(storage.get('rehere:intakes:p-owner'));
@@ -330,6 +351,33 @@ describe('resumable saving in the app', () => {
     requests.length = 0;
     await save();
     assert.deepEqual(intakePosts().filter((request) => request.includes('/parts/')), [sentParts[1]], 'the received photo is not sent again');
+    assert.match(message(), /^Saved\./);
+  });
+
+  it('says what to do about a file that failed its content check, keeps the rest, and retries a busy check with the same file', async () => {
+    assert.match(byId('voice-status').textContent, /stops on its own just before five minutes/);
+    await addFiles(jpeg('mmm', 'kept.jpg'), jpeg('nnn', 'broken.jpg'), jpeg('ooo', 'huge.jpg'), jpeg('ppp', 'later.jpg'));
+    faults.push('content:broken.jpg', 'pixels:huge.jpg', 'busy:later.jpg');
+    requests.length = 0;
+    await save();
+    assert.match(message(), /^Not saved yet: 1 of 4 files reached Rehere\. Replace or remove the files marked Failed, then save again; files Rehere already received are kept and not sent again\./);
+    assert.deepEqual(rows(), [
+      'Photo 1 (kept.jpg): Received by Rehere, not saved yet.',
+      'Photo 2 (broken.jpg): Failed: Rehere could not read this photo. Remove it and add a JPEG or 8-bit PNG copy.',
+      'Photo 3 (huge.jpg): Failed: the photo is larger than 32 megapixels. Remove it and add a smaller copy.',
+      'Photo 4 (later.jpg): Not sent yet (Rehere is checking another file. Try again shortly; saving again tries it again).',
+    ]);
+    // Files are sent in order, so the last part request was the busy photo's.
+    const busyPart = requests.filter((request) => request.includes('/parts/')).at(-1);
+    const removeButtons = () => byId('photo-list').findAll((node) => node.tag === 'button' && node.textContent === 'Remove');
+    removeButtons()[2].dispatch('click');
+    removeButtons()[1].dispatch('click');
+    await addFiles(jpeg('qqq', 'fixed.jpg'));
+    requests.length = 0;
+    await save();
+    const sentParts = requests.filter((request) => request.includes('/parts/'));
+    assert.equal(sentParts.length, 2, 'the busy file again and the replacement, not the received one');
+    assert.ok(sentParts.includes(busyPart), 'the busy file is sent under the same part ID');
     assert.match(message(), /^Saved\./);
   });
 
@@ -383,6 +431,35 @@ describe('resumable saving in the app', () => {
     } finally {
       storageBlocked = false;
     }
+  });
+
+  it('gives separate guidance for a restored recording that cannot come back, without saying why', async () => {
+    const LOST = '5e5e5e5e-5e5e-4e5e-8e5e-5e5e5e5e5e5e';
+    const LV = '6f6f6f6f-6f6f-4f6f-8f6f-6f6f6f6f6f6f';
+    intakes.set(LOST, {
+      id: LOST,
+      status: 'open',
+      revision: 1,
+      createdAt: '2026-11-01T08:00:00.000Z',
+      updatedAt: '2026-11-01T08:00:00.000Z',
+      text: 'Only words and a recording.',
+      metadata: { photos: [], text: input(), voice: input() },
+      parts: [{ partId: LV, kind: 'voice', size: 3, sha256: sha('zzz'), hints: { name: 'voice', type: 'audio/webm', lastModified: null }, status: 'failed', error: 'content', detectedType: null }],
+    });
+    // Discarding an unfinished save shows the offers again.
+    await addFiles(jpeg('rrr', 'r-good.jpg'), jpeg('sss', 'r-bad.jpg'));
+    faults.push('type:r-bad.jpg');
+    await save();
+    button('Discard this unfinished save').dispatch('click');
+    await waitFor(() => button('Resume it (replaces what is in the form now)'), 'the offer');
+    button('Resume it (replaces what is in the form now)').dispatch('click');
+    await waitFor(() => /^Resumed\./.test(message()), 'the restore');
+    assert.equal(message(), 'Resumed. Remove the recording or record a new one before saving.');
+    assert.match(byId('intake-status').textContent, /The recording \(voice\): Failed: Rehere could not read this recording\. Discard it and record again\./);
+    assert.match(byId('intake-status').textContent, /The recording cannot be restored into this form\. Remove it, or record a new one/);
+    assert.doesNotMatch(byId('intake-status').textContent + message(), /did not reach/);
+    button('Discard this unfinished save').dispatch('click');
+    await waitFor(() => /discarded/.test(message()), 'the discard');
   });
 
   it('aborts sending on sign-out and lets no late answer bring anything back', async () => {

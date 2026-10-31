@@ -32,11 +32,20 @@ export class AudioDecodeError extends Error {
 const ENV_ALLOWLIST = ['PATH', 'TMPDIR', 'LANG'];
 const workerEnv = () => Object.fromEntries(ENV_ALLOWLIST.filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 
-export function decoderArgs(type) {
+// Input verification only: also fails on CRC, bitstream or buffer errors the
+// default playback decode would conceal. Story playback keeps the default.
+const STRICT_INPUT = ['-err_detect', 'crccheck+bitstream+buffer+explode'];
+// Input verification only: output timestamps are renumbered from the decoded
+// sample count, so a container's repeated or out-of-order timestamps (as in
+// Safari's MediaRecorder WebM) do not produce output-muxer errors. Decoding and
+// corrupt-input detection are unchanged; samples are not added or dropped.
+const STRICT_TIMESTAMPS = ['-af', 'asetpts=N/SR/TB'];
+
+export function decoderArgs(type, { strict = false } = {}) {
   return [
     '-hide_banner', '-nostats', '-loglevel', 'error', '-xerror',
-    '-protocol_whitelist', 'pipe', '-f', DEMUXERS[type], '-i', 'pipe:0',
-    '-map', '0:a:0', '-vn', '-sn', '-dn', '-map_metadata', '-1', '-map_chapters', '-1',
+    '-protocol_whitelist', 'pipe', ...(strict ? STRICT_INPUT : []), '-f', DEMUXERS[type], '-i', 'pipe:0',
+    '-map', '0:a:0', '-vn', '-sn', '-dn', '-map_metadata', '-1', '-map_chapters', '-1', ...(strict ? STRICT_TIMESTAMPS : []),
     '-ac', '1', '-ar', String(SAMPLE_RATE), '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1',
   ];
 }
@@ -66,8 +75,10 @@ export function pcmWav(pcm) {
 // Returns the decode function. `executable` defaults to REHERE_FFMPEG, else
 // `ffmpeg` found on PATH; an absolute path is recommended for local operation.
 // The limits are fixed in production; spawnImpl and killGraceMs are for tests only.
+// `strict` is for owner input verification: strict error detection, and any
+// decoder error output fails the decode even when ffmpeg exits 0.
 export function createAudioDecoder({
-  executable = process.env.REHERE_FFMPEG || 'ffmpeg', timeoutMs = 30_000, maxPcmBytes = MAX_PCM_BYTES, spawnImpl = spawn, killGraceMs = 1000,
+  executable = process.env.REHERE_FFMPEG || 'ffmpeg', timeoutMs = 30_000, maxPcmBytes = MAX_PCM_BYTES, spawnImpl = spawn, killGraceMs = 1000, strict = false,
 } = {}) {
   return function decode({ bytes, type, signal }) {
     if (!Object.hasOwn(DEMUXERS, type)) return Promise.reject(new AudioDecodeError('unsupported-type'));
@@ -79,7 +90,7 @@ export function createAudioDecoder({
     return new Promise((resolve, reject) => {
       let child;
       try {
-        child = spawnImpl(executable, decoderArgs(type), { shell: false, env: workerEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+        child = spawnImpl(executable, decoderArgs(type, { strict }), { shell: false, env: workerEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
       } catch {
         reject(new AudioDecodeError('unavailable'));
         return;
@@ -131,7 +142,10 @@ export function createAudioDecoder({
         chunks.push(chunk);
       });
       // Drained and discarded: decoder messages are never kept, returned or logged.
-      child.stderr.resume();
+      // In strict mode only their presence is counted.
+      let reported = false;
+      if (strict) child.stderr.on('data', () => { reported = true; });
+      else child.stderr.resume();
       child.stdin.on('error', () => {}); // ffmpeg may exit before reading all input
       child.on('error', (error) => {
         // A process that never started has nothing to wait for.
@@ -144,7 +158,7 @@ export function createAudioDecoder({
           return;
         }
         const pcm = Buffer.concat(chunks, size);
-        if (exitCode !== 0 || pcm.length === 0 || pcm.length % 2 !== 0) {
+        if (exitCode !== 0 || reported || pcm.length === 0 || pcm.length % 2 !== 0) {
           finish(new AudioDecodeError('decode-failed'));
           return;
         }

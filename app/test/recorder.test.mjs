@@ -365,3 +365,13 @@ describe('restoring a received recording', () => {
     assert.deepEqual([unsupported.snapshot().state, unsupported.snapshot().message], ['unavailable', message], 'Record does not become available');
   });
 });
+
+describe('the automatic stop', () => {
+  it('stops a take one second before five minutes by default', async () => {
+    const { MAX_RECORDING_MS } = await import('../public/recorder.js');
+    assert.equal(MAX_RECORDING_MS, 299_000);
+    const context = setup();
+    await startRecording(context);
+    assert.equal(context.timers.pending.filter(Boolean).at(-1).ms, 299_000);
+  });
+});

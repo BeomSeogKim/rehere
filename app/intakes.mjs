@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { INTAKE_RECEIPT, LIMITS, RequestError, detectMedia } from './drafts.mjs';
+import { MediaVerificationError, POLICY_SHA256, attestation, attested } from './media-verification.mjs';
 import { parseSourceMetadata } from './sources.mjs';
 
 // Resumable input: files and settings received after an explicit Save, kept
@@ -21,7 +22,11 @@ const MAX_TIME_MS = 8.64e15;
 export const INTAKE_LIMITS = Object.freeze({ ...LIMITS, aggregateBytes: 64 * 1024 * 1024, bodyBytes: 512 * 1024 });
 const UNREADABLE = 'The upload plan could not be read.';
 const UNAVAILABLE = 'This upload cannot be checked right now. Nothing was changed.';
-const PART_CODES = new Set(['empty', 'size', 'hash', 'type']);
+const PART_CODES = new Set(['empty', 'size', 'hash', 'type', 'content', 'pixels', 'duration']);
+const NOT_RECEIVED = 'Some files have not been received yet.';
+// A part refused by its full decode stays refused: its stored bytes are never recovered.
+const DECODE_REFUSALS = new Set(['content', 'pixels', 'duration']);
+const CHANGED_DURING_CHECK = 'Some files changed while they were being checked. Reload the upload and save again.';
 
 const fail = (status, message) => new RequestError(status, message);
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
@@ -69,6 +74,19 @@ function parsePlan({ text, parts, metadata }, limits) {
 const planDigest = (plan) => sha256(JSON.stringify([plan.text, plan.parts, plan.metadata]));
 const identity = (part) => JSON.stringify([part.partId, part.kind, part.size, part.sha256]);
 
+// One part with new state; a part that is not received keeps no verification.
+function withPart(record, part, changes) {
+  return {
+    ...record, updatedAt: new Date().toISOString(),
+    parts: record.parts.map((item) => {
+      if (item !== part) return item;
+      const next = { ...item, ...changes };
+      if (next.status !== 'received') delete next.verification;
+      return next;
+    }),
+  };
+}
+
 // Terminal states keep only identifiers and digests, never content.
 function terminal(record) {
   return {
@@ -82,19 +100,36 @@ function projectOpen(record) {
   return {
     id: record.id, status: 'open', revision: record.revision, createdAt: record.createdAt, updatedAt: record.updatedAt,
     text: record.text, metadata: record.metadata,
-    parts: record.parts.map((part) => ({ ...part, hints: { ...part.hints } })),
+    // The private verification record is never projected; the part shape is unchanged.
+    parts: record.parts.map(({ verification, ...part }) => ({ ...part, hints: { ...part.hints } })),
   };
 }
 
 export const projectIntake = (record) => (record.status === 'open' ? projectOpen(record) : terminal(record));
 
 export class IntakeStore {
-  constructor({ dataDir, drafts, limits = INTAKE_LIMITS }) {
+  // `verifier` decodes each file in full (media-verification.mjs); without one
+  // no file can be accepted and checks answer as unavailable.
+  constructor({ dataDir, drafts, limits = INTAKE_LIMITS, verifier = null }) {
     this.root = path.join(dataDir, 'intakes');
     this.drafts = drafts;
     this.limits = limits;
+    this.verifier = verifier;
     this.queue = Promise.resolve();
     this.swept = false;
+    this.shutdown = new AbortController();
+    // Decodes in progress, keyed by exact part identity, detected type and policy.
+    this.inflight = new Map();
+  }
+
+  // Stops accepting and publishing, then waits for queued record work.
+  async close() {
+    this.shutdown.abort();
+    await this.serialize(() => {}).catch(() => {});
+  }
+
+  #running(kind) {
+    if (this.shutdown.signal.aborted) throw new MediaVerificationError('aborted', kind);
   }
 
   // Every task runs alone. The first one after a start removes temporary
@@ -262,17 +297,24 @@ export class IntakeStore {
         continue;
       }
       if (part.status === 'received') continue;
+      if (part.status === 'failed' && DECODE_REFUSALS.has(part.error)) {
+        await rm(full, { force: true }).catch(() => {});
+        continue;
+      }
       const checked = this.#check(part, await readFile(full));
       if (checked.code) {
         await rm(full, { force: true });
       } else {
+        // Recovered bytes are received but stay unverified until decoded again.
         Object.assign(part, { status: 'received', error: null, detectedType: checked.detectedType });
+        delete part.verification;
         changed = true;
       }
     }
     for (const part of parts) {
       if (part.status === 'received' && !names.includes(`${part.partId}.bin`)) {
         Object.assign(part, { status: 'missing', error: null, detectedType: null });
+        delete part.verification;
         changed = true;
       }
     }
@@ -396,36 +438,55 @@ export class IntakeStore {
 
   // Bytes are checked outside the mutex, then published under it only if the
   // part is still active with the same identity; a late upload for a removed
-  // or replaced part is discarded. A received part is never replaced.
+  // or replaced part is discarded. An accepted part is never replaced. The
+  // order is: exact replay of an accepted part, cheap preflight (empty, size,
+  // checksum, signature), one full decode in the verification slot, then the
+  // identity-guarded publish of the bytes with their private verification.
   async receivePart(id, partId, bytes) {
-    const planned = await this.serialize(async () => {
+    const found = await this.serialize(async () => {
       const record = await this.#resolved(id);
       if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
       const part = record.parts.find((item) => item.partId === partId);
       if (!part) throw fail(404, 'This file is not part of the upload.');
-      return { ...part };
+      if (attested(part)) {
+        if (bytes.length === part.size && sha256(bytes) === part.sha256) return { replay: { partId, status: 'received', detectedType: part.detectedType } };
+        throw fail(409, 'This file was already received with different content.');
+      }
+      return { planned: { ...part } };
     });
+    if (found.replay) return found.replay;
+    const { planned } = found;
     const checked = this.#check(planned, bytes);
-    const temp = path.join(this.#dir(id), 'parts', `${partId}.${randomUUID()}.tmp`);
-    if (!checked.code) await writeFile(temp, bytes, { mode: 0o600, flag: 'wx' });
+    if (checked.code) return this.#refuseUpload(id, planned, checked);
+    let result;
     try {
+      result = await this.#certify(id, planned, checked.detectedType, bytes);
+    } catch (error) {
+      if (error.permanent) await this.#markFailed(id, planned, error.code);
+      throw error;
+    }
+    this.#running(planned.kind);
+    const temp = path.join(this.#dir(id), 'parts', `${partId}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temp, bytes, { mode: 0o600, flag: 'wx' });
       return await this.serialize(async () => {
+        this.#running(planned.kind);
         const record = await this.#resolved(id);
         if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
         const part = record.parts.find((item) => item.partId === partId);
         if (!part || identity(part) !== identity(planned)) throw fail(409, 'This file was removed or replaced in the upload.');
-        if (part.status === 'received') {
-          if (checked.code || sha256(bytes) !== part.sha256) throw fail(409, 'This file was already received with different content.');
-          return { partId, status: 'received', detectedType: part.detectedType };
+        if (attested(part)) return { partId, status: 'received', detectedType: part.detectedType };
+        const file = this.#partFile(id, partId);
+        await rename(temp, file);
+        // Publication boundary: nothing is awaited between this check and
+        // starting the record write. A close before it leaves no new file.
+        if (this.shutdown.signal.aborted) {
+          if (part.status !== 'received') await rm(file, { force: true }).catch(() => {});
+          throw new MediaVerificationError('aborted', planned.kind);
         }
-        if (checked.code) {
-          await this.#write({ ...record, updatedAt: new Date().toISOString(), parts: record.parts.map((item) => (item === part ? { ...item, status: 'failed', error: checked.code, detectedType: null } : item)) });
-          throw fail(400, checked.message ?? {
-            empty: 'This file is empty.', size: 'This file does not match its planned size.', hash: 'This file does not match its planned checksum.',
-          }[checked.code]);
-        }
-        await rename(temp, this.#partFile(id, partId));
-        await this.#write({ ...record, updatedAt: new Date().toISOString(), parts: record.parts.map((item) => (item === part ? { ...item, status: 'received', error: null, detectedType: checked.detectedType } : item)) });
+        await this.#write(withPart(record, part, {
+          status: 'received', error: null, detectedType: checked.detectedType, verification: attestation(part, checked.detectedType, result),
+        }));
         return { partId, status: 'received', detectedType: checked.detectedType };
       });
     } finally {
@@ -433,56 +494,156 @@ export class IntakeStore {
     }
   }
 
-  // Owner-private bytes of a received, active part of an open intake only.
-  async partAsset(id, partId) {
+  // A preflight refusal: never decoded. A received file with other bytes is a
+  // conflict; otherwise the still-matching part is marked failed.
+  async #refuseUpload(id, planned, checked) {
     return this.serialize(async () => {
       const record = await this.#resolved(id);
       if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
-      const part = record.parts.find((item) => item.partId === partId);
-      if (!part || part.status !== 'received') throw fail(404, 'This file has not been received.');
-      return { type: part.detectedType, size: part.size, file: this.#partFile(id, partId) };
+      const part = record.parts.find((item) => item.partId === planned.partId);
+      if (!part || identity(part) !== identity(planned)) throw fail(409, 'This file was removed or replaced in the upload.');
+      if (part.status === 'received') throw fail(409, 'This file was already received with different content.');
+      await this.#write(withPart(record, part, { status: 'failed', error: checked.code, detectedType: null }));
+      throw fail(400, checked.message ?? {
+        empty: 'This file is empty.', size: 'This file does not match its planned size.', hash: 'This file does not match its planned checksum.',
+      }[checked.code]);
     });
   }
 
+  // One full decode of exactly these bytes in the verification slot, outside
+  // the mutex. Identical concurrent work joins; other identities never share.
+  #certify(id, part, detectedType, bytes) {
+    const key = JSON.stringify([id, part.partId, part.kind, part.size, part.sha256, detectedType, POLICY_SHA256]);
+    const running = this.inflight.get(key);
+    if (running) return running;
+    this.#running(part.kind);
+    if (!this.verifier) return Promise.reject(new MediaVerificationError('unavailable', part.kind));
+    const promise = this.verifier.exclusive((signal) => this.verifier.verify({ kind: part.kind, type: detectedType, bytes, signal }));
+    this.inflight.set(key, promise);
+    promise.catch(() => {}).finally(() => {
+      if (this.inflight.get(key) === promise) this.inflight.delete(key);
+    });
+    return promise;
+  }
+
+  // A permanent decode refusal marks only a part that still has the same
+  // identity and no verification; its stored bytes are removed with it.
+  async #markFailed(id, planned, code) {
+    await this.serialize(async () => {
+      if (this.shutdown.signal.aborted) return;
+      const record = await this.#resolve(id);
+      if (record?.status !== 'open') return;
+      const part = record.parts.find((item) => item.partId === planned.partId);
+      if (!part || identity(part) !== identity(planned) || attested(part)) return;
+      await this.#write(withPart(record, part, { status: 'failed', error: code, detectedType: null }));
+      await rm(this.#partFile(id, part.partId), { force: true });
+    }).catch(() => {});
+  }
+
+  // Certifies a received part that has no current verification, such as one
+  // received before content validation or recovered after a crash. Its stored
+  // bytes are preflighted and decoded outside the mutex; the record is then
+  // written only if the part, its identity and the bytes on disk are unchanged.
+  async #certifyStored(id, part, refusal) {
+    const bytes = await readFile(this.#partFile(id, part.partId)).catch(() => null);
+    const checked = bytes && this.#check(part, bytes);
+    if (!checked || checked.code) throw refusal();
+    let result;
+    try {
+      result = await this.#certify(id, part, checked.detectedType, bytes);
+    } catch (error) {
+      if (error.permanent) await this.#markFailed(id, part, error.code);
+      throw error;
+    }
+    await this.serialize(async () => {
+      this.#running(part.kind);
+      const record = await this.#resolved(id);
+      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      const current = record.parts.find((item) => item.partId === part.partId);
+      if (!current || identity(current) !== identity(part) || current.status !== 'received') throw refusal();
+      if (attested(current)) return;
+      const disk = await readFile(this.#partFile(id, part.partId)).catch(() => null);
+      if (!disk || disk.length !== part.size || sha256(disk) !== part.sha256) throw refusal();
+      this.#running(part.kind);
+      await this.#write(withPart(record, current, { detectedType: checked.detectedType, verification: attestation(current, checked.detectedType, result) }));
+    });
+  }
+
+  // Owner-private bytes of a received, active, verified part of an open intake
+  // only. A part without a current verification is certified first. The bytes
+  // are read and hashed against the verified size and checksum in the mutex,
+  // and exactly those bytes are served, never the mutable file path.
+  async partAsset(id, partId) {
+    const asset = async (record) => {
+      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      const part = record.parts.find((item) => item.partId === partId);
+      if (!part || part.status !== 'received') throw fail(404, 'This file has not been received.');
+      if (!attested(part)) return { pending: { ...part } };
+      const body = await readFile(this.#partFile(id, partId)).catch(() => null);
+      if (!body || body.length !== part.verification.size || sha256(body) !== part.verification.sha256) throw fail(409, UNAVAILABLE);
+      return { type: part.detectedType, body };
+    };
+    const found = await this.serialize(async () => asset(await this.#resolved(id)));
+    if (!found.pending) return found;
+    await this.#certifyStored(id, found.pending, () => fail(404, 'This file has not been received.'));
+    const verified = await this.serialize(async () => asset(await this.#resolved(id)));
+    if (verified.pending) throw fail(404, 'This file has not been received.');
+    return verified;
+  }
+
+  // Commit never decodes under the mutex. Received parts without a current
+  // verification are certified first, outside it, and each success is kept;
+  // the final commit then repeats every check before building the draft.
   async commit(id, owner, body) {
     if (!exactKeys(body, ['requestId', 'baseRevision']) || !isUuid(body.requestId) || !Number.isInteger(body.baseRevision) || body.baseRevision < 1) {
       throw fail(400, UNREADABLE);
     }
-    return this.serialize(async () => {
-      const record = await this.#resolved(id);
-      if (record.status === 'committed') {
-        if (record.commitRequestId === body.requestId && record.revision === body.baseRevision) return { status: 200, intake: terminal(record) };
-        throw fail(409, 'This upload was already saved.');
-      }
-      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
-      if (body.baseRevision !== record.revision) throw fail(409, 'The upload changed elsewhere. Reload it before saving.');
-      if (record.ownerId !== owner.id) throw fail(403, 'This action is not allowed.');
-      if (!record.parts.every((part) => part.status === 'received')) throw fail(409, 'Some files have not been received yet.');
-      // Every stored file is checked again before the final draft is built.
-      const media = [];
-      for (const part of record.parts) {
-        const bytes = await readFile(this.#partFile(id, part.partId)).catch(() => null);
-        const checked = bytes && this.#check(part, bytes);
-        if (!checked || checked.code) throw fail(409, 'Some files have not been received yet.');
-        media.push({ part, bytes: new Uint8Array(bytes), type: checked.detectedType, extension: checked.extension });
-      }
-      const photos = media.filter((item) => item.part.kind === 'photo');
-      const voice = media.find((item) => item.part.kind === 'voice') ?? null;
-      // Blank text becomes no written memory only now, as in a direct save.
-      const text = record.text.trim() ? record.text : '';
-      const sources = parseSourceMetadata(JSON.stringify(record.metadata), { photoCount: photos.length, hasText: Boolean(text), hasVoice: Boolean(voice) });
-      if (!sources) throw fail(400, 'The source details could not be read.');
-      const receipt = { ownerId: owner.id, intakeId: id, commitRequestId: body.requestId, revision: record.revision, planSha256: record.planSha256 };
-      await this.drafts.create({
-        text, sources,
-        photos: photos.map(({ bytes, type, extension }) => ({ bytes, type, extension })),
-        voice: voice && { bytes: voice.bytes, type: voice.type, extension: voice.extension },
-      }, { id: record.draftId, receipt });
-      const committed = this.#terminalRecord(record, 'committed', { receipt, commitRequestId: body.requestId });
-      await this.#write(committed).catch(() => {});
-      await this.#cleanup(id);
-      return { status: 201, intake: terminal(committed) };
-    });
+    const first = await this.serialize(() => this.#commitNow(id, owner, body));
+    if (first.result) return first.result;
+    for (const part of first.pending) await this.#certifyStored(id, part, () => fail(409, NOT_RECEIVED));
+    const second = await this.serialize(() => this.#commitNow(id, owner, body));
+    if (second.result) return second.result;
+    throw fail(409, CHANGED_DURING_CHECK);
+  }
+
+  // Under the mutex. Returns { result } or the parts still needing certification.
+  async #commitNow(id, owner, body) {
+    const record = await this.#resolved(id);
+    if (record.status === 'committed') {
+      if (record.commitRequestId === body.requestId && record.revision === body.baseRevision) return { result: { status: 200, intake: terminal(record) } };
+      throw fail(409, 'This upload was already saved.');
+    }
+    if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+    if (body.baseRevision !== record.revision) throw fail(409, 'The upload changed elsewhere. Reload it before saving.');
+    if (record.ownerId !== owner.id) throw fail(403, 'This action is not allowed.');
+    if (!record.parts.every((part) => part.status === 'received')) throw fail(409, NOT_RECEIVED);
+    const pending = record.parts.filter((part) => !attested(part)).map((part) => ({ ...part }));
+    if (pending.length > 0) return { pending };
+    // Every stored file is checked again before the final draft is built.
+    const media = [];
+    for (const part of record.parts) {
+      const bytes = await readFile(this.#partFile(id, part.partId)).catch(() => null);
+      const checked = bytes && this.#check(part, bytes);
+      if (!checked || checked.code) throw fail(409, NOT_RECEIVED);
+      media.push({ part, bytes: new Uint8Array(bytes), type: checked.detectedType, extension: checked.extension });
+    }
+    const photos = media.filter((item) => item.part.kind === 'photo');
+    const voice = media.find((item) => item.part.kind === 'voice') ?? null;
+    // Blank text becomes no written memory only now, as in a direct save.
+    const text = record.text.trim() ? record.text : '';
+    const sources = parseSourceMetadata(JSON.stringify(record.metadata), { photoCount: photos.length, hasText: Boolean(text), hasVoice: Boolean(voice) });
+    if (!sources) throw fail(400, 'The source details could not be read.');
+    const receipt = { ownerId: owner.id, intakeId: id, commitRequestId: body.requestId, revision: record.revision, planSha256: record.planSha256 };
+    // The draft folder rename is the commit boundary; a close before it saves nothing.
+    await this.drafts.create({
+      text, sources,
+      photos: photos.map(({ bytes, type, extension }) => ({ bytes, type, extension })),
+      voice: voice && { bytes: voice.bytes, type: voice.type, extension: voice.extension },
+    }, { id: record.draftId, receipt, signal: this.shutdown.signal });
+    const committed = this.#terminalRecord(record, 'committed', { receipt, commitRequestId: body.requestId });
+    await this.#write(committed).catch(() => {});
+    await this.#cleanup(id);
+    return { result: { status: 201, intake: terminal(committed) } };
   }
 
   async discard(id, body) {

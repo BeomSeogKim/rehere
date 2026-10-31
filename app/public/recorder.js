@@ -1,4 +1,7 @@
-export const MAX_RECORDING_MS = 5 * 60 * 1000;
+// A take stops on its own one second before five minutes, leaving room for
+// encoder padding under the server's exact five-minute limit. A delayed
+// browser timer is not ruled out; the server still decides.
+export const MAX_RECORDING_MS = 299_000;
 
 const PREFERRED_TYPES = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'];
 

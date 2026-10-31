@@ -366,6 +366,68 @@ describe('a plan race', () => {
   });
 });
 
+describe('content checks on the server', () => {
+  it('keeps the other files when one fails its content check, and sends only the replacement', async () => {
+    const server = fakeServer();
+    const newId = ids();
+    const session = createIntakeSession({ api: server, ids: pendingIds(memoryStorage(), 'p-owner'), newId });
+    const photos = [photo('aaa', 'good.jpg'), photo('bbb', 'broken.jpg')];
+    let { intended, files } = await prepare(photos, 'x', newId);
+    const part = server.part;
+    server.part = async (id, partId, blob) => {
+      if (partId !== photos[1].partId) return part(id, partId, blob);
+      server.calls.push(['part', partId]);
+      Object.assign(server.intakes.get(id).parts.find((entry) => entry.partId === partId), { status: 'failed', error: 'content' });
+      return { status: 400, ok: false, body: { error: 'Rehere could not read this photo.' } };
+    };
+    const first = await session.save(intended, files);
+    assert.equal(first.kind, 'incomplete');
+    assert.deepEqual([session.row(photos[0].partId).status, session.row(photos[1].partId).status], ['received', 'failed']);
+    assert.equal(session.state.parts[1].error, 'content');
+    server.part = part;
+    photos[1] = photo('ccc', 'fixed.jpg');
+    ({ intended, files } = await prepare(photos, 'x', newId));
+    server.calls.length = 0;
+    assert.equal((await session.save(intended, files)).kind, 'saved');
+    assert.deepEqual(sent(server, 'part').map((call) => call[1]), [photos[1].partId], 'only the replacement is sent');
+  });
+
+  it('leaves a part unsent when the check is busy, keeps its message, and sends the same part on the next save', async () => {
+    const server = fakeServer();
+    const newId = ids();
+    const session = createIntakeSession({ api: server, ids: pendingIds(memoryStorage(), 'p-owner'), newId });
+    const photos = [photo('aaa', 'a.jpg')];
+    const { intended, files } = await prepare(photos, 'x', newId);
+    server.faults.push({ name: `part:${photos[0].partId}`, result: { status: 503, ok: false, body: { error: 'Rehere is checking another file. Try again shortly.' } } });
+    assert.equal((await session.save(intended, files)).kind, 'incomplete');
+    assert.deepEqual(session.row(photos[0].partId), { status: 'missing', error: null, notice: 'Rehere is checking another file. Try again shortly.' });
+    assert.equal(server.intakes.get(session.intakeId).parts[0].status, 'missing', 'nothing changed on the server');
+    server.calls.length = 0;
+    assert.equal((await session.save(intended, files)).kind, 'saved');
+    assert.deepEqual(sent(server, 'part').map((call) => call[1]), [photos[0].partId], 'the same part, by an explicit save');
+    assert.equal(session.row(photos[0].partId).notice, null);
+  });
+});
+
+describe('a busy notice', () => {
+  it('goes away once the server says the part arrived, even without a new send', async () => {
+    const server = fakeServer();
+    const newId = ids();
+    const session = createIntakeSession({ api: server, ids: pendingIds(memoryStorage(), 'p-owner'), newId });
+    const photos = [photo('aaa', 'a.jpg'), photo('bbb', 'b.jpg')];
+    const { intended, files } = await prepare(photos, 'x', newId);
+    server.faults.push({ name: `part:${photos[0].partId}`, result: { status: 503, ok: false, body: { error: 'Rehere is checking another file. Try again shortly.' } } });
+    server.faults.push({ name: `part:${photos[1].partId}`, result: { status: 0, ok: false, body: null } });
+    await session.save(intended, files);
+    assert.ok(session.row(photos[0].partId).notice);
+    // The part arrived after all (an exact replay elsewhere); a re-read shows it.
+    Object.assign(server.intakes.get(session.intakeId).parts[0], { status: 'received', error: null, detectedType: 'image/jpeg' });
+    await session.save(intended, new Map([[photos[1].partId, files.get(photos[1].partId)]]));
+    assert.equal(session.row(photos[0].partId).status, 'received');
+    assert.equal(session.row(photos[0].partId).notice, null);
+  });
+});
+
 describe('a newer plan from elsewhere is never adopted or committed', () => {
   // Another window replaces the plan with the same text and files, but with
   // sharing allowed for the first photo.

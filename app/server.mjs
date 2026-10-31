@@ -9,6 +9,7 @@ import { CONTRIBUTION_PHOTO_LIMITS, pythonPhotoDecoder, readPhotoForm } from './
 import { ShareStore, UNAVAILABLE as VISIT_UNAVAILABLE, isVisitToken } from './shares.mjs';
 import { createAudioDecoder } from './audio-derivative.mjs';
 import { INTAKE_LIMITS, IntakeStore } from './intakes.mjs';
+import { createMediaVerifier } from './media-verification.mjs';
 import { StoryStore } from './stories.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
@@ -330,6 +331,7 @@ export function createAppServer({
   accessStore = new AccessStore({ dataDir }),
   audioDecoder = createAudioDecoder(),
   contributionPhotoDecoder = pythonPhotoDecoder(),
+  mediaVerifier = createMediaVerifier(),
 } = {}) {
   const store = new DraftStore(dataDir);
   const attempts = attemptLimiter();
@@ -338,7 +340,7 @@ export function createAppServer({
   });
   const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder });
   const stories = new StoryStore({ reconstructions, audioDecoder });
-  const intakes = new IntakeStore({ dataDir, drafts: store });
+  const intakes = new IntakeStore({ dataDir, drafts: store, verifier: mediaVerifier });
   const shares = new ShareStore({ reconstructions, stories });
 
   // Visitor routes authenticate only with a Bearer visit token; cookies and
@@ -810,7 +812,15 @@ export function createAppServer({
 
     const policies = reconstructions.sourcePolicies;
     if (pathname === '/api/drafts' && req.method === 'POST') {
-      const draft = await store.create(await parseDraft(await readForm(req, limits.requestBytes), limits));
+      // Every file passes the cheap checks in parseDraft first; then each is
+      // decoded in full, in order, holding the one verification slot through
+      // the save. Any refusal before the final rename leaves no draft.
+      const parsed = await parseDraft(await readForm(req, limits.requestBytes), limits);
+      const media = [...parsed.photos.map((photo) => ['photo', photo]), ...(parsed.voice ? [['voice', parsed.voice]] : [])];
+      const draft = media.length === 0 ? await store.create(parsed) : await mediaVerifier.exclusive(async (signal) => {
+        for (const [kind, file] of media) await mediaVerifier.verify({ kind, type: file.type, bytes: file.bytes, signal });
+        return store.create(parsed, { signal });
+      });
       sendJson(res, 201, await policies.projectDraft(draft));
       return;
     }
@@ -874,7 +884,7 @@ export function createAppServer({
   // Closing the server also stops an active model process.
   const closeServer = server.close.bind(server);
   server.close = (callback) => {
-    const stopping = reconstructions.close();
+    const stopping = Promise.all([reconstructions.close(), intakes.close(), mediaVerifier.close()]);
     return closeServer((error) => stopping.then(() => callback?.(error), () => callback?.(error)));
   };
   return server;

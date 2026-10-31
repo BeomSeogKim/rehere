@@ -7,6 +7,7 @@ import { after, describe, it } from 'node:test';
 import { runCli } from '../access-cli.mjs';
 import { AccessStore, freshCredentials, generateSecret } from '../access.mjs';
 import { createAppServer } from '../server.mjs';
+import { acceptingTestMediaVerifier } from './auth-helper.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -58,7 +59,8 @@ async function tempDir() {
 after(() => Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true }))));
 
 async function start(dataDir, options = {}) {
-  const server = createAppServer({ dataDir, reconstructionRunner: runner, ...options });
+  // Disclosed media seam: see acceptingTestMediaVerifier in auth-helper.mjs.
+  const server = createAppServer({ dataDir, reconstructionRunner: runner, mediaVerifier: acceptingTestMediaVerifier(), ...options });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   return { server, base, port: server.address().port, close: () => new Promise((resolve) => server.close(resolve)) };

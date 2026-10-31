@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AccessStore, freshCredentials, generateSecret } from '../access.mjs';
+import { createMediaVerifier } from '../media-verification.mjs';
 import { createAppServer } from '../server.mjs';
 
 // Owner credentials per data folder, so a restarted server on the same folder
@@ -9,8 +10,21 @@ import { createAppServer } from '../server.mjs';
 const owners = new Map();
 const cookies = new Map();
 
+// DISCLOSED TEST SEAM: owner uploads in the domain suites use synthetic,
+// signature-only fixtures (png(), jpeg(), WEBM magic) that no real decoder
+// accepts. Servers started here therefore get this accepting media verifier
+// unless a test passes its own `mediaVerifier`. It keeps the real slot,
+// attestation and publication logic but replaces the photo and audio decoders
+// with ones that accept everything. It is never production validation:
+// test/owner-media-validation.test.mjs covers the production default and the
+// real decoders, and signature-only fixtures never count as decoder evidence.
+export const acceptingTestMediaVerifier = () => createMediaVerifier({
+  photo: async () => ({ width: 1, height: 1 }),
+  voice: async () => ({ durationMs: 1000 }),
+});
+
 // Bootstraps the owner directly on the server's store, as the local CLI does,
-// then signs in over HTTP. Every check stays real; there is no test bypass.
+// then signs in over HTTP. Apart from the media seam above, every check stays real.
 export async function startOwnerServer(options = {}) {
   const dataDir = path.resolve(options.dataDir);
   const accessStore = options.accessStore ?? new AccessStore({ dataDir });
@@ -20,7 +34,7 @@ export async function startOwnerServer(options = {}) {
     await accessStore.bootstrap({ requestId: randomUUID(), displayName: 'Synthetic owner', ...credentials });
     owners.set(dataDir, credentials);
   }
-  const server = createAppServer({ ...options, accessStore });
+  const server = createAppServer({ mediaVerifier: acceptingTestMediaVerifier(), ...options, accessStore });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const login = await globalThis.fetch(`${base}/api/session/login`, {

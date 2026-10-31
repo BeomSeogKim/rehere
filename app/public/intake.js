@@ -217,6 +217,9 @@ export function createIntakeSession({ api, ids, newId = () => crypto.randomUUID(
   let pending = null;
   let commitRequestId = null;
   const rows = new Map();
+  // The server's readable message from a busy, unavailable or timed-out check
+  // that left a part unsent; kept only in memory, only while it is missing.
+  const notices = new Map();
 
   const terminal = (result) => {
     if (!isTerminalState(result)) return null;
@@ -224,7 +227,10 @@ export function createIntakeSession({ api, ids, newId = () => crypto.randomUUID(
     return result.status === 'committed' ? { kind: 'saved', draftId: result.draftId } : { kind: 'discarded' };
   };
   const showParts = (next) => {
-    for (const part of next.parts) rows.set(part.partId, { status: part.status, error: part.error });
+    for (const part of next.parts) {
+      rows.set(part.partId, { status: part.status, error: part.error });
+      if (part.status !== 'missing') notices.delete(part.partId);
+    }
   };
   // Explicit adoption: next must be the plan recorded by this client.
   const adopt = (next, recorded) => {
@@ -319,7 +325,7 @@ export function createIntakeSession({ api, ids, newId = () => crypto.randomUUID(
     get pending() {
       return pending?.stage ?? null;
     },
-    row: (partId) => rows.get(partId) ?? { status: 'missing', error: null },
+    row: (partId) => ({ ...(rows.get(partId) ?? { status: 'missing', error: null }), notice: notices.get(partId) ?? null }),
     // Continues an intake read from the server: resuming is the person's
     // explicit choice of that plan.
     resume(next) {
@@ -370,11 +376,15 @@ export function createIntakeSession({ api, ids, newId = () => crypto.randomUUID(
       for (const part of state.parts) {
         if (rows.get(part.partId)?.status === 'received' || !files.has(part.partId)) continue;
         rows.set(part.partId, { status: 'sending', error: null });
+        notices.delete(part.partId);
         onRow(part.partId);
         const result = await api.part(intakeId, part.partId, files.get(part.partId));
         sentAny = true;
         const acknowledged = result.ok && result.body?.status === 'received' && result.body.partId === part.partId;
         rows.set(part.partId, acknowledged ? { status: 'received', error: null } : { status: unclear(result) || result.ok ? 'unknown' : 'failed', error: null });
+        // Busy, unavailable or timed out (503): nothing changed on the server;
+        // the next explicit save sends the same part again.
+        if (result.status === 503 && typeof result.body?.error === 'string') notices.set(part.partId, result.body.error);
         onRow(part.partId);
       }
       if (sentAny || state.parts.some((part) => rows.get(part.partId)?.status !== 'received')) {
