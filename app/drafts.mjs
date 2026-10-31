@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { parseSourceMetadata, sourceRecord } from './sources.mjs';
 
 const MIB = 1024 * 1024;
 
@@ -15,7 +16,7 @@ export const LIMITS = Object.freeze({
 });
 
 const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const FIELDS = new Set(['text', 'photos', 'voice']);
+const FIELDS = new Set(['text', 'photos', 'voice', 'metadata']);
 
 export class RequestError extends Error {
   constructor(status, message) {
@@ -79,12 +80,16 @@ export async function parseDraft(form, limits = LIMITS) {
   let text = null;
   const photoFiles = [];
   let voiceFile = null;
+  let metadata = null;
 
   for (const [key, value] of form) {
     if (!FIELDS.has(key)) throw new RequestError(400, 'The upload contains an unexpected field.');
     if (key === 'text') {
       if (typeof value !== 'string' || text !== null) throw new RequestError(400, 'The written memory could not be read.');
       text = value;
+    } else if (key === 'metadata') {
+      if (typeof value !== 'string' || metadata !== null) throw new RequestError(400, 'The source details could not be read.');
+      metadata = value;
     } else if (typeof value === 'string') {
       throw new RequestError(400, 'The upload could not be read.');
     } else if (key === 'photos') {
@@ -95,7 +100,9 @@ export async function parseDraft(form, limits = LIMITS) {
     }
   }
 
-  text = (text ?? '').trim();
+  // Meaningful text is kept exactly as written; whitespace alone is no statement.
+  text ??= '';
+  if (!text.trim()) text = '';
   if (text.length > limits.textChars) {
     throw new RequestError(413, `The written memory must be ${limits.textChars.toLocaleString('en-US')} characters or fewer.`);
   }
@@ -109,7 +116,9 @@ export async function parseDraft(form, limits = LIMITS) {
   const photos = [];
   for (const file of photoFiles) photos.push(await readPhoto(file, limits));
   const voice = voiceFile ? await readVoice(voiceFile, limits) : null;
-  return { text, photos, voice };
+  const sources = parseSourceMetadata(metadata, { photoCount: photos.length, hasText: Boolean(text), hasVoice: Boolean(voice) });
+  if (!sources) throw new RequestError(400, 'The source details could not be read.');
+  return { text, photos, voice, sources };
 }
 
 export class DraftStore {
@@ -120,21 +129,44 @@ export class DraftStore {
 
   // Files are written to a private folder and renamed into place last, so a
   // failed save leaves no partial draft and existing drafts are never touched.
-  async create({ text, photos, voice }) {
+  async create({ text, photos, voice, sources }) {
     const id = randomUUID();
     const staging = path.join(this.tempDir, id);
-    const draft = { id, createdAt: new Date().toISOString(), text, photos: [], voice: null };
+    const draft = {
+      id,
+      schemaVersion: 2,
+      createdAt: new Date().toISOString(),
+      text,
+      textSourceId: null,
+      photos: [],
+      voice: null,
+      sources: [],
+    };
+    const addSource = (kind, input, content) => {
+      const record = sourceRecord(randomUUID(), kind, input, content);
+      draft.sources.push(record);
+      return record.id;
+    };
     try {
       await mkdir(staging, { recursive: true });
       for (const [index, photo] of photos.entries()) {
         const name = `photo-${index + 1}.${photo.extension}`;
         await writeFile(path.join(staging, name), photo.bytes);
-        draft.photos.push({ name, type: photo.type, size: photo.bytes.length });
+        const sourceId = addSource('photo', sources.photos[index], { name, bytes: photo.bytes, type: photo.type });
+        draft.photos.push({ name, type: photo.type, size: photo.bytes.length, sourceId });
+      }
+      if (text) {
+        draft.textSourceId = addSource('text', sources.text, {
+          name: null,
+          bytes: Buffer.from(text, 'utf8'),
+          type: 'text/plain; charset=utf-8',
+        });
       }
       if (voice) {
         const name = `voice.${voice.extension}`;
         await writeFile(path.join(staging, name), voice.bytes);
-        draft.voice = { name, type: voice.type, size: voice.bytes.length };
+        const sourceId = addSource('voice', sources.voice, { name, bytes: voice.bytes, type: voice.type });
+        draft.voice = { name, type: voice.type, size: voice.bytes.length, sourceId };
       }
       await writeFile(path.join(staging, 'draft.json'), JSON.stringify(draft, null, 2));
       await mkdir(this.draftsDir, { recursive: true });

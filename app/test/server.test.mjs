@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { LIMITS } from '../drafts.mjs';
 import { createAppServer } from '../server.mjs';
+import { canUseSource } from '../sources.mjs';
 
 // Synthetic bytes with real container signatures; no personal media is used.
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(64, 1)]);
@@ -29,13 +31,32 @@ async function start(options) {
   return { server, base, close: () => new Promise((resolve) => server.close(resolve)) };
 }
 
-function form({ text, photos = [], voice } = {}) {
+function form({ text, photos = [], voice, metadata } = {}) {
   const body = new FormData();
   if (text !== undefined) body.append('text', text);
   for (const [index, bytes] of photos.entries()) body.append('photos', new Blob([bytes], { type: 'image/jpeg' }), `p${index}.jpg`);
   if (voice) body.append('voice', new Blob([voice], { type: 'audio/webm' }), 'voice');
+  if (metadata !== undefined) body.append('metadata', typeof metadata === 'string' ? metadata : JSON.stringify(metadata));
   return body;
 }
+
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+
+function source(provider, permissions, dates = {}) {
+  return {
+    provider,
+    origin: { kind: 'own', reference: '' },
+    permissions: { place: false, model: false, share: false, ...permissions },
+    dates: { capturedOn: null, fileCreatedAt: null, fileModifiedAt: null, estimatedPeriod: '', ...dates },
+  };
+}
+
+const UNKNOWN = {
+  provider: '',
+  origin: { kind: 'unknown', reference: '' },
+  permissions: { place: false, model: false, share: false },
+  dates: { capturedOn: null, fileCreatedAt: null, fileModifiedAt: null, estimatedPeriod: '' },
+};
 
 const post = (base, body, headers) => fetch(`${base}/api/drafts`, { method: 'POST', body, headers });
 const bytes = async (response) => Buffer.from(await response.arrayBuffer());
@@ -80,7 +101,7 @@ describe('draft server', () => {
     const response = await post(app.base, form({ text: '  The blue gate by the bakery.  ', photos: [JPEG, PNG] }));
     assert.equal(response.status, 201);
     const draft = await response.json();
-    assert.equal(draft.text, 'The blue gate by the bakery.');
+    assert.equal(draft.text, '  The blue gate by the bakery.  ');
     assert.deepEqual(draft.photos.map((photo) => [photo.name, photo.type]), [['photo-1.jpg', 'image/jpeg'], ['photo-2.png', 'image/png']]);
     assert.equal(draft.voice, null);
 
@@ -96,7 +117,7 @@ describe('draft server', () => {
 
   it('saves a voice recording on its own and serves byte ranges', async () => {
     const draft = await (await post(app.base, form({ voice: MP4_AUDIO }))).json();
-    assert.deepEqual(draft.voice, { name: 'voice.m4a', type: 'audio/mp4', size: MP4_AUDIO.length });
+    assert.deepEqual(draft.voice, { name: 'voice.m4a', type: 'audio/mp4', size: MP4_AUDIO.length, sourceId: draft.sources[0].id });
     const partial = await fetch(`${app.base}/api/drafts/${draft.id}/assets/voice.m4a`, { headers: { range: 'bytes=4-11' } });
     assert.equal(partial.status, 206);
     assert.equal(partial.headers.get('content-range'), `bytes 4-11/${MP4_AUDIO.length}`);
@@ -268,6 +289,166 @@ describe('draft persistence', () => {
       assert.deepEqual(list.map((item) => item.id), [earlier.id]);
       assert.equal((await (await fetch(`${app.base}/api/drafts/${earlier.id}`)).json()).text, 'Earlier memory');
       assert.deepEqual(await readdir(path.join(dataDir, 'incoming')), [], 'partial files removed');
+    } finally {
+      await chmod(draftsDir, 0o700);
+      await app.close();
+    }
+  });
+});
+
+describe('draft sources', () => {
+  let app;
+  let dataDir;
+  before(async () => {
+    dataDir = await tempDir();
+    app = await start({ dataDir });
+  });
+  after(() => app.close());
+
+  const stored = () => readdir(path.join(dataDir, 'drafts')).catch(() => []);
+
+  it('records each original with its own attribution, checksum and exact text', async () => {
+    const text = '  Grandma\u2019s \uACE8\uBAA9, 1998 \u2014\n<b>not markup</b>  ';
+    const metadata = {
+      photos: [
+        source('Mina', { place: true }, { capturedOn: '1998-07-04' }),
+        { ...source('City archive', { place: true, share: true }, { estimatedPeriod: 'late 1990s' }), origin: { kind: 'public', reference: 'https://example.org/archive/12' } },
+      ],
+      text: source('Joon', { model: true }),
+      voice: source('Ara', {}, { fileModifiedAt: '2026-10-30T08:15:00.000Z' }),
+    };
+    const response = await post(app.base, form({ text, photos: [JPEG, PNG], voice: WEBM, metadata }));
+    assert.equal(response.status, 201);
+    const draft = await response.json();
+    // Multipart encoding sends line breaks in text fields as CRLF; the server
+    // stores and hashes exactly the text it received.
+    const received = text.replace(/\n/g, '\r\n');
+
+    assert.equal(draft.schemaVersion, 2);
+    assert.equal(draft.text, received);
+    assert.deepEqual(draft.sources.map((item) => item.kind), ['photo', 'photo', 'text', 'voice']);
+    assert.deepEqual(draft.sources.map((item) => item.provider), ['Mina', 'City archive', 'Joon', 'Ara']);
+    assert.deepEqual(draft.sources.map((item) => item.sha256), [sha256(JPEG), sha256(PNG), sha256(Buffer.from(received, 'utf8')), sha256(WEBM)]);
+    assert.deepEqual(draft.sources.map((item) => item.size), [JPEG.length, PNG.length, Buffer.byteLength(received, 'utf8'), WEBM.length]);
+    assert.deepEqual(draft.sources.map((item) => item.type), ['image/jpeg', 'image/png', 'text/plain; charset=utf-8', 'audio/webm']);
+    assert.deepEqual(draft.sources.map((item) => item.name), ['photo-1.jpg', 'photo-2.png', null, 'voice.webm']);
+    for (const item of draft.sources) {
+      assert.equal(item.role, 'original');
+      assert.equal(item.parentSourceId, null);
+      assert.match(item.id, /^[0-9a-f-]{36}$/);
+    }
+    assert.equal(new Set(draft.sources.map((item) => item.id)).size, 4);
+    assert.deepEqual(draft.photos.map((photo) => photo.sourceId), [draft.sources[0].id, draft.sources[1].id]);
+    assert.equal(draft.textSourceId, draft.sources[2].id);
+    assert.equal(draft.voice.sourceId, draft.sources[3].id);
+    assert.deepEqual(draft.sources[1].origin, metadata.photos[1].origin);
+    assert.deepEqual(draft.sources[3].dates, metadata.voice.dates);
+
+    const [first, second, written, voice] = draft.sources.map((item) => item.id);
+    assert.equal(canUseSource(draft, first, 'place'), true);
+    assert.equal(canUseSource(draft, first, 'model'), false);
+    assert.equal(canUseSource(draft, first, 'share'), false);
+    assert.equal(canUseSource(draft, second, 'share'), true);
+    assert.equal(canUseSource(draft, written, 'place'), false);
+    assert.equal(canUseSource(draft, written, 'model'), true);
+    assert.equal(canUseSource(draft, voice, 'place'), false);
+
+    assert.deepEqual(await (await fetch(`${app.base}/api/drafts/${draft.id}`)).json(), draft);
+    assert.deepEqual(await bytes(await fetch(`${app.base}/api/drafts/${draft.id}/assets/photo-2.png`)), PNG);
+  });
+
+  it('defaults to unknown sources without consent when metadata is absent', async () => {
+    const draft = await (await post(app.base, form({ text: 'Kept', photos: [JPEG] }))).json();
+    assert.equal(draft.sources.length, 2);
+    for (const item of draft.sources) {
+      const { provider, origin, permissions, dates } = item;
+      assert.deepEqual({ provider, origin, permissions, dates }, UNKNOWN);
+      for (const purpose of ['place', 'model', 'share']) assert.equal(canUseSource(draft, item.id, purpose), false);
+    }
+  });
+
+  it('treats whitespace-only text as no statement and no source', async () => {
+    const draft = await (await post(app.base, form({ text: ' \n ', photos: [JPEG], metadata: { photos: [source('Mina', {})], text: null } }))).json();
+    assert.equal(draft.text, '');
+    assert.equal(draft.textSourceId, null);
+    assert.deepEqual(draft.sources.map((item) => item.kind), ['photo']);
+  });
+
+  it('rejects invalid or misplaced metadata without storing anything', async () => {
+    const before = await stored();
+    const cases = [
+      form({ photos: [JPEG], metadata: 'not json' }),
+      form({ photos: [JPEG], metadata: { photos: [] } }),
+      form({ photos: [JPEG, PNG], metadata: { photos: [source('a', {})] } }),
+      form({ photos: [JPEG], metadata: { photos: [source('a', {}, { capturedOn: '2023-02-29' })] } }),
+      form({ photos: [JPEG], metadata: { photos: [source('a', { place: 'yes' })] } }),
+      form({ text: 'x', metadata: { voice: source('a', {}) } }),
+      form({ text: '   ', photos: [JPEG], metadata: { text: source('a', {}) } }),
+      form({ text: 'x', metadata: { text: source('a', {}), unexpected: true } }),
+    ];
+    const repeated = form({ text: 'x', metadata: {} });
+    repeated.append('metadata', '{}');
+    const asFile = form({ text: 'x' });
+    asFile.append('metadata', new Blob(['{}']), 'metadata.json');
+    for (const body of [...cases, repeated, asFile]) {
+      const response = await post(app.base, body);
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /source details could not be read/);
+    }
+    assert.deepEqual(await stored(), before);
+  });
+
+  it('reopens a draft saved before source records as metadata unavailable', async () => {
+    const id = '11111111-2222-4333-8444-555555555555';
+    const legacy = { id, createdAt: '2026-10-01T00:00:00.000Z', text: 'Old memory', photos: [{ name: 'photo-1.jpg', type: 'image/jpeg', size: JPEG.length }], voice: null };
+    await mkdir(path.join(dataDir, 'drafts', id), { recursive: true });
+    await writeFile(path.join(dataDir, 'drafts', id, 'draft.json'), JSON.stringify(legacy));
+    await writeFile(path.join(dataDir, 'drafts', id, 'photo-1.jpg'), JPEG);
+
+    const reopened = await (await fetch(`${app.base}/api/drafts/${id}`)).json();
+    assert.deepEqual(reopened, legacy);
+    assert.equal(reopened.sources, undefined);
+    assert.equal(canUseSource(reopened, 'anything', 'place'), false);
+    assert.deepEqual(await bytes(await fetch(`${app.base}/api/drafts/${id}/assets/photo-1.jpg`)), JPEG);
+    const list = await (await fetch(`${app.base}/api/drafts`)).json();
+    assert.ok(list.some((item) => item.id === id && item.photoCount === 1));
+  });
+});
+
+describe('draft source persistence', () => {
+  it('keeps source records and original bytes together across a restart', async () => {
+    const dataDir = await tempDir();
+    const first = await start({ dataDir });
+    const metadata = { photos: [source('Mina', { place: true, share: true })], voice: source('Ara', { model: true }) };
+    const draft = await (await post(first.base, form({ text: ' Kitchen window ', photos: [JPEG], voice: WEBM, metadata }))).json();
+    await first.close();
+
+    const second = await start({ dataDir });
+    try {
+      const reopened = await (await fetch(`${second.base}/api/drafts/${draft.id}`)).json();
+      assert.deepEqual(reopened, draft);
+      assert.equal(reopened.text, ' Kitchen window ');
+      const photo = await bytes(await fetch(`${second.base}/api/drafts/${draft.id}/assets/photo-1.jpg`));
+      const voice = await bytes(await fetch(`${second.base}/api/drafts/${draft.id}/assets/voice.webm`));
+      assert.equal(sha256(photo), reopened.sources[0].sha256);
+      assert.equal(sha256(voice), reopened.voice && reopened.sources[2].sha256);
+      assert.deepEqual(reopened.sources[1].permissions, { place: false, model: false, share: false });
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('stores neither metadata nor originals when saving fails', { skip: process.getuid?.() === 0 && 'root ignores permissions' }, async () => {
+    const dataDir = await tempDir();
+    const app = await start({ dataDir });
+    const draftsDir = path.join(dataDir, 'drafts');
+    try {
+      await mkdir(draftsDir, { recursive: true });
+      await chmod(draftsDir, 0o500);
+      const failed = await post(app.base, form({ text: 'New', photos: [JPEG], metadata: { photos: [source('Mina', { place: true })] } }));
+      assert.equal(failed.status, 500);
+      assert.deepEqual(await readdir(draftsDir), []);
+      assert.deepEqual(await readdir(path.join(dataDir, 'incoming')), []);
     } finally {
       await chmod(draftsDir, 0o700);
       await app.close();

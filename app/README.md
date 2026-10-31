@@ -22,9 +22,14 @@ presses Record, and declining it never blocks saving.
 - Saved memories are listed and can be reopened to view photos, read the text
   and play the recording. Saved memories cannot be edited.
 
-Not included: transcription, provider and permission records, derived copies,
-date handling, sharing, accounts, recovery of unsaved input, and place
-generation.
+Each photo, written memory and recording has its own source details: provider
+label, origin/reference, and separate permissions for place construction,
+model processing and visitor sharing. Permissions start off. Provider labels
+are attribution, not verified identity, and selecting a permission does not
+start processing or publish anything.
+
+Not included: transcription, sharing, accounts, recovery of unsaved input,
+and place generation.
 
 ## Getting started
 
@@ -53,6 +58,51 @@ failed save leaves no partial memory and does not affect earlier ones.
 | `GET /api/drafts/<id>` | One saved memory |
 | `GET /api/drafts/<id>/assets/<name>` | A file listed in that memory; supports byte ranges |
 
+## Original sources and dates
+
+New drafts use `schemaVersion: 2` and contain a `sources` array. Each original
+gets a server-generated source ID, kind, SHA-256 checksum, byte count and its
+source details. Photo and voice entries refer to those records through
+`sourceId`; `textSourceId` identifies the written original. Meaningful written
+text is preserved as received, including whitespace, and hashed as UTF-8.
+Multipart string fields normalize line breaks to CRLF during transport; the
+checksum describes that received original. No
+derived copy replaces an original. A future derivative needs its own record
+and a reference to its original.
+
+Capture date, file creation time, file modification time and a person's
+estimated period are distinct. Unknown dates remain unknown. Browser file
+modification time is informational and never becomes a capture or creation
+date. Dates entered by a person are assertions; EXIF extraction is not
+implemented. Saved memories from before source records remain readable with
+metadata unavailable and no inferred permissions.
+
+`POST /api/drafts` also accepts one optional `metadata` JSON string with
+`photos` in multipart photo order, and `text` and `voice` entries. Absent
+materials use `null`; omitted details default to unknown and all permissions
+off. A supplied source entry has this shape:
+
+```json
+{
+  "provider": "Example contributor",
+  "origin": { "kind": "own", "reference": "" },
+  "permissions": { "place": true, "model": false, "share": false },
+  "dates": {
+    "capturedOn": null,
+    "fileCreatedAt": null,
+    "fileModifiedAt": null,
+    "estimatedPeriod": "Before the renovation"
+  }
+}
+```
+
+Origin kinds are `own`, `public`, `other` and `unknown`. Supplied objects
+require the documented fields and reject unknown fields, invalid calendar
+dates, wrong types and mismatched material counts. Metadata is stored
+atomically with the originals. `canUseSource` checks a specific source and
+purpose; absent or legacy permissions deny use. It does not implement
+authentication, visitor access control or permission changes.
+
 ## Upload limits
 
 These are transport limits for this endpoint, not the final upload-validation
@@ -64,7 +114,7 @@ to be decided against the processing pipeline.
 | Whole request | 64 MiB, counted while streaming and before multipart parsing |
 | Photos | Up to 20, 20 MiB each, JPEG or PNG by file signature; HEIC is refused |
 | Voice | One recording, 50 MiB, WebM, Ogg or MP4 container by signature |
-| Text | 10,000 characters after trimming |
+| Text | 10,000 characters before trimming; whitespace-only text is empty |
 | Empty save | Refused unless there is a photo, text or a recording |
 
 The five-minute recording length is enforced in the browser only. File content

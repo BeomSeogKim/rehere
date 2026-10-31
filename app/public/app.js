@@ -1,5 +1,13 @@
 import { latestOnly } from './latest.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
+import {
+  buildMetadata,
+  createSourceDetails,
+  createVoiceSource,
+  detailsProblem,
+  renderSavedSource,
+  renderSourceControls,
+} from './source-details.js';
 
 const MIB = 1024 * 1024;
 const PHOTO_LIMIT = 20;
@@ -20,12 +28,14 @@ const els = {
   photoInput: $('photo-input'),
   photoList: $('photo-list'),
   text: $('memory-text'),
+  textSource: $('text-source'),
   textCount: $('text-count'),
   voiceStatus: $('voice-status'),
   record: $('record'),
   stop: $('stop'),
   discard: $('discard'),
   preview: $('voice-preview'),
+  voiceSource: $('voice-source'),
   message: $('form-message'),
   save: $('save'),
   saveWithoutVoice: $('save-without-voice'),
@@ -35,12 +45,17 @@ const els = {
   viewerMessage: $('viewer-message'),
   viewerPhotos: $('viewer-photos'),
   viewerText: $('viewer-text'),
+  viewerTextSource: $('viewer-text-source'),
   viewerVoice: $('viewer-voice'),
+  viewerVoiceSource: $('viewer-voice-source'),
   savedEmpty: $('saved-empty'),
   savedList: $('saved-list'),
 };
 
+// Each photo object owns its source details, so they follow the photo when
+// others are added or removed.
 const photos = [];
+let textSource = { details: createSourceDetails(), state: {} };
 const viewRequests = latestOnly();
 let saving = false;
 let previewBlob = null;
@@ -69,6 +84,8 @@ function renderPhotos() {
   els.photoList.replaceChildren(
     ...photos.map((photo, index) => {
       const item = document.createElement('li');
+      const frame = document.createElement('div');
+      frame.className = 'photo-frame';
       const image = document.createElement('img');
       image.src = photo.url;
       image.alt = `Selected photo ${index + 1}`;
@@ -83,11 +100,22 @@ function renderPhotos() {
         renderPhotos();
         els.addPhotos.focus();
       });
-      item.append(image, remove);
+      frame.append(image, remove);
+      item.append(frame, renderSourceControls(document, { ...photo, label: `photo ${index + 1}` }));
       return item;
     }),
   );
 }
+
+function renderTextSource() {
+  els.textSource.replaceChildren(renderSourceControls(document, { ...textSource, label: 'the written memory' }));
+}
+
+function renderVoiceSource() {
+  els.voiceSource.replaceChildren(renderSourceControls(document, { ...voiceSource.current, label: 'the voice recording' }));
+}
+
+const voiceSource = createVoiceSource(recorder, renderVoiceSource);
 
 function addPhotos(files) {
   const skipped = [];
@@ -95,7 +123,7 @@ function addPhotos(files) {
     if (photos.length >= PHOTO_LIMIT) skipped.push(`${file.name} (the limit is ${PHOTO_LIMIT} photos)`);
     else if (!PHOTO_TYPES.has(file.type)) skipped.push(`${file.name} (only JPEG or PNG)`);
     else if (file.size > PHOTO_BYTES) skipped.push(`${file.name} (larger than 20 MB)`);
-    else photos.push({ file, url: URL.createObjectURL(file) });
+    else photos.push({ file, url: URL.createObjectURL(file), details: createSourceDetails(), state: {} });
   }
   renderPhotos();
   setMessage(skipped.length ? `Some photos were not added: ${skipped.join(', ')}.` : '');
@@ -130,6 +158,7 @@ function renderVoice() {
     else els.preview.removeAttribute('src');
   }
   els.preview.hidden = !recording;
+  els.voiceSource.hidden = !['recording', 'finalizing', 'recorded'].includes(state);
 
   if (state === 'recording' && !ticker) ticker = setInterval(renderVoice, 500);
   if (state !== 'recording' && ticker) {
@@ -167,7 +196,20 @@ function resetForm() {
   renderPhotos();
   els.text.value = '';
   els.textCount.textContent = '0';
+  textSource = { details: createSourceDetails(), state: {} };
+  renderTextSource();
   recorder.discard();
+}
+
+function sourceProblem(voice) {
+  const items = photos.map((photo, index) => [`photo ${index + 1}`, photo.details]);
+  if (els.text.value.trim()) items.push(['the written memory', textSource.details]);
+  if (voice) items.push(['the voice recording', voiceSource.current.details]);
+  for (const [label, details] of items) {
+    const problem = detailsProblem(details);
+    if (problem) return `Source details for ${label} ${problem}.`;
+  }
+  return null;
 }
 
 function savedNotice(id) {
@@ -200,8 +242,21 @@ async function save(includeVoice) {
       setMessage('Everything saved at once must total 64 MB or less. Remove a photo or record a shorter message.');
       return;
     }
+    const problem = sourceProblem(voice);
+    if (problem) {
+      setMessage(`${problem} ${KEPT}`);
+      return;
+    }
+    const metadata = buildMetadata({
+      photos,
+      text,
+      textDetails: textSource.details,
+      voice,
+      voiceDetails: voiceSource.current.details,
+    });
     const body = new FormData();
     body.append('text', text);
+    body.append('metadata', JSON.stringify(metadata));
     for (const photo of photos) body.append('photos', photo.file);
     if (voice) body.append('voice', voice, 'voice');
 
@@ -273,6 +328,8 @@ async function showDraft(id) {
   els.viewerMessage.textContent = '';
   els.viewerPhotos.replaceChildren();
   els.viewerText.textContent = '';
+  els.viewerTextSource.replaceChildren();
+  els.viewerVoiceSource.replaceChildren();
   els.viewerVoice.hidden = true;
   els.viewerVoice.removeAttribute('src');
   els.viewerTitle.tabIndex = -1;
@@ -293,20 +350,29 @@ async function showDraft(id) {
   }
   const asset = (name) => `/api/drafts/${draft.id}/assets/${encodeURIComponent(name)}`;
   els.viewerDate.textContent = `Saved ${formatDate(draft.createdAt)}`;
+  // Drafts saved before source details have no sources; each item then shows
+  // an unavailable state with nothing granted.
+  const sources = Array.isArray(draft.sources) ? draft.sources : [];
+  const source = (id) => sources.find((record) => record.id === id) ?? null;
   els.viewerPhotos.replaceChildren(
     ...draft.photos.map((photo, index) => {
       const item = document.createElement('li');
+      const frame = document.createElement('div');
+      frame.className = 'photo-frame';
       const image = document.createElement('img');
       image.src = asset(photo.name);
       image.alt = `Photo ${index + 1}`;
-      item.append(image);
+      frame.append(image);
+      item.append(frame, renderSavedSource(document, source(photo.sourceId)));
       return item;
     }),
   );
   els.viewerText.textContent = draft.text;
+  if (draft.text.trim()) els.viewerTextSource.append(renderSavedSource(document, source(draft.textSourceId)));
   if (draft.voice) {
     els.viewerVoice.src = asset(draft.voice.name);
     els.viewerVoice.hidden = false;
+    els.viewerVoiceSource.append(renderSavedSource(document, source(draft.voice.sourceId)));
   }
 }
 
@@ -342,6 +408,8 @@ els.form.addEventListener('submit', (event) => {
 els.saveWithoutVoice.addEventListener('click', () => save(false));
 window.addEventListener('hashchange', route);
 
+renderTextSource();
+renderVoiceSource();
 recorder.subscribe(renderVoice);
 renderVoice();
 route();

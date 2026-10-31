@@ -16,6 +16,7 @@ const STATIC_FILES = new Map([
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/recorder.js', ['recorder.js', 'text/javascript; charset=utf-8']],
   ['/latest.js', ['latest.js', 'text/javascript; charset=utf-8']],
+  ['/source-details.js', ['source-details.js', 'text/javascript; charset=utf-8']],
 ]);
 
 const SECURITY_HEADERS = {
