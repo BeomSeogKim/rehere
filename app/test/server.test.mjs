@@ -93,6 +93,28 @@ describe('draft server', () => {
     }
   });
 
+  it('serves every module the entry page imports, directly or through other modules', async () => {
+    const html = await (await fetch(`${app.base}/`)).text();
+    const pending = [...html.matchAll(/<script[^>]*src="([^"]+)"/g)].map((match) => match[1]);
+    const seen = new Set();
+    while (pending.length > 0) {
+      const route = pending.pop();
+      if (seen.has(route)) continue;
+      seen.add(route);
+      const response = await fetch(`${app.base}${route}`);
+      assert.equal(response.status, 200, route);
+      assert.match(response.headers.get('content-type'), /text\/javascript/, route);
+      // Pinned vendor files are checked as served, not parsed: their source holds example specifiers.
+      if (route.startsWith('/vendor/')) continue;
+      const source = await response.text();
+      for (const [, specifier] of source.matchAll(/(?:\bfrom|\bimport\()\s*['"]([^'"]+)['"]/g)) {
+        if (/^(?:\.{1,2})?\//.test(specifier)) pending.push(new URL(specifier, `http://local${route}`).pathname);
+      }
+    }
+    assert.ok(seen.has('/source-controls.js'));
+    assert.ok(seen.has('/vendor/three.module.js'));
+  });
+
   it('saves photos and text without any voice and reopens them', async () => {
     const response = await post(app.base, form({ text: '  The blue gate by the bakery.  ', photos: [JPEG, PNG] }));
     assert.equal(response.status, 201);

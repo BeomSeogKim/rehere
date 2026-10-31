@@ -1,5 +1,6 @@
 import { mountAccess } from './access-ui.js';
 import { mountContributor } from './collaboration.js';
+import { isStopped, mountSourceControls, renderStoppedMarker } from './source-controls.js';
 import { latestOnly } from './latest.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import {
@@ -344,15 +345,34 @@ async function loadSaved() {
   );
 }
 
-async function showDraft(id) {
+// Stops a playing recording and drops its address, so stopped or closed
+// material is not heard after it leaves the screen.
+function stopViewerVoice() {
+  els.viewerVoice.pause?.();
+  els.viewerVoice.removeAttribute('src');
+  els.viewerVoice.load?.();
+  els.viewerVoice.hidden = true;
+}
+
+// Owner controls for each source in the open memory; disposed whenever the
+// memory is closed or re-read.
+let sourceViews = [];
+function disposeSourceViews() {
+  for (const view of sourceViews) view.dispose();
+  sourceViews = [];
+}
+
+// notice: a message to keep showing after the memory is re-read, such as a
+// saved restriction and whether work in progress stopped.
+async function showDraft(id, notice = '') {
+  disposeSourceViews();
   els.viewerDate.textContent = '';
   els.viewerMessage.textContent = '';
   els.viewerPhotos.replaceChildren();
   els.viewerText.textContent = '';
   els.viewerTextSource.replaceChildren();
   els.viewerVoiceSource.replaceChildren();
-  els.viewerVoice.hidden = true;
-  els.viewerVoice.removeAttribute('src');
+  stopViewerVoice();
   els.viewerTitle.tabIndex = -1;
   els.viewerTitle.focus();
 
@@ -371,10 +391,33 @@ async function showDraft(id) {
   }
   const asset = (name) => `/api/drafts/${draft.id}/assets/${encodeURIComponent(name)}`;
   els.viewerDate.textContent = `Saved ${formatDate(draft.createdAt)}`;
+  els.viewerMessage.textContent = notice;
   // Drafts saved before source details have no sources; each item then shows
   // an unavailable state with nothing granted.
   const sources = Array.isArray(draft.sources) ? draft.sources : [];
   const source = (id) => sources.find((record) => record.id === id) ?? null;
+  // A saved change re-reads the memory, so stopped material disappears and the
+  // scene is reopened under the current policy.
+  const refresh = (notice) => {
+    closeSpace();
+    showDraft(draft.id, notice);
+  };
+  const controls = (record, label) => {
+    const holder = document.createElement('div');
+    if (record && !isStopped(record)) {
+      sourceViews.push(
+        mountSourceControls(holder, {
+          draftId: draft.id,
+          sourceId: record.id,
+          label,
+          knownRevision: record.policy?.revision ?? null,
+          onChanged: (policy, message) => refresh(message ? `${label[0].toUpperCase()}${label.slice(1)}: ${message}` : ''),
+        }),
+      );
+    }
+    return holder;
+  };
+  const stoppedPhotos = sources.filter((record) => record.kind === 'photo' && isStopped(record));
   els.viewerPhotos.replaceChildren(
     ...draft.photos.map((photo, index) => {
       const item = document.createElement('li');
@@ -384,16 +427,27 @@ async function showDraft(id) {
       image.src = asset(photo.name);
       image.alt = `Photo ${index + 1}`;
       frame.append(image);
-      item.append(frame, renderSavedSource(document, source(photo.sourceId)));
+      item.append(frame, renderSavedSource(document, source(photo.sourceId)), controls(source(photo.sourceId), `photo ${index + 1}`));
+      return item;
+    }),
+    ...stoppedPhotos.map((record) => {
+      const item = document.createElement('li');
+      item.className = 'source-stopped-item';
+      item.append(renderStoppedMarker(record));
       return item;
     }),
   );
   els.viewerText.textContent = draft.text;
-  if (draft.text.trim()) els.viewerTextSource.append(renderSavedSource(document, source(draft.textSourceId)));
-  if (draft.voice) {
+  const textRecord = source(draft.textSourceId);
+  if (isStopped(textRecord)) els.viewerTextSource.append(renderStoppedMarker(textRecord));
+  else if (draft.text.trim()) els.viewerTextSource.append(renderSavedSource(document, textRecord), controls(textRecord, 'the written memory'));
+  const voiceRecord = draft.voice ? source(draft.voice.sourceId) : sources.find((record) => record.kind === 'voice' && isStopped(record));
+  if (draft.voice && !isStopped(voiceRecord)) {
     els.viewerVoice.src = asset(draft.voice.name);
     els.viewerVoice.hidden = false;
-    els.viewerVoiceSource.append(renderSavedSource(document, source(draft.voice.sourceId)));
+    els.viewerVoiceSource.append(renderSavedSource(document, voiceRecord), controls(voiceRecord, 'the voice recording'));
+  } else if (isStopped(voiceRecord)) {
+    els.viewerVoiceSource.append(renderStoppedMarker(voiceRecord));
   }
   if (draft.photos.length) openSpace(draft, source);
 }
@@ -429,6 +483,10 @@ function route() {
   const match = /^#\/memories\/([0-9a-f-]{36})$/.exec(location.hash);
   viewRequests.invalidate();
   closeSpace();
+  if (!match) {
+    stopViewerVoice();
+    disposeSourceViews();
+  }
   els.compose.hidden = Boolean(match);
   els.viewer.hidden = !match;
   if (match) {
@@ -459,14 +517,14 @@ els.saveWithoutVoice.addEventListener('click', () => save(false));
 window.addEventListener('hashchange', route);
 
 function clearViewer() {
+  disposeSourceViews();
   els.viewerDate.textContent = '';
   els.viewerMessage.textContent = '';
   els.viewerPhotos.replaceChildren();
   els.viewerText.textContent = '';
   els.viewerTextSource.replaceChildren();
   els.viewerVoiceSource.replaceChildren();
-  els.viewerVoice.hidden = true;
-  els.viewerVoice.removeAttribute('src');
+  stopViewerVoice();
 }
 
 function startOwner() {

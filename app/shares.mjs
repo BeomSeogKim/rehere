@@ -3,7 +3,6 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { versionDependencies } from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
-import { canUseSource } from './sources.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -148,13 +147,14 @@ export class ShareStore {
     return manifest;
   }
 
-  // Source grants are read from the draft every time; no copy is trusted.
+  // Source grants and restrictions are read every time; no copy is trusted.
   async #sourceIssue(manifest) {
     if (manifest.status !== 'ready') return 'changed';
     const draft = await this.reconstructions.drafts.get(manifest.draftId);
     const source = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === manifest.sourceId) : null;
     if (!source || source.sha256 !== manifest.sourceSha256 || source.origin?.kind !== 'public') return 'source';
-    if (!canUseSource(draft, manifest.sourceId, 'place') || !canUseSource(draft, manifest.sourceId, 'share')) return 'source';
+    // Current owner restrictions: sharing needs place and share uses, not stopped.
+    if (!(await this.reconstructions.sourcePolicies.canUse(draft, manifest.sourceId, 'share'))) return 'source';
     return null;
   }
 

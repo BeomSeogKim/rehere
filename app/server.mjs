@@ -36,6 +36,7 @@ const STATIC_FILES = new Map([
   ['/visits.js', ['visits.js', 'text/javascript; charset=utf-8']],
   ['/scene-viewer.js', ['scene-viewer.js', 'text/javascript; charset=utf-8']],
   ['/shares.js', ['shares.js', 'text/javascript; charset=utf-8']],
+  ['/source-controls.js', ['source-controls.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // Pinned local Three.js files. OrbitControls imports the bare specifier
@@ -58,6 +59,7 @@ const SECURITY_HEADERS = {
 const ASSET_PATH = /^\/api\/drafts\/([^/]+)\/assets\/([^/]+)$/;
 const DRAFT_PATH = /^\/api\/drafts\/([^/]+)$/;
 const SOURCE_SIZE_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/image-size$/;
+const SOURCE_POLICY_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/policy$/;
 const JOBS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions$/;
 const JOB_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)$/;
 const JOB_EDIT_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/edit$/;
@@ -508,7 +510,21 @@ export function createAppServer({
     }
     // Every other API route serves private content: the owner session is
     // checked before any path, ID, range or body is examined.
-    if (pathname.startsWith('/api/')) await requireOwner();
+    const owner = pathname.startsWith('/api/') ? await requireOwner() : null;
+
+    const policyMatch = SOURCE_POLICY_PATH.exec(pathname);
+    if (policyMatch) {
+      const [, draftId, sourceId] = policyMatch;
+      if (!UUID.test(draftId) || !UUID.test(sourceId)) throw new RequestError(404, 'This material could not be found.');
+      if (reading) {
+        sendJson(res, 200, await reconstructions.sourcePolicy(draftId, sourceId, owner));
+        return;
+      }
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      const body = strictBody(await readJsonBody(req), ['requestId', 'baseRevision', 'permissions', 'stopUse']);
+      sendJson(res, 200, await reconstructions.restrictSource(draftId, sourceId, owner, body));
+      return;
+    }
 
     const previewsMatch = PREVIEWS_PATH.exec(pathname);
     const previewMatch = PREVIEW_PATH.exec(pathname);
@@ -630,17 +646,25 @@ export function createAppServer({
       return;
     }
 
+    // Draft reads always go through the current source-use projection, so
+    // stopped material never appears in a draft, its summary or a preview.
+    const policies = reconstructions.sourcePolicies;
     if (pathname === '/api/drafts' && req.method === 'POST') {
       const draft = await store.create(await parseDraft(await readForm(req, limits.requestBytes), limits));
-      sendJson(res, 201, draft);
+      sendJson(res, 201, await policies.projectDraft(draft));
       return;
     }
     if (pathname === '/api/drafts' && reading) {
-      sendJson(res, 200, (await store.list()).map(summary));
+      const drafts = await store.list();
+      sendJson(res, 200, (await Promise.all(drafts.map((draft) => policies.projectDraft(draft)))).map(summary));
       return;
     }
     const assetMatch = ASSET_PATH.exec(pathname);
     if (assetMatch && reading) {
+      const draft = await store.get(assetMatch[1]);
+      if (!draft) throw new RequestError(404, 'Not found.');
+      // Checked before any file lookup, range or HEAD handling.
+      await policies.assertArchiveAsset(draft, assetMatch[2]);
       const asset = await store.asset(assetMatch[1], assetMatch[2]);
       if (!asset) sendJson(res, 404, { error: 'Not found.' });
       else sendAsset(req, res, asset);
@@ -649,7 +673,7 @@ export function createAppServer({
     const draftMatch = DRAFT_PATH.exec(pathname);
     if (draftMatch && reading) {
       const draft = await store.get(draftMatch[1]);
-      if (draft) sendJson(res, 200, draft);
+      if (draft) sendJson(res, 200, await policies.projectDraft(draft));
       else sendJson(res, 404, { error: 'This memory could not be found.' });
       return;
     }

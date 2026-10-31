@@ -33,6 +33,7 @@ export const PROPOSAL_MESSAGES = {
   timeout: 'The model took too long and the request was stopped.',
   provider: 'The model service could not complete the request.',
   unknown: 'The proposal could not be prepared. Please try again.',
+  restricted: 'The owner turned off model processing or stopped using this photo, so no proposal is offered. A model request that was already sent may still count toward usage.',
 };
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);

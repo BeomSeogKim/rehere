@@ -72,6 +72,8 @@ export const dependenciesBlocked = (manifest, ids) => dependencyIssue(manifest, 
 export const usageBlocked = (manifest) => manifest.status === 'ready' && dependenciesBlocked(manifest, currentDependencies(manifest));
 export const modelBlocked = (manifest) => manifest.status === 'ready' && dependencyIssue(manifest, currentDependencies(manifest), 'model') !== null;
 
+const SOURCE_STOPPED_MESSAGE = 'The owner stopped using this photo or turned off its place use, so no version of this scene can be changed.';
+
 export const REDACTED_PROPOSAL_MESSAGE = 'This proposal was made from a saved version that depends on a withdrawn contribution, so its content is no longer shown.';
 
 // Every proposal leaving the server goes through this projection. A proposal
@@ -205,8 +207,10 @@ function projectEra(variant, blocked) {
   return blocked ? { ...era, label: null, start: null, end: null, statement: null } : era;
 }
 
-function projectVariant(manifest, variant) {
-  const blocked = dependenciesBlocked(manifest, variant.contributionIds);
+// `sourceBlocked` is true when the scene's photo has no current place use;
+// every variant then counts as blocked.
+function projectVariant(manifest, variant, sourceBlocked) {
+  const blocked = sourceBlocked || dependenciesBlocked(manifest, variant.contributionIds);
   return {
     id: variant.id,
     // The label names the provider; a blocked variant shows a fixed label instead.
@@ -294,12 +298,17 @@ export class CollaborationStore {
     this.#ready(manifest);
     const collaboration = collaborationOf(manifest);
     const owner = principal.role === 'owner';
+    const uses = await this.reconstructions.sourceUses(draftId, manifest.sourceId);
+    const contributionBlocked = usageBlocked(manifest);
+    // Contributors' own testimony stays theirs and is projected as before;
+    // only spatial use follows the photo's current restrictions.
     return {
       revision: collaboration.revision,
       contributions: collaboration.contributions.filter((item) => owner || item.principalId === principal.id).map((item) => projectContribution(item, owner)),
-      variants: owner ? collaboration.variants.map((item) => projectVariant(manifest, item)) : [],
-      blocked: usageBlocked(manifest),
-      modelBlocked: modelBlocked(manifest),
+      variants: owner ? collaboration.variants.map((item) => projectVariant(manifest, item, !uses.place)) : [],
+      blocked: !uses.place || contributionBlocked,
+      modelBlocked: !uses.model || modelBlocked(manifest),
+      blockedReason: !uses.place ? 'source' : contributionBlocked ? 'contribution' : null,
       currentVersion: manifest.edit.version,
     };
   }
@@ -365,7 +374,7 @@ export class CollaborationStore {
       const contribution = collaboration.contributions.find((item) => item.id === contributionId);
       if (!contribution) throw fail(404, CONTRIBUTION_NOT_FOUND);
       const replay = this.#receipt(collaboration, request, 'review', principal.id, contributionId);
-      if (replay) return this.#reviewResult(manifest, collaboration, contributionId, replay);
+      if (replay) return this.#reviewResult(manifest, collaboration, contributionId, replay, await this.#sourceBlocked(manifest));
       if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was withdrawn by the person who provided it.');
       if (!REVIEWABLE.has(contribution.status)) throw fail(409, 'This contribution already has a final decision.');
       if (request.baseRevision !== contribution.revision) throw fail(409, 'This contribution changed. Reload it before deciding.');
@@ -419,17 +428,21 @@ export class CollaborationStore {
       const stored = edit
         ? await this.reconstructions.saveVersion(manifest, edit, editReceipt, manifest.proposals ?? [], { collaboration: next })
         : await this.reconstructions.update(manifest, { collaboration: next });
-      return this.#reviewResult(stored, next, contributionId, next.receipts.at(-1));
+      return this.#reviewResult(stored, next, contributionId, next.receipts.at(-1), false);
     });
   }
 
-  #reviewResult(manifest, collaboration, contributionId, receipt) {
+  async #sourceBlocked(manifest) {
+    return !(await this.reconstructions.sourceUses(manifest.draftId, manifest.sourceId)).place;
+  }
+
+  #reviewResult(manifest, collaboration, contributionId, receipt, sourceBlocked) {
     const contribution = collaboration.contributions.find((item) => item.id === contributionId);
     const variant = receipt.variantId && collaboration.variants.find((item) => item.id === receipt.variantId);
     const edit = manifest.edits.find((item) => item.requestId === receipt.requestId && item.kind === 'contribution');
     return {
       contribution: projectContribution(contribution, true),
-      variant: variant ? projectVariant(manifest, variant) : null,
+      variant: variant ? projectVariant(manifest, variant, sourceBlocked) : null,
       edit: edit ? { version: edit.version, offset: edit.offset, yaw: edit.yaw } : null,
     };
   }
@@ -483,8 +496,10 @@ export class CollaborationStore {
       const collaboration = collaborationOf(manifest);
       const variant = collaboration.variants.find((item) => item.id === variantId);
       if (!variant) throw fail(404, 'This version of the scene could not be found.');
-      if (this.#receipt(collaboration, request, 'era', principal.id, variantId)) return projectVariant(manifest, variant);
+      const sourceBlocked = await this.#sourceBlocked(manifest);
+      if (this.#receipt(collaboration, request, 'era', principal.id, variantId)) return projectVariant(manifest, variant, sourceBlocked);
       if (request.baseRevision !== variant.eraRevision) throw fail(409, 'The time for this version changed. Reload it before saving.');
+      if (sourceBlocked) throw fail(409, SOURCE_STOPPED_MESSAGE);
       // A time label never makes a withdrawn dependency usable again.
       if (dependenciesBlocked(manifest, variant.contributionIds)) throw fail(409, BLOCKED_MESSAGE);
       if (request.relativeToVariantId !== null) {
@@ -499,7 +514,7 @@ export class CollaborationStore {
         ...collaboration, variants: collaboration.variants.map((item) => (item.id === variantId ? updated : item)),
       }, { requestId, action: 'era', principalId: principal.id, target: variantId, digest: digest(request) });
       const stored = await write();
-      return projectVariant(stored, next.variants.find((item) => item.id === variantId));
+      return projectVariant(stored, next.variants.find((item) => item.id === variantId), false);
     });
   }
 }

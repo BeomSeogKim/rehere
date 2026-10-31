@@ -77,7 +77,7 @@ requires fresh authorization. Late requests cannot reopen a stopped view.
 Already delivered bytes or recordings made outside the app cannot be recalled.
 
 This unit supports spatial views and permitted written recollections. Recorded
-stories, captions, original-source withdrawal controls and hosted operation are
-not yet connected. Original photo grants are re-read on access, but the app does
-not yet offer an interface to reduce those grants. One server process owns the
-data directory; no multi-server or power-loss guarantee is claimed.
+stories, captions and hosted operation are not yet connected. Owners can narrow
+original-source grants or stop their use through [source controls](SOURCE-USES.md);
+current restrictions override every affected frozen snapshot. One server process
+owns the data directory; no multi-server or power-loss guarantee is claimed.

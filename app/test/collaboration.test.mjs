@@ -216,7 +216,8 @@ describe('contributions', () => {
     const reviewed = await ctx.review(own, { decision: 'hold', transform: null, reason: 'Blair disagrees; check with Blair.', conflict: 'memory' });
     assert.equal(reviewed.contribution.review.reason, 'Blair disagrees; check with Blair.');
     const view = await ctx.collaboration.get(ctx.draftId, ctx.jobId, ctx.alex);
-    assert.deepEqual(Object.keys(view).sort(), ['blocked', 'contributions', 'currentVersion', 'modelBlocked', 'revision', 'variants']);
+    assert.deepEqual(Object.keys(view).sort(), ['blocked', 'blockedReason', 'contributions', 'currentVersion', 'modelBlocked', 'revision', 'variants']);
+    assert.equal(view.blockedReason, null);
     assert.deepEqual(view.variants, []);
     assert.deepEqual(view.contributions.map((item) => item.id), [own.id]);
     assert.deepEqual(Object.keys(view.contributions[0].review).sort(), ['decision', 'reviewedAt', 'variantId', 'version']);
@@ -559,6 +560,50 @@ describe('owner time assertions', () => {
     for (const change of invalid) await assert.rejects(ctx.era(baseline, change), status(400), JSON.stringify(change));
     await assert.rejects(ctx.era(baseline, { kind: 'relative', label: 'same day', relation: 'same-time', relativeToVariantId: baseline.id, ...confirmed }), status(400));
     await assert.rejects(ctx.era(baseline, { kind: 'relative', label: 'same day', relation: 'same-time', relativeToVariantId: randomUUID(), ...confirmed }), status(400));
+  });
+});
+
+describe('photo use restrictions', () => {
+  const restrict = async (ctx, change) => {
+    const current = await ctx.reconstructions.sourcePolicy(ctx.draftId, ctx.sourceId, ctx.owner);
+    return ctx.reconstructions.restrictSource(ctx.draftId, ctx.sourceId, ctx.owner, {
+      requestId: randomUUID(), baseRevision: current.revision, permissions: current.permissions, stopUse: false, ...change,
+    });
+  };
+
+  it('keeps manual adoption and alternatives after a model-only reduction', async () => {
+    const ctx = await setup();
+    const first = await ctx.submit(ctx.alex);
+    const second = await ctx.submit(ctx.blair);
+    await restrict(ctx, { permissions: { place: true, model: false, share: false } });
+    assert.equal((await ctx.review(first, { decision: 'alternative' })).variant.blocked, false);
+    assert.equal((await ctx.review(second)).edit.version, 2);
+    const owned = await ctx.owned();
+    assert.deepEqual([owned.blocked, owned.modelBlocked, owned.blockedReason], [false, true, null]);
+    assert.ok(owned.variants.every((item) => !item.blocked));
+  });
+
+  it('blocks every variant use and hides era text when the photo is stopped, keeping testimony', async () => {
+    const ctx = await setup();
+    const contribution = await ctx.submit(ctx.alex);
+    const { variant } = await ctx.review(contribution, { decision: 'alternative' });
+    await ctx.era(variant, { kind: 'relative', label: 'Seen from the doorway', statement: 'The owner recalls this.', confirmed: true });
+    const other = await ctx.submit(ctx.blair);
+    await restrict(ctx, { stopUse: true });
+
+    const owned = await ctx.owned();
+    assert.deepEqual([owned.blocked, owned.modelBlocked, owned.blockedReason], [true, true, 'source']);
+    assert.ok(owned.variants.every((item) => item.blocked && item.label === 'Blocked reconstruction'));
+    const blockedEra = owned.variants.find((item) => item.id === variant.id).era;
+    assert.deepEqual([blockedEra.kind, blockedEra.label, blockedEra.statement], ['relative', null, null]);
+    assert.doesNotMatch(JSON.stringify(owned.variants), /doorway|recalls|Alex/);
+    assert.equal(owned.contributions.find((item) => item.id === other.id).text, other.text);
+    const [baseline] = owned.variants;
+    await assert.rejects(ctx.era(baseline), status(409));
+    await assert.rejects(ctx.review(other, { decision: 'alternative' }), status(403));
+    await assert.rejects(ctx.review(other), status(403));
+    const own = await ctx.collaboration.get(ctx.draftId, ctx.jobId, ctx.blair);
+    assert.equal(own.contributions[0].text, other.text);
   });
 });
 

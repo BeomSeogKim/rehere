@@ -585,3 +585,57 @@ describe('sharing from a ready scene', () => {
     view.space.dispose();
   });
 });
+
+describe('scenes whose photo can no longer be used', () => {
+  it('shows a fixed explanation with no viewer and nothing to restore', async () => {
+    job.usageBlocked = true;
+    job.blockedReason = 'source';
+    // Even a version the history marks unaffected cannot be restored: every
+    // version depends on the photo.
+    history = [
+      { version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial', blocked: false },
+      { version: 2, offset: [1, 0, 0], yaw: 0, kind: 'manual', blocked: true },
+    ];
+    const view = await openScene();
+    assert.equal(count('renderer'), 0);
+    assert.equal(view.canvases().length, 0);
+    assert.match(view.find((node) => node.tag === 'h3')[0].textContent, /no longer shown/);
+    assert.ok(view.find((node) => node.tag === 'p' && /Every saved version depends on that photo, so none can be restored\. The original photo is kept, not deleted\./.test(node.textContent))[0]);
+    assert.equal(view.find((node) => node.tag === 'button' && /^Restore version/.test(node.textContent)).length, 0);
+    view.space.dispose();
+  });
+
+  it('disposes the live viewer when a reload finds the scene blocked by its photo', async () => {
+    const view = await openScene();
+    assert.equal(view.canvases().length, 1);
+    const x = view.axis('Left / right');
+    x.value = '1';
+    x.dispatch('input');
+    view.button('Apply and save').dispatch('click');
+    posts[0].respond({ status: 0, ok: false, json: async () => null });
+    await settle();
+    job.usageBlocked = true;
+    job.blockedReason = 'source';
+    view.button('Load saved version').dispatch('click');
+    await settle();
+    assert.equal(count('renderer.dispose'), 1);
+    assert.equal(view.canvases().length, 0);
+    assert.match(view.find((node) => node.tag === 'h3')[0].textContent, /no longer shown/);
+    view.space.dispose();
+  });
+
+  it('keeps the restore panel for a scene blocked only by a withdrawn recollection', async () => {
+    job.usageBlocked = true;
+    job.blockedReason = 'contribution';
+    job.edit = { version: 2, offset: [1, 0, 0], yaw: 0 };
+    history = [
+      { version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial', blocked: false },
+      { version: 2, offset: [1, 0, 0], yaw: 0, kind: 'contribution', blocked: true },
+    ];
+    const view = await openScene();
+    assert.equal(count('renderer'), 0);
+    assert.ok(view.button('Restore version 1'));
+    assert.doesNotMatch(view.find((node) => node.tag === 'h3')[0].textContent, /no longer shown/);
+    view.space.dispose();
+  });
+});

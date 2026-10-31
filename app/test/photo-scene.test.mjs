@@ -53,6 +53,7 @@ describe('build permission', () => {
     assert.match(buildBlockedReason(record({ place: true, model: false, share: true })), /model processing/);
     assert.doesNotMatch(buildBlockedReason(record({ place: true, model: false, share: true })), /reconstruct this place/);
     assert.match(buildBlockedReason(record({ place: false, model: true, share: true })), /reconstruct this place/);
+    assert.doesNotMatch(buildBlockedReason(record({ place: false, model: true, share: true })), /when this memory was saved/, 'a later narrowing is not described as the original choice');
   });
 
   it('explains legacy photos without granting anything', () => {

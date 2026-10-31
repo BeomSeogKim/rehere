@@ -15,7 +15,7 @@ export function buildBlockedReason(record) {
   if (record.permissions?.place !== true) missing.push('“Use to reconstruct this place”');
   if (record.permissions?.model !== true) missing.push('“Use for model processing”');
   if (missing.length === 0) return null;
-  return `Building a scene needs ${missing.join(' and ')}, which ${missing.length === 1 ? 'was' : 'were'} not allowed when this memory was saved.`;
+  return `Building a scene needs ${missing.join(' and ')}, which ${missing.length === 1 ? 'is' : 'are'} not allowed for this photo.`;
 }
 
 // Turns two corner points in image pixels into an ordered whole-pixel box

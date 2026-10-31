@@ -26,7 +26,8 @@ Each photo, written memory and recording has its own source details: provider
 label, origin/reference, and separate permissions for place construction,
 model processing and visitor sharing. Permissions start off. Provider labels
 are attribution, not verified identity, and selecting a permission does not
-start processing or publish anything.
+start processing or publish anything. Current grants can be narrowed or stopped
+through [source use controls](SOURCE-USES.md), without rewriting the originals.
 
 Saved photographs with both place-construction and model-processing permission
 can be used to build a partial scene. Select a foreground box, review the

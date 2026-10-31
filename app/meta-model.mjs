@@ -186,7 +186,10 @@ function finalText(result, messages) {
 const failure = (reason, extra = {}) => ({ ok: false, reason, model: null, responseId: null, usage: null, ...extra });
 
 // The production proposal model. Count, reserve, then generate once; there are
-// no automatic retries. The key is sent only in the Authorization header and
+// no automatic retries. Each outbound request starts only through `admit`,
+// which the caller runs under its policy mutex: `admit(start)` resolves to
+// { value: start() } when the step is still allowed, or null. Without an
+// admission callback nothing is sent. The key is sent only in the Authorization header and
 // never logged; browser messages are chosen from `reason` by the caller.
 export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS }) {
   if (!apiKey) throw new Error('A model API key is required.');
@@ -207,7 +210,8 @@ export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, time
     return { ok: response.ok, status: response.status, json };
   };
 
-  return async function proposalModel({ text, image, selection, sourceId, baseVersion, saved, signal }) {
+  return async function proposalModel({ text, image, selection, sourceId, baseVersion, saved, signal, admit }) {
+    if (typeof admit !== 'function') return failure('restricted');
     if (busy) return failure('busy');
     busy = true;
     const timeout = AbortSignal.timeout(timeoutMs);
@@ -217,7 +221,9 @@ export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, time
       const body = requestBody({ text, image, selection, sourceId, baseVersion, saved });
       let counted;
       try {
-        counted = await post('responses/input_tokens', Object.fromEntries(COUNT_KEYS.map((key) => [key, body[key]])), combined);
+        const counting = await admit(() => post('responses/input_tokens', Object.fromEntries(COUNT_KEYS.map((key) => [key, body[key]])), combined));
+        if (!counting) return combined.aborted ? stopped() : failure('restricted');
+        counted = await counting.value;
       } catch {
         return combined.aborted ? stopped() : failure('provider');
       }
@@ -232,8 +238,19 @@ export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, time
       if (!reservation) return failure('budget');
 
       let generated;
+      let sending = null;
       try {
-        generated = await post('responses', { ...body, store: false, reasoning: { effort: 'low' }, max_output_tokens: MAX_OUTPUT_TOKENS }, combined);
+        sending = await admit(() => post('responses', { ...body, store: false, reasoning: { effort: 'low' }, max_output_tokens: MAX_OUTPUT_TOKENS }, combined));
+      } catch {
+        sending = null;
+      }
+      if (!sending) {
+        // The request was never started, so nothing can be charged for it.
+        await ledger.settle(reservation, 0);
+        return combined.aborted ? stopped() : failure('restricted');
+      }
+      try {
+        generated = await sending.value;
       } catch {
         return combined.aborted ? stopped() : failure('provider');
       }

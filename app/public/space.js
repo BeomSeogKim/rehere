@@ -14,6 +14,8 @@ import { createViewer } from './scene-viewer.js';
 import { mountShares } from './shares.js';
 
 const POLL_MS = 2000;
+const SOURCE_BLOCKED_TEXT = 'Its photo is no longer allowed to be used for reconstructing this place, or its use was stopped. Every saved version depends on that photo, so none can be restored. The original photo is kept, not deleted.';
+const sourceBlocked = (job) => job.blockedReason === 'source';
 const UNCONFIRMED_BUILD = 'Rehere could not confirm whether the build was accepted. Pressing Build again safely repeats the same request.';
 const SCENE_NOTE = 'Drag to look around; scroll or pinch to zoom; arrow keys move the view when the scene has focus. Only surfaces visible in the photo exist: dark gaps, hidden areas and the backs of objects are unknown and left empty. Depth is a relative model estimate, not a measurement.';
 
@@ -121,7 +123,7 @@ export function mountSpace(container, { draft, sourceFor }) {
         const number = photoNumber(job.sourceId);
         const when = new Date(job.createdAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
         const item = el('li', {}, [
-          el('span', { className: 'space-choice-label', textContent: `Photo ${number || '?'} · ${when}` }),
+          el('span', { className: 'space-choice-label', textContent: `${number ? `Photo ${number}` : 'A photo no longer shown'} · ${when}` }),
           el('span', { className: 'hint', textContent: jobStatusText(job) }),
         ]);
         if (job.status === 'ready' && job.usageBlocked) {
@@ -335,6 +337,13 @@ export function mountSpace(container, { draft, sourceFor }) {
     const number = photoNumber(job.sourceId);
     // A scene whose current version depends on a withdrawn recollection is not
     // loaded at all; only restoring an unaffected saved version is offered.
+    // Every version depends on the photo, so a stopped or no-longer-allowed photo
+    // leaves nothing to restore.
+    if (job.usageBlocked && sourceBlocked(job)) {
+      heading.textContent = 'This scene is no longer shown';
+      panel.append(el('p', { textContent: SOURCE_BLOCKED_TEXT }));
+      return;
+    }
     if (job.usageBlocked) {
       heading.textContent = `Partial scene from photo ${number} is blocked`;
       const holder = el('div');
@@ -468,6 +477,12 @@ export function mountSpace(container, { draft, sourceFor }) {
       if (!latest.ok || !latest.body?.edit) {
         editMessage.textContent = 'The saved version could not be loaded. Try again.';
         showEdit();
+        return;
+      }
+      // The scene became blocked meanwhile: reopening disposes this viewer and
+      // shows the blocked state instead of the old scene.
+      if (latest.body.usageBlocked) {
+        openScene(jobId);
         return;
       }
       session.replaceSaved(latest.body.edit);

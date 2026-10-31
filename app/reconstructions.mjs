@@ -10,7 +10,8 @@ import { RequestError } from './drafts.mjs';
 import {
   ACTIVE_PROPOSAL, PROPOSAL_MESSAGES, editHistory, newProposal, pythonImagePreparer, staleProposals, validatePlan,
 } from './memory-proposals.mjs';
-import { canUseSource, sha256 } from './sources.mjs';
+import { SourcePolicies, allows } from './source-policies.mjs';
+import { sha256 } from './sources.mjs';
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const RECONSTRUCTION_TIMEOUT_MS = 180_000;
@@ -35,6 +36,7 @@ const MESSAGES = {
   rejected: 'The model could not separate a usable foreground and background from this selection. Try a different box or photo.',
   invalidOutput: 'The model output was incomplete or inconsistent, so no scene was published. Please try again.',
   interrupted: 'The app stopped before this build finished. Start a new build.',
+  restricted: 'The owner turned off model processing or stopped using this photo, so no scene was published.',
   unknown: 'The scene could not be built. Please try again.',
 };
 
@@ -144,11 +146,23 @@ function sameValues(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+export const SOURCE_BLOCKED_MESSAGE = 'The owner stopped using this photo or turned off its place use, so no version of this scene can be used.';
+const SOURCE_REDACTED_PROPOSAL = 'This proposal used a photo that is no longer available for place use, so its content is no longer shown.';
+
 // Internal request, collaboration and share records stay on disk; clients see
-// the manifest contract plus whether withdrawn or ungranted contributions block use.
-export function publicManifest(manifest) {
+// the manifest contract plus whether the photo's current uses or withdrawn or
+// ungranted contributions block use. `source` is the photo's current uses.
+export function publicManifest(manifest, source = { place: true, model: true }) {
   const { edits, proposals, collaboration, shares, ...rest } = manifest;
-  return { ...rest, usageBlocked: usageBlocked(manifest), modelBlocked: modelBlocked(manifest) };
+  const ready = manifest.status === 'ready';
+  const sourceBlocked = ready && !source.place;
+  const contributionBlocked = usageBlocked(manifest);
+  return {
+    ...rest,
+    usageBlocked: sourceBlocked || contributionBlocked,
+    modelBlocked: sourceBlocked || (ready && !source.model) || modelBlocked(manifest),
+    blockedReason: sourceBlocked ? 'source' : contributionBlocked ? 'contribution' : null,
+  };
 }
 
 async function readJson(file) {
@@ -233,6 +247,8 @@ export class ReconstructionStore {
     this.timeoutMs = timeoutMs;
     this.proposalModel = proposalModel;
     this.prepareImage = prepareImage;
+    // The one policy instance every route and the share store read through.
+    this.sourcePolicies = new SourcePolicies({ dataDir, drafts });
     this.activeProposal = null;
     this.rootDir = path.join(dataDir, 'reconstructions');
     this.stagingDir = path.join(dataDir, 'reconstruction-staging');
@@ -282,10 +298,19 @@ export class ReconstructionStore {
     return readJson(path.join(this.jobDir(draftId, jobId), 'manifest.json'));
   }
 
+  // Current uses of a scene's photo under the owner's restrictions.
+  async sourceUses(draftId, sourceId) {
+    const draft = await this.drafts.get(draftId);
+    const source = await this.sourcePolicies.effectiveSource(draft, sourceId);
+    const policy = source ? { permissions: source.permissions, stopped: source.policy.stopped } : null;
+    const use = (purpose) => Boolean(policy) && allows(policy, purpose);
+    return { place: use('place'), model: use('model'), share: use('share') };
+  }
+
   async get(draftId, jobId) {
     await this.recover();
     const manifest = await this.readManifest(draftId, jobId);
-    return manifest && publicManifest(manifest);
+    return manifest && publicManifest(manifest, await this.sourceUses(draftId, manifest.sourceId));
   }
 
   async list(draftId) {
@@ -294,7 +319,7 @@ export class ReconstructionStore {
     const manifests = [];
     for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
       const manifest = await this.readManifest(draftId, jobId).catch(() => null);
-      if (manifest) manifests.push(publicManifest(manifest));
+      if (manifest) manifests.push(publicManifest(manifest, await this.sourceUses(draftId, manifest.sourceId)));
     }
     return manifests.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
@@ -308,7 +333,7 @@ export class ReconstructionStore {
     const manifest = await this.get(draftId, jobId);
     if (manifest?.status !== 'ready' || !Object.hasOwn(OUTPUTS, name)) return null;
     // Derived pixels and surfaces reproduce the blocked transform's scene.
-    if (manifest.usageBlocked) throw new RequestError(409, BLOCKED_MESSAGE);
+    if (manifest.usageBlocked) throw new RequestError(409, manifest.blockedReason === 'source' ? SOURCE_BLOCKED_MESSAGE : BLOCKED_MESSAGE);
     const entry = manifest.derivedAssets.find((item) => item.name === name);
     return entry ? { ...entry, file: path.join(this.jobDir(draftId, jobId), 'assets', name) } : null;
   }
@@ -323,7 +348,9 @@ export class ReconstructionStore {
     return null;
   }
 
-  async permittedPhoto(draftId, sourceId) {
+  // `purpose` is 'place' for viewing and manual editing, 'model' for local or
+  // hosted model processing. Grants are the owner's current restrictions.
+  async permittedPhoto(draftId, sourceId, purpose = 'place') {
     const draft = await this.drafts.get(draftId);
     if (!draft) throw new RequestError(404, 'This memory could not be found.');
     if (!Array.isArray(draft.sources)) {
@@ -332,16 +359,18 @@ export class ReconstructionStore {
     const source = draft.sources.find((item) => item.id === sourceId);
     if (!source) throw new RequestError(404, 'This photo could not be found in the memory.');
     if (source.kind !== 'photo') throw new RequestError(400, 'Only a photo can be used to build a scene.');
-    if (!canUseSource(draft, sourceId, 'place') || !canUseSource(draft, sourceId, 'model')) {
-      throw new RequestError(403, 'This photo was not saved with permission for both place building and model processing.');
+    if (!(await this.sourcePolicies.canUse(draft, sourceId, purpose))) {
+      throw new RequestError(403, purpose === 'model'
+        ? 'This photo does not currently have permission for both place building and model processing.'
+        : 'This photo does not currently have permission for place building.');
     }
     return { draft, source };
   }
 
   // A permitted photo whose stored bytes still match the recorded checksum,
   // with its size in stored pixel order (EXIF orientation is not applied).
-  async verifiedOriginal(draftId, sourceId) {
-    const { source } = await this.permittedPhoto(draftId, sourceId);
+  async verifiedOriginal(draftId, sourceId, purpose = 'model') {
+    const { source } = await this.permittedPhoto(draftId, sourceId, purpose);
     const asset = await this.drafts.asset(draftId, source.name);
     const bytes = asset && (await readFile(asset.file));
     if (!bytes || sha256(bytes) !== source.sha256) {
@@ -396,13 +425,13 @@ export class ReconstructionStore {
       };
       await mkdir(this.jobDir(draftId, manifest.id), { recursive: true });
       await writeJsonAtomic(path.join(this.jobDir(draftId, manifest.id), 'manifest.json'), manifest);
-      this.active = { id: manifest.id, controller: new AbortController(), done: null };
+      this.active = { id: manifest.id, draftId, sourceId: request.sourceId, controller: new AbortController(), done: null };
       return { manifest, start: true, imagePath, size };
     });
     if (accepted.start) {
       this.active.done = this.run(accepted.manifest, accepted.imagePath, accepted.size);
     }
-    return publicManifest(accepted.manifest);
+    return publicManifest(accepted.manifest, await this.sourceUses(draftId, accepted.manifest.sourceId));
   }
 
   async update(manifest, changes) {
@@ -422,18 +451,44 @@ export class ReconstructionStore {
       controller.abort();
     }, this.timeoutMs);
     try {
-      manifest = await this.serialize(() => this.update(manifest, { status: 'processing' }));
+      const permitted = () => this.sourceUses(manifest.draftId, manifest.sourceId).then((uses) => uses.model);
+      // The grant is checked again when work starts and inside the publish slot.
+      const started = await this.serialize(async () => {
+        if (!(await permitted())) {
+          manifest = await this.update(manifest, { status: 'failed', error: MESSAGES.restricted });
+          return false;
+        }
+        manifest = await this.update(manifest, { status: 'processing' });
+        return true;
+      });
+      if (!started) return;
       await mkdir(staging, { recursive: true });
-      const stopped = () => {
+      const stopped = async () => {
+        if (!timedOut && !(await permitted())) return this.update(manifest, { status: 'failed', error: MESSAGES.restricted });
         const error = timedOut ? MESSAGES.timeout : MESSAGES.interrupted;
         return this.update(manifest, { status: timedOut ? 'failed' : 'interrupted', error });
       };
       // A runner that ignores the signal is not awaited; its late result is discarded.
       const aborted = new Promise((resolve) => controller.signal.addEventListener('abort', () => resolve(null), { once: true }));
-      const running = Promise.resolve()
-        .then(() => this.runner({ imagePath, outputDir, sourceId: manifest.sourceId, box: manifest.box, signal: controller.signal }))
-        .catch((error) => ({ exitCode: null, stderr: '', spawnError: error?.code }));
-      const result = controller.signal.aborted ? null : await Promise.race([running, aborted]);
+      // The worker starts inside a mutex slot right after a last grant check, so
+      // a restriction saved while staging was prepared is honoured even when
+      // its abort failed. The run itself is awaited outside the slot.
+      const launch = await this.serialize(async () => {
+        if (controller.signal.aborted) return null;
+        if (!(await permitted())) {
+          manifest = await this.update(manifest, { status: 'failed', error: MESSAGES.restricted });
+          return null;
+        }
+        let started;
+        try {
+          started = Promise.resolve(this.runner({ imagePath, outputDir, sourceId: manifest.sourceId, box: manifest.box, signal: controller.signal }));
+        } catch (error) {
+          started = Promise.reject(error);
+        }
+        return { running: started.catch((error) => ({ exitCode: null, stderr: '', spawnError: error?.code })) };
+      });
+      if (!launch && !controller.signal.aborted) return;
+      const result = controller.signal.aborted ? null : await Promise.race([launch.running, aborted]);
       if (controller.signal.aborted) {
         manifest = await this.serialize(stopped);
         return;
@@ -450,6 +505,7 @@ export class ReconstructionStore {
       }
       manifest = await this.serialize(async () => {
         if (controller.signal.aborted) return stopped();
+        if (!(await permitted())) return this.update(manifest, { status: 'failed', error: MESSAGES.restricted });
         const assetsDir = path.join(this.jobDir(manifest.draftId, manifest.id), 'assets');
         await rename(outputDir, assetsDir);
         // Commit boundary: an abort seen here unpublishes the outputs. Once the
@@ -551,7 +607,20 @@ export class ReconstructionStore {
   async proposals(draftId, jobId) {
     await this.recover();
     const manifest = await this.editableScene(draftId, jobId);
-    return [...(manifest.proposals ?? [])].reverse().map((item) => projectProposal(manifest, item));
+    return this.projectProposals(manifest, [...(manifest.proposals ?? [])].reverse());
+  }
+
+  // Every proposal leaving the server: a photo without place use hides the
+  // message and plan of every proposal of its scenes; disk records stay intact.
+  async projectProposals(manifest, proposals) {
+    const { place } = await this.sourceUses(manifest.draftId, manifest.sourceId);
+    return proposals.map((item) => (place ? projectProposal(manifest, item) : {
+      ...item, statement: { ...item.statement, text: null }, result: null, question: null, status: 'stale', error: SOURCE_REDACTED_PROPOSAL, redacted: true,
+    }));
+  }
+
+  async projectProposal(manifest, proposal) {
+    return (await this.projectProposals(manifest, [proposal]))[0];
   }
 
   async proposal(draftId, jobId, proposalId) {
@@ -564,7 +633,8 @@ export class ReconstructionStore {
     await this.recover();
     const manifest = await this.editableScene(draftId, jobId);
     // Owner-only audit: whether restoring each version is still allowed.
-    return editHistory(manifest).map((entry) => ({ ...entry, blocked: dependenciesBlocked(manifest, versionDependencies(manifest, entry.version)) }));
+    const { place } = await this.sourceUses(draftId, manifest.sourceId);
+    return editHistory(manifest).map((entry) => ({ ...entry, blocked: !place || dependenciesBlocked(manifest, versionDependencies(manifest, entry.version)) }));
   }
 
   async createProposal(draftId, jobId, request) {
@@ -577,7 +647,7 @@ export class ReconstructionStore {
         if (existing.baseVersion !== request.baseVersion || existing.statement.text !== request.text) {
           throw new RequestError(409, 'This proposal request was already used with a different message or version.');
         }
-        return { proposal: projectProposal(manifest, existing), start: false };
+        return { proposal: await this.projectProposal(manifest, existing), start: false };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
       const { source, imagePath, size } = await this.verifiedOriginal(draftId, manifest.sourceId);
@@ -600,7 +670,7 @@ export class ReconstructionStore {
         await this.update(stored, { proposals: [...proposals, interrupted] });
         return { proposal: interrupted, start: false };
       }
-      this.activeProposal = { id: proposal.id, controller: new AbortController(), done: null };
+      this.activeProposal = { id: proposal.id, draftId, jobId, sourceId: manifest.sourceId, controller: new AbortController(), done: null };
       const [x1, y1, x2, y2] = manifest.box;
       const selection = [x1 / size.width, y1 / size.height, x2 / size.width, y2 / size.height];
       return { proposal, start: true, imagePath, selection, box: manifest.box, sourceId: manifest.sourceId, saved: manifest.edit };
@@ -630,13 +700,15 @@ export class ReconstructionStore {
     const { signal } = controller;
     const finish = (changes) => this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current) => (current.status === 'processing' ? changes : null)));
     try {
+      const modelAllowed = () => this.sourceUses(draftId, sourceId).then((uses) => uses.model);
       // Grants are checked again at dispatch: a withdrawal may have arrived since creation.
-      const started = await this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
+      const started = await this.serialize(async () => { const allowed = await modelAllowed(); return this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
         if (current.status !== 'queued') return null;
+        if (!allowed) return { status: 'failed', error: PROPOSAL_MESSAGES.restricted };
         const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
         if (issue) return { status: 'failed', error: issue === 'model' ? MODEL_BLOCKED_MESSAGE : BLOCKED_MESSAGE };
         return { status: 'processing' };
-      }));
+      }); });
       if (started.status !== 'processing') return;
       const surface = JSON.parse(await readFile(path.join(this.jobDir(draftId, jobId), 'assets', 'surface.json'), 'utf8'));
       let image;
@@ -654,6 +726,10 @@ export class ReconstructionStore {
         const manifest = await this.editableScene(draftId, jobId);
         const current = (manifest.proposals ?? []).find((item) => item.id === proposal.id);
         if (current?.status !== 'processing') return null;
+        if (!(await modelAllowed())) {
+          await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: PROPOSAL_MESSAGES.restricted }));
+          return null;
+        }
         if (signal.aborted || this.closed) {
           await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted }));
           return null;
@@ -663,14 +739,25 @@ export class ReconstructionStore {
           await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: issue === 'model' ? MODEL_BLOCKED_MESSAGE : BLOCKED_MESSAGE }));
           return null;
         }
-        return { call: this.proposalModel({ text: proposal.statement.text, image, selection, sourceId, baseVersion: proposal.baseVersion, saved, signal }) };
+        // Each outbound request the model makes is admitted here, under the
+        // same mutex as restrictions, withdrawals and cancellations.
+        const admit = (start) => this.serialize(async () => {
+          if (signal.aborted || this.closed || !(await modelAllowed())) return null;
+          const scene = await this.editableScene(draftId, jobId);
+          const now = (scene.proposals ?? []).find((item) => item.id === proposal.id);
+          if (now?.status !== 'processing' || dependencyIssue(scene, currentDependencies(scene), 'model')) return null;
+          return { value: start() };
+        });
+        return { call: this.proposalModel({ text: proposal.statement.text, image, selection, sourceId, baseVersion: proposal.baseVersion, saved, signal, admit }) };
       });
       if (!dispatched) return;
       const outcome = await dispatched.call;
-      await this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
+      await this.serialize(async () => { const allowed = await modelAllowed(); return this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
         const record = { model: outcome?.model ?? null, usage: outcome?.usage ?? null, responseId: outcome?.responseId ?? null };
         // A canceled or stale proposal keeps its status; only what was spent is recorded.
         if (current.status !== 'processing') return record;
+        // A restriction saved while the call ran: usage is kept, no result is offered.
+        if (!allowed) return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.restricted };
         // Still processing after an abort means shutdown: a late success is not offered.
         if (signal.aborted || this.closed) return { ...record, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
         if (manifest.edit.version !== current.baseVersion) return { ...record, status: 'stale' };
@@ -687,7 +774,7 @@ export class ReconstructionStore {
         const { result } = checked;
         if (result.action === 'clarify') return { ...record, status: 'clarify', result, question: result.question };
         return { ...record, status: 'ready', result };
-      }));
+      }); });
     } catch (error) {
       console.error(`proposal ${proposal.id} failed: ${error?.code ?? error?.name ?? 'error'}`);
       await finish({ status: 'failed', error: PROPOSAL_MESSAGES.unknown }).catch(() => {});
@@ -707,7 +794,7 @@ export class ReconstructionStore {
         return { status: 'canceled', error: PROPOSAL_MESSAGES.canceled };
       });
       if (this.activeProposal?.id === proposalId) this.activeProposal.controller.abort();
-      return projectProposal(await this.editableScene(draftId, jobId), proposal);
+      return this.projectProposal(await this.editableScene(draftId, jobId), proposal);
     });
   }
 
@@ -723,7 +810,7 @@ export class ReconstructionStore {
         if (previous.kind !== 'proposal' || previous.proposalId !== proposalId || previous.baseVersion !== request.baseVersion || previous.frontConfirmed !== request.frontConfirmed) {
           throw new RequestError(409, 'This apply request was already used with different values.');
         }
-        return { edit: { version: previous.version, offset: previous.offset, yaw: previous.yaw }, proposal: projectProposal(manifest, proposal) };
+        return { edit: { version: previous.version, offset: previous.offset, yaw: previous.yaw }, proposal: await this.projectProposal(manifest, proposal) };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
       await this.permittedPhoto(draftId, manifest.sourceId);
@@ -775,6 +862,64 @@ export class ReconstructionStore {
       const edit = { version: manifest.edit.version + 1, offset: [...target.offset], yaw: target.yaw };
       await this.saveVersion(manifest, edit, { requestId: request.requestId, kind: 'undo', targetVersion: target.version, baseVersion: request.baseVersion, ...edit, dependencies });
       return edit;
+    });
+  }
+
+  #requireOwner(principal) {
+    if (!principal?.id) throw new RequestError(401, 'Sign in to continue.');
+    if (principal.role !== 'owner') throw new RequestError(403, 'This action is not allowed.');
+  }
+
+  // Local current uses of a source: scenes built from it, live shared
+  // snapshots of those scenes, and model work still running for them.
+  async sourceImpacts(draftId, sourceId) {
+    const impacts = { scenes: 0, snapshots: 0, processing: 0 };
+    if (!UUID_PATTERN.test(draftId)) return impacts;
+    const now = Date.now();
+    for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
+      const manifest = await this.readManifest(draftId, jobId).catch(() => null);
+      if (manifest?.sourceId !== sourceId) continue;
+      if (manifest.status === 'ready') impacts.scenes += 1;
+      if (manifest.status === 'queued' || manifest.status === 'processing') impacts.processing += 1;
+      impacts.processing += (manifest.proposals ?? []).filter((item) => ACTIVE_PROPOSAL.has(item.status)).length;
+      impacts.snapshots += (manifest.shares?.snapshots ?? []).filter((item) => !item.revokedAt && Date.parse(item.expiresAt) > now).length;
+    }
+    return impacts;
+  }
+
+  async sourcePolicy(draftId, sourceId, principal) {
+    this.#requireOwner(principal);
+    await this.recover();
+    const policy = await this.sourcePolicies.get(draftId, sourceId);
+    return { ...policy, impacts: await this.sourceImpacts(draftId, sourceId) };
+  }
+
+  // Saves the restriction under the global mutex first, then asks running
+  // model work for this photo to stop. The saved restriction never depends on
+  // that abort succeeding; data already sent cannot be recalled.
+  async restrictSource(draftId, sourceId, principal, body) {
+    this.#requireOwner(principal);
+    await this.recover();
+    return this.serialize(async () => {
+      const { policy } = await this.sourcePolicies.restrict(draftId, sourceId, principal, body);
+      let status = 'not-running';
+      // Also on an exact replay: running work that the saved policy no longer
+      // allows is asked to stop again, and the answer reflects that attempt.
+      if (!allows(policy, 'model')) {
+        const running = [this.active, this.activeProposal].filter((item) => item?.draftId === draftId && item.sourceId === sourceId);
+        if (running.length > 0) {
+          status = 'requested';
+          for (const item of running) {
+            try {
+              item.controller.abort();
+            } catch {
+              status = 'unconfirmed';
+            }
+          }
+        }
+      }
+      const impacts = await this.sourceImpacts(draftId, sourceId);
+      return { saved: true, ...policy, impacts, cancellation: { requested: status !== 'not-running', status } };
     });
   }
 
