@@ -5,6 +5,9 @@
 // explicitly. Recollections, photos and model reconstructions stay separate
 // kinds of evidence; none of them is shown as verified history.
 
+import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
+import { register, registerElement, unregister } from './playback.js';
+import { createStoryPlayer } from './story-player.js';
 import { TEXT_LIMITS as SOURCE_LIMITS, isCalendarDate } from './source-details.js';
 
 export const TEXT_LIMIT = 10_000;
@@ -38,6 +41,9 @@ const FINAL = new Set(['adopted', 'alternative', 'rejected', 'withdrawn']);
 // A contributor photo: one JPEG or PNG, recognised by its first bytes, up to
 // the raw limit. The server decodes it and remains the authority.
 export const PHOTO_LIMIT_MB = 20;
+export const VOICE_LIMIT_MB = 50;
+export const BUNDLE_LIMIT_MB = 64;
+export const CAPTION_LIMIT = 20_000;
 const PHOTO_ORIGINS = { unknown: 'Not known', own: 'My own photo', public: 'A public source', other: 'Someone else' };
 export async function photoProblem(file) {
   if (!file || file.size === 0) return 'That file is empty.';
@@ -46,6 +52,18 @@ export async function photoProblem(file) {
   const jpeg = head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
   const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, i) => head[i] === byte);
   return jpeg || png ? null : 'Choose a JPEG or PNG photo.';
+}
+// A sent recording's captions need the writer's confirmation, and everything
+// sent at once must fit the limits.
+export function voiceProblem({ input, file = null, voice = null }) {
+  if (input.voice) {
+    if (input.voice.captionText.length > CAPTION_LIMIT) return `Keep the captions to ${CAPTION_LIMIT.toLocaleString('en-US')} characters or fewer.`;
+    if (input.voice.captionText.trim() && input.voice.captionConfirmed !== true) return 'Confirm that you wrote the captions yourself, or leave them empty.';
+    if (voice && voice.size > VOICE_LIMIT_MB * 1024 * 1024) return `The recording is larger than ${VOICE_LIMIT_MB} MB. Record a shorter one.`;
+  }
+  const total = (file?.size ?? 0) + (voice?.size ?? 0);
+  if (total > BUNDLE_LIMIT_MB * 1024 * 1024) return `Everything sent at once must total ${BUNDLE_LIMIT_MB} MB or less. Remove the photo or record a shorter recording.`;
+  return null;
 }
 export function photoFieldsProblem(photo) {
   if (!photo) return null;
@@ -63,7 +81,14 @@ function photoFactsText(photo) {
   return facts.join(' ');
 }
 // What a review form's photo depends on: its availability, address and uses.
-const photoBinding = (photo) => (photo ? JSON.stringify([photo.available === true, photo.url ?? null, photo.permissions ?? null]) : '');
+const photoBinding = (photo, voice = null) =>
+  JSON.stringify([photo ? [photo.available === true, photo.url ?? null, photo.permissions ?? null] : null, voice ? [voice.available === true, voice.url ?? null, voice.permissions ?? null, voice.captions?.sha256 ?? null] : null]);
+// What a withdrawal covers, named by what was actually sent.
+function withdrawnParts(contribution) {
+  const parts = [contribution.text?.trim() ? 'your words' : null, contribution.photo ? 'your photo' : null, contribution.voice ? 'your recording' : null].filter(Boolean);
+  if (parts.length <= 1) return parts[0] ?? 'this recollection';
+  return `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+}
 const photoUsesText = (photo) => grantsText(photo?.permissions).replace(/^Allowed:/, 'photo allowed:').replace(/^No uses allowed\./, 'no photo uses allowed.');
 
 function base64url(bytes) {
@@ -91,14 +116,15 @@ export function contributionStatusText(contribution) {
     case 'rejected':
       return 'The owner decided not to use it.';
     case 'withdrawn':
-      return 'Withdrawn. Rehere no longer shows or uses these words.';
+      return 'Withdrawn. Rehere no longer shows or uses this recollection.';
     default:
       return 'Status unknown.';
   }
 }
 
-export function submissionProblem({ text, periodClaim }) {
-  if (!text.trim()) return 'Write your recollection before sending it.';
+// Writing is needed unless a recording is sent; a photo alone is not enough.
+export function submissionProblem({ text, periodClaim, voice = null }) {
+  if (!text.trim() && !voice) return 'Write your recollection before sending it, or record it.';
   if (text.length > TEXT_LIMIT) return `Keep your recollection to ${TEXT_LIMIT.toLocaleString('en-US')} characters or fewer.`;
   if (periodClaim.length > PERIOD_LIMIT) return `Keep the time as you remember it to ${PERIOD_LIMIT} characters or fewer.`;
   return null;
@@ -206,7 +232,7 @@ function attempts() {
 
 // A withdrawn recollection keeps its original grants on the server, but none of
 // them applies any more.
-const usesText = (entry) => (entry.status === 'withdrawn' ? 'All further use withdrawn.' : grantsText(entry.permissions));
+const usesText = (entry) => (entry.status === 'withdrawn' ? 'All further use withdrawn.' : entry.permissions ? grantsText(entry.permissions) : 'No written words were sent.');
 
 function grantsText(permissions) {
   const allowed = Object.entries(PERMISSION_LABELS).filter(([key]) => permissions?.[key] === true);
@@ -224,7 +250,7 @@ function grantsText(permissions) {
 // again repeats that ID, and only an explicit new submission gets a new one.
 // The browser keeps only that opaque ID, per principal and place, never the
 // words, the photo, its name or its settings.
-export function mountContributor(container, { principal = null } = {}) {
+export function mountContributor(container, { principal = null, media = null } = {}) {
   let disposed = false;
   let place = null;
   let generation = 0;
@@ -241,9 +267,19 @@ export function mountContributor(container, { principal = null } = {}) {
   let photoFile = null;
   let previewUrl = null;
   let ownUrls = [];
+  // Players for the person's own recordings in the list; every render, place
+  // change or close disposes them, which aborts a pending load and stops sound.
+  let ownPlayers = [];
   // Invalidates a photo check still reading a file, and own-list photo loads.
   let selectToken = 0;
   let ownToken = 0;
+  // A finished take belongs to the place it was recorded for. Switching place
+  // keeps it there (with its captions, uses and any unconfirmed send) and the
+  // new place starts without one.
+  const placeTakes = new Map();
+  const recorder = createRecorder(media ?? { mediaDevices: globalThis.navigator?.mediaDevices, MediaRecorder: globalThis.MediaRecorder });
+  let takeUrl = null;
+  let takeBlob = null;
 
   const placeSelect = el('select');
   const text = el('textarea', { rows: 6, maxLength: TEXT_LIMIT });
@@ -269,6 +305,27 @@ export function mountContributor(container, { principal = null } = {}) {
     ]),
   ]);
   const send = el('button', { type: 'button', textContent: 'Send recollection' });
+  const record = el('button', { type: 'button', className: 'secondary', textContent: 'Record' });
+  const stopTake = el('button', { type: 'button', className: 'secondary', textContent: 'Stop', hidden: true });
+  const discardTake = el('button', { type: 'button', className: 'secondary', textContent: 'Discard recording', hidden: true });
+  const takeStatus = el('p', { className: 'hint', role: 'status' });
+  const takeAudio = el('audio', { controls: true, hidden: true });
+  // The take's listen-back is one player among the page's: playing it stops
+  // others, and page-wide stops (sign-out, navigation, hidden page) silence it.
+  const takeOwner = Symbol('contribution-take');
+  registerElement(takeAudio, takeOwner);
+  const captionText = el('textarea', { rows: 4, maxLength: CAPTION_LIMIT });
+  const captionConfirm = el('input', { type: 'checkbox' });
+  const voiceGrants = Object.fromEntries(Object.keys(PERMISSION_LABELS).map((key) => [key, el('input', { type: 'checkbox' })]));
+  const voiceFields = el('div', { hidden: true }, [
+    field('Captions for listeners (optional)', captionText, 'If you want people to be able to hear this in a shared view, write what is heard in your own words. Rehere does not transcribe or check them, and you can send the recording without them.'),
+    el('label', { className: 'memory-consent' }, [captionConfirm, ' I wrote these captions myself; they convey what is heard']),
+    el('fieldset', { className: 'source-permissions' }, [
+      el('legend', { textContent: 'Allowed uses of your recording' }),
+      el('p', { className: 'hint', textContent: 'A use needs your permission for every part you send: words, photo and recording.' }),
+      ...Object.entries(PERMISSION_LABELS).map(([key, label]) => el('label', {}, [voiceGrants[key], ` ${label}`])),
+    ]),
+  ]);
   const startNew = el('button', { type: 'button', className: 'secondary', textContent: 'Start a new submission instead', hidden: true });
   const uncertainNote = el('p', { className: 'hint' });
   const message = el('p', { className: 'form-message', role: 'alert' });
@@ -292,6 +349,18 @@ export function mountContributor(container, { principal = null } = {}) {
       el('div', { className: 'actions' }, [removePhoto]),
       photoFields,
     ]),
+    el('fieldset', { className: 'source-permissions' }, [
+      el('legend', { textContent: 'Record your recollection (optional)' }),
+      el('p', {
+        className: 'hint',
+        textContent: 'Your voice is kept as recorded and is not transcribed. Recording starts only when you press Record and stops on its own just before five minutes. You can send a recording without writing anything.',
+      }),
+      el('div', { className: 'actions' }, [record, stopTake, discardTake]),
+      takeStatus,
+      takeAudio,
+      voiceFields,
+    ]),
+    el('p', { className: 'hint', textContent: `Everything sent at once must total ${BUNDLE_LIMIT_MB} MB or less: a photo up to ${PHOTO_LIMIT_MB} MB and a recording up to ${VOICE_LIMIT_MB} MB.` }),
     el('div', { className: 'actions' }, [startNew, send]),
     uncertainNote,
     message,
@@ -353,7 +422,9 @@ export function mountContributor(container, { principal = null } = {}) {
   }
   function showUncertain(on) {
     startNew.hidden = !on;
-    send.textContent = on ? 'Send again (same request)' : 'Send recollection';
+    // With the exact attempt in memory, Send repeats it. With only a restored
+    // ID, the button can only check whether that earlier send arrived.
+    send.textContent = on ? (attempt ? 'Send again (same request)' : 'Check earlier submission') : 'Send recollection';
     uncertainNote.textContent = on && attempt ? 'Sending again repeats exactly what was sent before, including its photo. Any newer changes in the form stay there for a new submission.' : '';
   }
 
@@ -361,6 +432,7 @@ export function mountContributor(container, { principal = null } = {}) {
     ownToken += 1;
     for (const url of ownUrls) URL.revokeObjectURL(url);
     ownUrls = [];
+    for (const player of ownPlayers.splice(0)) player.dispose();
   }
   // A different original starts with its facts unknown and every use off;
   // re-choosing the same file keeps what was set for it. Text uses are kept.
@@ -388,6 +460,57 @@ export function mountContributor(container, { principal = null } = {}) {
     removePhoto.hidden = !file;
     photoFields.hidden = !file;
   }
+  // A different take starts with no captions and every use off.
+  function resetVoiceFacts() {
+    captionText.value = '';
+    captionConfirm.checked = false;
+    for (const box of Object.values(voiceGrants)) box.checked = false;
+  }
+  // Silences and forgets the listen-back copy: a new take, a discard, a place
+  // change and closing all come through here.
+  function releaseTakeAudio() {
+    takeAudio.pause?.();
+    takeAudio.removeAttribute?.('src');
+    takeAudio.load?.();
+    if (takeUrl) URL.revokeObjectURL(takeUrl);
+    takeUrl = null;
+  }
+  register(takeOwner, () => takeAudio.pause?.());
+  function renderTake() {
+    const { state, message: note, recording } = recorder.snapshot();
+    if (recording !== takeBlob) {
+      releaseTakeAudio();
+      takeBlob = recording;
+      resetVoiceFacts();
+      if (recording) {
+        takeUrl = URL.createObjectURL(recording);
+        takeAudio.src = takeUrl;
+      }
+    }
+    takeStatus.textContent =
+      {
+        unavailable: note,
+        idle: '',
+        requesting: 'Waiting for microphone permission. Words and a photo can still be sent.',
+        recording: `Recording; it stops on its own before ${Math.ceil(MAX_RECORDING_MS / 60000)} minutes.`,
+        finalizing: 'Finishing the recording…',
+        recorded: 'Recording ready. Listen back before sending, or discard it.',
+        denied: note,
+        error: note,
+      }[state] ?? '';
+    record.hidden = !['idle', 'denied', 'error', 'unavailable'].includes(state);
+    record.disabled = state === 'unavailable';
+    stopTake.hidden = state !== 'recording';
+    discardTake.hidden = !['requesting', 'recording', 'finalizing', 'recorded'].includes(state);
+    takeAudio.hidden = !recording;
+    voiceFields.hidden = !recording;
+  }
+  recorder.subscribe(renderTake);
+  record.addEventListener('click', () => recorder.start());
+  stopTake.addEventListener('click', () => recorder.stop());
+  discardTake.addEventListener('click', () => recorder.discard());
+  renderTake();
+
   function clearForm() {
     text.value = '';
     period.value = '';
@@ -397,6 +520,8 @@ export function mountContributor(container, { principal = null } = {}) {
     photoCaptured.value = '';
     photoPeriod.value = '';
     setPhoto(null);
+    recorder.discard();
+    resetVoiceFacts();
   }
 
   photoInput.addEventListener('change', async () => {
@@ -444,11 +569,32 @@ export function mountContributor(container, { principal = null } = {}) {
         const item = el('li', {}, [
           el('p', { className: 'collab-status', textContent: contributionStatusText(contribution) }),
           contribution.text === null
-            ? el('p', { className: 'hint', textContent: contribution.photo ? 'Your words and photo are no longer shown or used.' : 'The text is no longer shown.' })
-            : el('p', { className: 'memory-text', textContent: contribution.text }),
+            ? el('p', { className: 'hint', textContent: contribution.photo || contribution.voice ? 'What you sent is no longer shown or used.' : 'The text is no longer shown.' })
+            : contribution.text === ''
+              ? el('p', { className: 'hint', textContent: 'No written words were sent.' })
+              : el('p', { className: 'memory-text', textContent: contribution.text }),
         ]);
         if (contribution.periodClaim) item.append(el('p', { className: 'hint', textContent: `Time as you remember it: ${contribution.periodClaim}` }));
-        item.append(el('p', { className: 'hint', textContent: usesText(contribution) }));
+        // Without words there are no word uses; the line above already says so.
+        if (contribution.permissions || contribution.status === 'withdrawn') item.append(el('p', { className: 'hint', textContent: usesText(contribution) }));
+        if (contribution.voice && contribution.status !== 'withdrawn') {
+          const voice = contribution.voice;
+          item.append(
+            el('p', {
+              className: 'hint',
+              textContent: `Your recording · ${grantsText(voice.permissions).replace(/^Allowed:/, 'recording allowed:').replace(/^No uses allowed\./, 'no recording uses allowed.')} ${voice.captions ? 'With captions you wrote.' : 'No captions supplied.'}`,
+            }),
+          );
+          // The checked playback copy, only on the person's own Play.
+          if (voice.available && voice.url && voice.audio) {
+            const player = createStoryPlayer({
+              story: { title: 'Your recording', cues: voice.captions?.cues ?? [], durationMs: voice.durationMs, audio: voice.audio },
+              fetchAudio: (signal) => fetch(voice.url, { credentials: 'same-origin', cache: 'no-store', signal }),
+            });
+            ownPlayers.push(player);
+            item.append(player.element);
+          } else item.append(el('p', { className: 'hint', textContent: 'Your recording is not available now.' }));
+        }
         if (contribution.photo && contribution.status !== 'withdrawn') {
           item.append(el('p', { className: 'hint', textContent: `Your photo · ${photoUsesText(contribution.photo)}` }));
           if (contribution.photo.available && contribution.photo.url) {
@@ -473,14 +619,15 @@ export function mountContributor(container, { principal = null } = {}) {
     const wrap = el('div', { className: 'actions' });
     const start = el('button', { type: 'button', className: 'secondary', textContent: 'Withdraw' });
     start.addEventListener('click', () => {
-      const confirm = el('button', { type: 'button', textContent: contribution.photo ? 'Withdraw this recollection and its photo' : 'Withdraw this recollection' });
+      const parts = [contribution.photo ? 'photo' : null, contribution.voice ? 'recording' : null].filter(Boolean);
+      const confirm = el('button', { type: 'button', textContent: parts.length ? `Withdraw this recollection and its ${parts.join(' and ')}` : 'Withdraw this recollection' });
       const cancel = el('button', { type: 'button', className: 'secondary', textContent: 'Keep it' });
       cancel.addEventListener('click', () => wrap.replaceChildren(start));
       confirm.addEventListener('click', () => withdraw(contribution, confirm));
       wrap.replaceChildren(
         el('p', {
           className: 'hint',
-          textContent: `Rehere will stop showing and using these words${contribution.photo ? ' and this photo' : ''}, and any scene that depends on them will be blocked. Copies someone already saved outside Rehere cannot be removed from here.`,
+          textContent: `Rehere will stop showing and using what you sent${parts.length ? `, including the ${parts.join(' and ')}` : ''}, and any scene or shared view that depends on it will be blocked. Copies someone already saved outside Rehere cannot be removed from here.`,
         }),
         cancel,
         confirm,
@@ -505,7 +652,7 @@ export function mountContributor(container, { principal = null } = {}) {
     }
     withdrawAttempt.settle();
     message.textContent = result.ok
-      ? `Withdrawn. Rehere no longer shows or uses these words${contribution.photo ? ' or this photo' : ''}, and scenes that depended on them are blocked.`
+      ? `Withdrawn. Rehere no longer shows or uses ${withdrawnParts(contribution)}, and scenes and shared views that depended on it are blocked. Copies someone already saved outside Rehere are not affected.`
       : reasonOf(result) || 'The recollection could not be withdrawn.';
     await loadOwn();
   }
@@ -519,12 +666,15 @@ export function mountContributor(container, { principal = null } = {}) {
     const result = await request(`${scope()}/collaboration`);
     if (disposed || mine !== generation || place !== target || token !== readToken) return null;
     if (!result.ok || !Array.isArray(result.body?.contributions)) {
+      // Nothing stays playable from a list that can no longer be confirmed.
+      revokeOwn();
+      own.replaceChildren();
       status.textContent = 'Your recollections could not be loaded. Try again later.';
       return null;
     }
     renderOwn(result.body.contributions);
     if (pendingId && result.body.contributions.some((contribution) => contribution.requestId === pendingId)) {
-      const sameForm = pendingInput && sameJson(pendingInput, collect()) && (attempt?.file ?? null) === photoFile;
+      const sameForm = pendingInput && sameJson(pendingInput, collect()) && (attempt?.file ?? null) === photoFile && (attempt?.voice ?? null) === (recorder.snapshot().recording ?? null);
       setPending(null);
       if (sameForm) clearForm();
       message.textContent = sameForm
@@ -536,10 +686,22 @@ export function mountContributor(container, { principal = null } = {}) {
   }
 
   function collect() {
+    const take = recorder.snapshot().state === 'recorded' ? recorder.snapshot().recording : null;
+    const caption = captionText.value;
     return {
       text: text.value,
       periodClaim: period.value,
-      permissions: Object.fromEntries(Object.entries(grants).map(([key, box]) => [key, box.checked === true])),
+      // Uses of the words exist only when there are words.
+      permissions: text.value.trim() ? Object.fromEntries(Object.entries(grants).map(([key, box]) => [key, box.checked === true])) : null,
+      voice: take
+        ? {
+            origin: { kind: 'own', reference: '' },
+            dates: { capturedOn: null, fileCreatedAt: null, fileModifiedAt: null, estimatedPeriod: '' },
+            permissions: Object.fromEntries(Object.entries(voiceGrants).map(([key, box]) => [key, box.checked === true])),
+            captionText: caption,
+            captionConfirmed: caption.trim() ? captionConfirm.checked === true : false,
+          }
+        : null,
       photo: photoFile
         ? {
             origin: { kind: photoOrigin.value, reference: photoReference.value.trim() },
@@ -556,7 +718,19 @@ export function mountContributor(container, { principal = null } = {}) {
     };
   }
 
+  const placeKey = (entry) => (entry ? `${entry.draftId}/${entry.jobId}` : null);
   function choose(next) {
+    // The previous place keeps its finished take and unconfirmed attempt; any
+    // capture in progress stops and the microphone is released.
+    if (place) {
+      const { state, recording } = recorder.snapshot();
+      placeTakes.set(placeKey(place), {
+        take: state === 'recorded' ? { blob: recording, captionText: captionText.value, captionConfirmed: captionConfirm.checked, grants: Object.fromEntries(Object.entries(voiceGrants).map(([key, box]) => [key, box.checked])) } : null,
+        attempt,
+        attemptId: pendingId,
+      });
+    }
+    recorder.discard();
     generation += 1;
     place = next;
     // A send still pending for the previous place no longer holds this form.
@@ -571,13 +745,20 @@ export function mountContributor(container, { principal = null } = {}) {
     attempt = null;
     const stored = place ? storedPending() : null;
     setPending(stored);
+    const kept = place ? placeTakes.get(placeKey(place)) : null;
+    if (kept?.take && recorder.restore(kept.take.blob)) {
+      captionText.value = kept.take.captionText;
+      captionConfirm.checked = kept.take.captionConfirmed;
+      for (const [key, value] of Object.entries(kept.take.grants)) voiceGrants[key].checked = value;
+    }
+    // Only this place's own unconfirmed attempt can be repeated here.
+    if (kept?.attempt && stored && kept.attemptId === stored) attempt = kept.attempt;
     showUncertain(Boolean(stored));
     if (stored) message.textContent = 'An earlier recollection may not have reached Rehere. Checking…';
     if (place) {
       loadOwn().then((arrived) => {
         if (arrived !== false || !pendingId || pendingId !== stored) return;
-        message.textContent =
-          'Rehere has no record of your earlier recollection yet. To retry it exactly, enter the same words and settings and choose the same photo, then press Send again. Or start a new submission.';
+        message.textContent = 'Rehere has no record of your earlier recollection yet; it may still arrive. You can check again, or start a new submission to send what the form holds now.';
       });
     }
   }
@@ -590,10 +771,23 @@ export function mountContributor(container, { principal = null } = {}) {
   send.addEventListener('click', async () => {
     if (!place) return;
     // An uncertain send from this session is repeated exactly as it was sent,
-    // file included; newer edits stay in the form for a new submission. After
-    // a reload only the ID is known, so the person re-enters the same input.
-    const current = attempt ?? { input: collect(), file: photoFile };
-    const problem = submissionProblem(current.input) ?? photoFieldsProblem(current.input.photo);
+    // files included; newer edits stay in the form for a new submission.
+    // After a reload only the earlier ID is known, never what it carried: it
+    // is only looked up. Whatever the form holds now is a new submission.
+    if (!attempt && pendingId) {
+      const mine = generation;
+      const target = place;
+      send.disabled = true;
+      const arrived = await loadOwn();
+      if (disposed || mine !== generation || place !== target) return;
+      send.disabled = false;
+      if (arrived) return;
+      showUncertain(true);
+      message.textContent = 'Rehere has no record of your earlier recollection yet; it may still arrive. To send what the form holds now, start a new submission.';
+      return;
+    }
+    const current = attempt ?? { input: collect(), file: photoFile, voice: recorder.snapshot().state === 'recorded' ? recorder.snapshot().recording : null };
+    const problem = submissionProblem(current.input) ?? photoFieldsProblem(current.input.photo) ?? voiceProblem(current);
     if (problem) {
       message.textContent = problem;
       return;
@@ -606,9 +800,15 @@ export function mountContributor(container, { principal = null } = {}) {
     attempt = current;
     send.disabled = true;
     readToken += 1;
-    const { photo, ...words } = current.input;
+    const { photo, voice, ...words } = current.input;
     let result;
-    if (photo) {
+    if (voice) {
+      const form = new FormData();
+      form.append('payload', JSON.stringify({ requestId, ...words, photo, voice }));
+      if (photo) form.append('photo', current.file);
+      form.append('voice', current.voice, 'recording');
+      result = await request(`${scope()}/contributions/bundle`, { method: 'POST', body: form });
+    } else if (photo) {
       const form = new FormData();
       form.append('payload', JSON.stringify({ requestId, ...words, photo }));
       form.append('photo', current.file);
@@ -627,7 +827,7 @@ export function mountContributor(container, { principal = null } = {}) {
     }
     if (result.ok) {
       // Only a form still holding exactly what was sent is cleared.
-      const sameForm = sameJson(collect(), current.input) && photoFile === current.file;
+      const sameForm = sameJson(collect(), current.input) && photoFile === current.file && (recorder.snapshot().recording ?? null) === (current.voice ?? null);
       setPending(null);
       if (sameForm) clearForm();
       message.textContent = sameForm ? 'Sent. The owner decides whether and how to use it.' : 'Your earlier recollection was sent. Your newer changes are still in the form; send them as a new recollection if you want.';
@@ -672,6 +872,9 @@ export function mountContributor(container, { principal = null } = {}) {
       generation += 1;
       revokeOwn();
       setPhoto(null);
+      recorder.discard();
+      releaseTakeAudio();
+      unregister(takeOwner);
       container.replaceChildren();
     },
   };
@@ -803,10 +1006,14 @@ export function mountCollaboration(container, bridge) {
   // is replaced or the panel closes, and late loads are dropped.
   let reviewPhotoUrl = null;
   let reviewPhotoToken = 0;
+  // The review form's recording player, released with the form.
+  let reviewPlayer = null;
   const releaseReviewPhoto = () => {
     reviewPhotoToken += 1;
     if (reviewPhotoUrl) URL.revokeObjectURL(reviewPhotoUrl);
     reviewPhotoUrl = null;
+    reviewPlayer?.dispose();
+    reviewPlayer = null;
   };
   const reviewAttempt = attempts();
   const eraAttempt = attempts();
@@ -878,6 +1085,7 @@ export function mountCollaboration(container, bridge) {
         if (entry.periodClaim && entry.text !== null) item.append(el('p', { className: 'hint', textContent: `Time as they remember it (their words, not checked): ${entry.periodClaim}` }));
         item.append(el('p', { className: 'hint', textContent: usesText(entry) }));
         if (entry.photo && entry.status !== 'withdrawn') item.append(el('p', { className: 'hint', textContent: `Photo included · ${photoUsesText(entry.photo)}` }));
+        if (entry.voice && entry.status !== 'withdrawn') item.append(el('p', { className: 'hint', textContent: `Recording included · ${grantsText(entry.voice.permissions).replace(/^Allowed:/, 'recording allowed:').replace(/^No uses allowed\./, 'no recording uses allowed.')}` }));
         // Only what the owner actually recorded; nothing for a withdrawn entry.
         const notes = [];
         if (entry.status !== 'withdrawn' && entry.review?.reason) notes.push(`Your note: ${entry.review.reason}`);
@@ -903,7 +1111,7 @@ export function mountCollaboration(container, bridge) {
     // The photo binding is part of what the form was built for: a photo that
     // became unavailable or changed rebuilds it, dropping the old image, the
     // acknowledgment and any candidate shown on the scene.
-    const photoKey = photoBinding(entry.photo);
+    const photoKey = photoBinding(entry.photo, entry.voice);
     if (reviewForm && reviewForm.id === entry.id && reviewForm.revision === entry.revision && reviewForm.status === entry.status && reviewForm.photoKey === photoKey) {
       reviewForm.refreshControls();
       return;
@@ -971,6 +1179,48 @@ export function mountCollaboration(container, bridge) {
     } else if (photoState === 'unavailable') {
       photoSlot.replaceChildren(el('p', { className: 'hint', textContent: 'This photo is not available now, so it cannot support a change. You can hold or decline it.' }));
     }
+    // A recording: played here on the owner's own press, from the checked
+    // playback copy. The acknowledgment unlocks only after this form's player
+    // actually started, and records only that the owner listened.
+    const voice = entry.voice ?? null;
+    let voicePlayed = false;
+    const voiceAck = el('input', { type: 'checkbox', disabled: true });
+    const voiceBox = voice ? el('figure', { className: 'anchor-figure' }) : null;
+    if (voice) {
+      const formToken = reviewPhotoToken;
+      if (voice.available && voice.url && voice.audio) {
+        reviewPlayer = createStoryPlayer({
+          story: { title: `Recording by ${providerName(entry)}`, cues: voice.captions?.cues ?? [], durationMs: voice.durationMs, audio: voice.audio },
+          fetchAudio: (signal) => fetch(voice.url, { credentials: 'same-origin', cache: 'no-store', signal }),
+          onPlaying: () => {
+            if (disposed || formToken !== reviewPhotoToken) return;
+            voicePlayed = true;
+            voiceAck.disabled = false;
+            reviewForm?.refreshControls();
+          },
+        });
+      }
+      voiceBox.append(
+        ...(reviewPlayer ? [reviewPlayer.element] : [el('p', { className: 'hint', textContent: 'This recording is not available now, so it cannot support a change. You can hold or decline it.' })]),
+        el('figcaption', {
+          className: 'hint',
+          textContent: `Recording supplied by ${providerName(entry)}, kept as recorded. ${voice.captions ? `Captions written by ${voice.captions.authorLabel}; not a transcript.` : ''} Not checked as historical fact; Rehere does not compare it with the scene.`.replace(/\s+/g, ' '),
+        }),
+        el('label', { className: 'memory-consent' }, [voiceAck, ' I listened to this recording myself; the position I set is my own judgment, not taken from the recording automatically']),
+      );
+    }
+    const voiceProblemText = () => {
+      if (!voice) return '';
+      if (!voice.available || !voice.url || !voice.audio) return 'This recording is not available now, so it cannot support a change. You can hold or decline it.';
+      if (voice.permissions?.place !== true) return 'The recording’s provider did not allow use to reconstruct the place, so this recollection cannot change the scene. You can hold or decline it.';
+      if (!voicePlayed) return 'Play the recording here before using it for a change.';
+      if (voiceAck.checked !== true) return 'Confirm that you listened to the recording yourself before previewing or saving.';
+      return '';
+    };
+    voiceAck.addEventListener('change', () => {
+      if (voiceAck.checked !== true && showing?.kind === 'candidate') stopShowing();
+      reviewForm?.refreshControls();
+    });
     const photoProblemText = () => {
       if (!photo) return '';
       if (photo.permissions?.place !== true) return 'The photo’s provider did not allow use to reconstruct the place, so this recollection cannot change the scene. You can hold or decline it.';
@@ -1029,7 +1279,8 @@ export function mountCollaboration(container, bridge) {
       preview.hidden = !geometry();
       let reasonText = '';
       if (geometry()) {
-        if (entry.permissions?.place !== true) reasonText = 'This recollection does not allow use to reconstruct the place, so it cannot change the scene. You can hold or decline it.';
+        if (entry.permissions && entry.permissions.place !== true) reasonText = 'This recollection does not allow use to reconstruct the place, so it cannot change the scene. You can hold or decline it.';
+        else if (voiceProblemText()) reasonText = voiceProblemText();
         else if (photoProblemText()) reasonText = photoProblemText();
         else if (state.blocked) reasonText = 'The current scene depends on a withdrawn recollection. Restore an unaffected saved version first.';
         else if (noTarget()) reasonText = 'Choose the object this recollection is about first; the candidate moves only that object.';
@@ -1041,7 +1292,7 @@ export function mountCollaboration(container, bridge) {
       }
       note.textContent = reasonText;
       targetNote.textContent = bridge.targets && !noTarget() ? `The candidate moves ${bridge.targets.nameOf(bridge.targets.selected())}; the other object stays as saved.` : '';
-      preview.disabled = busy || noTarget() || entry.permissions?.place !== true || Boolean(photoProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
+      preview.disabled = busy || noTarget() || Boolean(entry.permissions && entry.permissions.place !== true) || Boolean(photoProblemText()) || Boolean(voiceProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
       save.disabled = busy || (geometry() && Boolean(reasonText));
     };
 
@@ -1074,8 +1325,10 @@ export function mountCollaboration(container, bridge) {
         baseRevision: entry.revision,
         // Recorded only for a change informed by the photo.
         ...(photo && geometry() ? { photoReviewed: true } : {}),
+        ...(voice && geometry() ? { voiceReviewed: true } : {}),
       };
       if (photo && geometry() && photoProblemText()) return;
+      if (voice && geometry() && voiceProblemText()) return;
       if (reason.value.length > REASON_LIMIT) {
         message.textContent = `Keep the note to ${REASON_LIMIT} characters or fewer.`;
         return;
@@ -1110,6 +1363,7 @@ export function mountCollaboration(container, bridge) {
       field('Your note (optional)', reason),
       field('Possible reason for a difference', conflict, 'A label for your own review. It does not decide which account is right or set a time.'),
       ...(photoBox ? [photoBox] : []),
+      ...(voiceBox ? [voiceBox] : []),
       candidateBox,
       targetNote,
       note,

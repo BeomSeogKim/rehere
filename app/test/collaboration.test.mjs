@@ -179,7 +179,7 @@ describe('contributions', () => {
     assert.deepEqual({ ...submitted, id: null, createdAt: null }, {
       id: null, principalId: ctx.alex.id, provider: { displayName: 'Alex' }, kind: 'human_recollection', text, periodClaim: 'Around a summer',
       textSha256: sha256(Buffer.from(text, 'utf8')), permissions: { place: true, model: false, share: false }, createdAt: null,
-      revision: 1, status: 'submitted', review: null, withdrawnAt: null, requestId, photo: null,
+      revision: 1, status: 'submitted', review: null, withdrawnAt: null, requestId, photo: null, voice: null,
     });
     assert.deepEqual(await ctx.collaboration.submit(ctx.draftId, ctx.jobId, ctx.alex, body), submitted);
     await assert.rejects(ctx.collaboration.submit(ctx.draftId, ctx.jobId, ctx.alex, { ...body, text: 'Changed.' }), status(409));

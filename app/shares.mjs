@@ -2,8 +2,8 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { OBJECT_IDS, arrangementOf, assertObjectsConfirmed, isTwoObject } from './arrangements.mjs';
-import { contributionAllows, versionDependencies } from './collaboration.mjs';
-import { photoAttested, readReviewPhoto } from './contribution-photos.mjs';
+import { captionsIntact, contributionAllows, versionDependencies } from './collaboration.mjs';
+import { photoAttested, readPlayback, readReviewPhoto } from './contribution-photos.mjs';
 import { RequestError } from './drafts.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -13,8 +13,10 @@ const MINUTE = 60_000;
 
 export const SHARE_LIMITS = Object.freeze({
   title: 120, views: 8, quotes: 20, cameraCoordinate: 50, cameraDistance: [0.5, 8],
-  previewMs: 15 * MINUTE, snapshotMs: 7 * 24 * 60 * MINUTE, snapshotsPerScene: 50, stories: 8, contributorPhotos: 20,
+  previewMs: 15 * MINUTE, snapshotMs: 7 * 24 * 60 * MINUTE, snapshotsPerScene: 50, stories: 8, contributorPhotos: 20, recordings: 8,
 });
+const RECORDING_LABEL = 'Contributor recording; human-written listening captions; not verified history.';
+const SHA = /^[0-9a-f]{64}$/;
 const CONTRIBUTOR_PHOTO_LABEL = 'Photo supplied by a contributor. Not automatically matched; not verified history.';
 const EVIDENCE_ASSET = /^([1-9][0-9]?)\.jpg$/;
 // Only these derived files are ever served to a preview or a visitor.
@@ -26,7 +28,7 @@ const REASONS = {
   source: [403, 'The photo is not marked as public material with permission to build and share the place.'],
   grant: [403, 'A contribution used by a selected view or quote was not shared with permission to build and share the place.'],
   withdrawn: [409, 'A contribution used by a selected view or quote was withdrawn.'],
-  unavailable: [409, 'A contributor photo used by a selected view or quote is not available for this use right now. Make a new preview later.'],
+  unavailable: [409, 'A contributed photo or recording used by a selected view, quote or recording is not available for this use right now. Make a new preview later.'],
   era: [409, 'The time assertion for a selected alternative changed. Make a new preview.'],
   changed: [409, 'The saved scene changed after this preview. Make a new preview.'],
   asset: [409, 'The scene files no longer match this preview. Make a new preview.'],
@@ -85,7 +87,7 @@ const uniqueIds = (values, max) => Array.isArray(values) && values.length <= max
 // storyIds and evidencePhotoIds are optional so earlier callers keep working;
 // absent means none.
 function parsePreview(body) {
-  const optional = ['storyIds', 'evidencePhotoIds'].filter((key) => body !== null && typeof body === 'object' && Object.hasOwn(body, key));
+  const optional = ['storyIds', 'evidencePhotoIds', 'recordings'].filter((key) => body !== null && typeof body === 'object' && Object.hasOwn(body, key));
   if (!exactKeys(body, [...PREVIEW_KEYS, ...optional])) throw fail(400, UNREADABLE);
   const views = parseViews(body.views);
   const camera = parseCamera(body.camera);
@@ -96,10 +98,29 @@ function parsePreview(body) {
     && views.some((view) => view.id === body.startViewId) && typeof body.synthetic === 'boolean'
     && uniqueIds(quotes, SHARE_LIMITS.quotes) && uniqueIds(storyIds, SHARE_LIMITS.stories) && uniqueIds(evidencePhotoIds, SHARE_LIMITS.contributorPhotos);
   if (!valid) throw fail(400, UNREADABLE);
+  const recordings = parseRecordings(body.recordings ?? [], views);
   return {
     requestId: body.requestId, title: body.title, views, startViewId: body.startViewId, camera, contributionIds: [...quotes], synthetic: body.synthetic, storyIds: [...storyIds],
-    evidencePhotoIds: [...evidencePhotoIds],
+    evidencePhotoIds: [...evidencePhotoIds], recordings,
   };
+}
+
+// Recordings the owner explicitly links to selected views and to the whole
+// place or one object. Nothing is selected by default. The scene decides
+// which object IDs are valid.
+function parseRecordings(recordings, views) {
+  if (!Array.isArray(recordings) || recordings.length > SHARE_LIMITS.recordings) throw fail(400, UNREADABLE);
+  const viewIds = new Set(views.map((view) => view.id));
+  const parsed = recordings.map((item) => {
+    const valid = exactKeys(item, ['contributionId', 'viewIds', 'targetId', 'captionSha256']) && isId(item.contributionId)
+      && uniqueIds(item.viewIds, SHARE_LIMITS.views) && item.viewIds.length > 0 && item.viewIds.every((id) => viewIds.has(id))
+      && typeof item.targetId === 'string' && ['place', 'selected-foreground', ...OBJECT_IDS].includes(item.targetId)
+      && typeof item.captionSha256 === 'string' && SHA.test(item.captionSha256);
+    if (!valid) throw fail(400, UNREADABLE);
+    return { contributionId: item.contributionId, viewIds: [...item.viewIds], targetId: item.targetId, captionSha256: item.captionSha256 };
+  });
+  if (new Set(parsed.map((item) => item.contributionId)).size !== parsed.length) throw fail(400, UNREADABLE);
+  return parsed;
 }
 
 function parseIssue(body) {
@@ -257,6 +278,12 @@ export class ShareStore {
       if (!photo || photo.source.id !== pinned.sourceId || photo.review.sha256 !== pinned.reviewSha256 || photo.review.size !== pinned.reviewSize) return 'unavailable';
       if (!photoAttested(manifest, contribution)) return 'unavailable';
     }
+    // Linked recordings are part of the snapshot's authorization even when no
+    // view depends on them.
+    for (const pinned of frozen.recordings ?? []) {
+      const issue = this.#recordingIssue(manifest, pinned);
+      if (issue) return issue;
+    }
     for (const view of frozen.views) {
       if (view.kind === 'version' && !savedView(manifest, view)) return 'changed';
       if (view.kind === 'variant') {
@@ -310,6 +337,7 @@ export class ShareStore {
       if (!contribution) throw fail(404, 'This contribution could not be found.');
       if (contribution.withdrawnAt !== null) this.#throwReason('withdrawn');
       if (!QUOTABLE.has(contribution.status)) throw fail(409, 'Only submitted, adopted or alternative recollections can be quoted.');
+      if (contribution.text === '') throw fail(409, 'This contribution has no writing to quote.');
       const issue = contributionIssue(manifest, contribution);
       if (issue) this.#throwReason(issue);
       return contribution;
@@ -375,10 +403,12 @@ export class ShareStore {
       pinnedStories.push({ publicId, ...shared.pinned });
       publicStories.push({ id: publicId, ...shared.publicStory });
     }
+    const { pinned: pinnedRecordings, published: contributorRecordings } = this.#recordings(manifest, request.recordings);
     const publicView = {
       id: null, title: request.title, createdAt: null, synthetic: request.synthetic, startViewId: request.startViewId,
       camera: { position: [...request.camera.position], target: [...request.camera.target] }, views, stories: publicStories,
       ...(contributorPhotos.length > 0 && { contributorPhotos }),
+      ...(contributorRecordings.length > 0 && { contributorRecordings }),
       // The owner's names and source boxes for the two objects, as visible evidence.
       ...(isTwoObject(manifest) && { objects: manifest.objects.map(({ id, label, box }) => ({ id, label, box: [...box] })) }),
     };
@@ -396,8 +426,72 @@ export class ShareStore {
       quotes: quotes.map((item) => ({ contributionId: item.id, textSha256: item.textSha256 })),
       stories: pinnedStories,
       ...(frozenPhotos.length > 0 && { contributorPhotos: frozenPhotos }),
+      ...(pinnedRecordings.length > 0 && { recordings: pinnedRecordings }),
     };
     return { publicView, frozen };
+  }
+
+  // Recordings the owner linked to selected views as narration about the
+  // place or one object. This association never touches view dependencies or
+  // geometry evidence, so it never claims the recording informed the scene.
+  // Each needs an eligible bundle with the provider's confirmed captions
+  // exactly as the owner previewed them.
+  #recordings(manifest, requested) {
+    const contributions = contributionsOf(manifest);
+    const twoObjects = isTwoObject(manifest);
+    const targets = twoObjects ? ['place', ...OBJECT_IDS] : ['place', 'selected-foreground'];
+    const pinned = [];
+    const published = requested.map((item) => {
+      const contribution = contributions.find((entry) => entry.id === item.contributionId);
+      if (!contribution) throw fail(404, 'This contribution could not be found.');
+      if (contribution.withdrawnAt !== null) this.#throwReason('withdrawn');
+      if (!QUOTABLE.has(contribution.status)) throw fail(409, 'Only submitted, adopted or alternative recollections can be shared.');
+      if (!contribution.voice) throw fail(400, 'This contribution has no recording.');
+      const issue = contributionIssue(manifest, contribution);
+      if (issue) this.#throwReason(issue);
+      const { source, playback, captions } = contribution.voice;
+      if (!captions) throw fail(409, 'Only a recording with the contributor’s own captions can be shared with visitors.');
+      if (!captionsIntact(contribution)) this.#throwReason('unavailable');
+      if (captions.sha256 !== item.captionSha256) throw fail(409, 'The captions of this recording changed. Make a new preview.');
+      if (!targets.includes(item.targetId)) throw fail(400, UNREADABLE);
+      const objectLabel = twoObjects ? manifest.objects.find((object) => object.id === item.targetId)?.label : 'the selected foreground object';
+      const publicId = randomUUID();
+      pinned.push({
+        publicId, contributionId: contribution.id, viewIds: [...item.viewIds], targetId: item.targetId,
+        originalSha256: source.sha256, playbackSha256: playback.sha256, playbackSize: playback.size, captionSha256: captions.sha256,
+      });
+      return {
+        id: publicId, viewIds: [...item.viewIds],
+        target: { id: item.targetId, label: item.targetId === 'place' ? 'About this place' : `About ${objectLabel}` },
+        title: 'Contributor recording', label: RECORDING_LABEL,
+        providerLabel: contribution.provider.displayName, captionAuthorLabel: captions.author.displayName,
+        cues: captions.cues.map((cue) => ({ ...cue })), durationMs: playback.durationMs, audio: { type: 'audio/wav', size: playback.size },
+      };
+    });
+    return { pinned, published };
+  }
+
+  // A pinned recording's issue now, or null: the bundle, its grants and files,
+  // and the exact original, listening copy and captions that were pinned.
+  #recordingIssue(manifest, pinned) {
+    const contribution = contributionsOf(manifest).find((item) => item.id === pinned.contributionId);
+    if (contribution?.withdrawnAt) return 'withdrawn';
+    if (!contribution?.voice) return 'unavailable';
+    const issue = contributionIssue(manifest, contribution);
+    if (issue) return issue;
+    const { source, playback, captions } = contribution.voice;
+    const same = source.sha256 === pinned.originalSha256 && playback.sha256 === pinned.playbackSha256 && playback.size === pinned.playbackSize
+      && captionsIntact(contribution) && captions.sha256 === pinned.captionSha256;
+    return same ? null : 'unavailable';
+  }
+
+  // The pinned listening copy, rehashed against the pin; null when it no longer matches.
+  async #recordingAudio(manifest, frozen, publicId) {
+    const pinned = (frozen.recordings ?? []).find((item) => item.publicId === publicId);
+    const contribution = pinned && contributionsOf(manifest).find((item) => item.id === pinned.contributionId);
+    if (!contribution?.voice) return null;
+    const body = await readPlayback(this.reconstructions.jobDir(manifest.draftId, manifest.id), contribution, { sha256: pinned.playbackSha256, size: pinned.playbackSize });
+    return body && { type: 'audio/wav', body };
   }
 
   // Returns the fixed binding for an allowlisted asset after checking it still
@@ -630,6 +724,22 @@ export class ShareStore {
       const pinned = (preview.frozen.stories ?? []).find((item) => item.publicId === publicStoryId);
       const asset = pinned && (await this.stories.pinnedAudio(manifest, pinned));
       if (!asset) throw fail(404, 'Not found.');
+      return asset;
+    });
+  }
+
+  previewRecordingAudio(draftId, jobId, principal, previewId, publicId) {
+    return this.#livePreview(draftId, jobId, principal, previewId, async (manifest, preview) => {
+      const asset = await this.#recordingAudio(manifest, preview.frozen, publicId);
+      if (!asset) throw fail(404, 'Not found.');
+      return asset;
+    });
+  }
+
+  visitRecordingAudio(token, publicId) {
+    return this.#visitable(token, async (manifest, snapshot) => {
+      const asset = await this.#recordingAudio(manifest, snapshot.frozen, publicId).catch(() => null);
+      if (!asset) throw unavailable();
       return asset;
     });
   }

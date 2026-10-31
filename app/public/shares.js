@@ -3,6 +3,7 @@
 // link, list and revoke. The issued link is shown only from the token this
 // page generated; the server never returns it.
 
+import { formatMs } from './story-player.js';
 import { mountVisitor, previewSource } from './visits.js';
 
 export const TITLE_LIMIT = 120;
@@ -36,16 +37,39 @@ export function viewDependencies(view, { history = [], variants = [] }) {
 // A contributor photo can be shown with a view only if that view depends on its
 // recollection, it is still in use and available, and both the words and the
 // photo allow reconstruction and sharing. The server checks again.
-export const photoShareable = (entry) =>
-  QUOTABLE.has(entry.status) &&
-  entry.photo?.available === true &&
-  entry.permissions?.place === true &&
-  entry.permissions?.share === true &&
-  entry.photo.permissions?.place === true &&
-  entry.photo.permissions?.share === true;
+export const photoShareable = (entry) => QUOTABLE.has(entry.status) && Boolean(entry.photo) && materialsAllow(entry, ['place', 'share']);
+
+// Every material a recollection sent (words when there are any, a photo, a
+// recording) must be available and allow each use; absent ones are skipped.
+export function materialsAllow(entry, uses) {
+  const present = [
+    ...(entry.permissions ? [{ available: true, permissions: entry.permissions }] : []),
+    ...(entry.photo ? [entry.photo] : []),
+    ...(entry.voice ? [entry.voice] : []),
+  ];
+  return present.length > 0 && present.every((material) => material.available === true && uses.every((use) => material.permissions?.[use] === true));
+}
+
+// A recording can be linked to shared views only with its writer's confirmed
+// captions, every material allowing reconstruction and sharing, and while it
+// is still in use. Linking is a narrative choice, not geometry evidence.
+export const recordingShareable = (entry) => QUOTABLE.has(entry.status) && Boolean(entry.voice?.captions) && materialsAllow(entry, ['place', 'share']);
+export const RECORDING_LIMIT = 8;
+
+// Tells recordings apart before a preview: who sent it, how long it plays and
+// the start of the captions its provider wrote (plain text, as written).
+export function recordingChoiceLabel(entry) {
+  const words = (entry.voice?.captions?.cues ?? []).map((cue) => cue.text).join(' ').replace(/\s+/g, ' ').trim();
+  // A long caption is cut at a word boundary within its first 60 characters.
+  const cut = words.slice(0, 60);
+  const excerpt = words.length > 60 ? `${(cut.lastIndexOf(' ') > 30 ? cut.slice(0, cut.lastIndexOf(' ')) : cut).trimEnd()}…` : words;
+  return `Recording by ${entry.provider?.displayName || 'someone'} · ${formatMs(entry.voice?.durationMs ?? 0)} long${excerpt ? ` · captions: “${excerpt}”` : ''}`;
+}
 export const PHOTO_EVIDENCE_LIMIT = 20;
 
-export const quotable = (entry) => QUOTABLE.has(entry.status) && typeof entry.text === 'string' && entry.permissions?.place === true && entry.permissions?.share === true;
+// Its words exist, and every material it sent (words, photo, recording)
+// allows reconstruction and sharing.
+export const quotable = (entry) => QUOTABLE.has(entry.status) && typeof entry.text === 'string' && entry.text.trim() !== '' && Boolean(entry.permissions) && materialsAllow(entry, ['place', 'share']);
 
 // Every retained saved version that is still usable, newest first, then each
 // usable alternative. A version is chosen by its number, never inferred from a
@@ -68,7 +92,7 @@ export function viewChoices({ history = [], variants = [], currentVersion }) {
 export const storyMatchesView = (story, view) =>
   story.view?.kind === view.kind && (view.kind === 'version' ? story.view.version === view.version : story.view.variantId === view.variantId);
 
-export function previewProblem({ title, views, startViewId, camera, contributionIds, evidencePhotoIds }) {
+export function previewProblem({ title, views, startViewId, camera, contributionIds, evidencePhotoIds, recordings }) {
   if (!title.trim()) return 'Give the shared view a title.';
   if ([...title].length > TITLE_LIMIT) return `Keep the title to ${TITLE_LIMIT} characters or fewer.`;
   if (views.length < 1) return 'Choose at least one view to share.';
@@ -77,6 +101,8 @@ export function previewProblem({ title, views, startViewId, camera, contribution
   if (!camera) return 'Capture the camera view first, from the 3D scene above.';
   if (contributionIds.length > QUOTE_LIMIT) return `Quote ${QUOTE_LIMIT} recollections or fewer.`;
   if ((evidencePhotoIds ?? []).length > PHOTO_EVIDENCE_LIMIT) return `Show ${PHOTO_EVIDENCE_LIMIT} contributor photos or fewer.`;
+  if ((recordings ?? []).length > RECORDING_LIMIT) return `Include ${RECORDING_LIMIT} contributor recordings or fewer.`;
+  if ((recordings ?? []).some((entry) => entry.viewIds.length === 0 || !entry.targetId)) return 'For each included recording, choose the views it goes with and what it is about.';
   return null;
 }
 
@@ -145,6 +171,11 @@ export function mountShares(container, bridge) {
   const quoteList = el('div');
   const storyList = el('div');
   const photoList = el('div');
+  const recordingList = el('div');
+  // What each recording may be about: the whole place, or one object.
+  let targets = [];
+  // contributionId -> { include, viewIds:Set, targetId } chosen by the owner.
+  const recordingChoices = new Map();
   const cameraNote = el('p', { className: 'hint', textContent: 'No camera view captured yet.' });
   const captureButton = el('button', { type: 'button', className: 'secondary', textContent: 'Use the current camera view' });
   const previewButton = el('button', { type: 'button', textContent: 'Preview what visitors will see' });
@@ -181,6 +212,15 @@ export function mountShares(container, bridge) {
             'Only photos from recollections the chosen views depend on can be shown, and only where both the words and the photo allow sharing. Showing a photo is optional; a view that depends on a recollection with a photo still needs both permissions to be shared even when the photo is not shown.',
         }),
         photoList,
+      ]),
+      el('fieldset', { className: 'source-permissions' }, [
+        el('legend', { textContent: 'Contributor recordings to include (optional)' }),
+        el('p', {
+          className: 'hint',
+          textContent:
+            'Choose a recording, the views it goes with and what it is about. This links a person’s recording to the view; it does not change the scene or say the recording informed it. Only recordings with captions their writer confirmed, and whose words, photo and recording all allow reconstruction and sharing, can be included.',
+        }),
+        recordingList,
       ]),
       el('fieldset', { className: 'source-permissions' }, [
         el('legend', { textContent: 'Recorded stories to include (optional)' }),
@@ -252,6 +292,49 @@ export function mountShares(container, bridge) {
     for (const { box } of photoBoxes) box.addEventListener('change', () => discardPreview());
   }
 
+  function renderRecordings() {
+    const views = selectedViews();
+    const viewIds = new Set(views.map((view) => view.id));
+    const labels = new Map(viewBoxes.map(({ key, label }) => [idFor(key), label]));
+    const offered = (collaboration?.contributions ?? []).filter(recordingShareable);
+    for (const id of [...recordingChoices.keys()]) if (!offered.some((entry) => entry.id === id)) recordingChoices.delete(id);
+    recordingList.replaceChildren(
+      ...(offered.length
+        ? offered.map((entry) => {
+            const choice = recordingChoices.get(entry.id) ?? { include: false, viewIds: new Set(), targetId: '' };
+            // Views no longer shared are dropped from the link.
+            for (const id of [...choice.viewIds]) if (!viewIds.has(id)) choice.viewIds.delete(id);
+            if (choice.targetId && !targets.some((target) => target.id === choice.targetId)) choice.targetId = '';
+            recordingChoices.set(entry.id, choice);
+            const include = el('input', { type: 'checkbox', checked: choice.include });
+            const details = el('div', { hidden: !choice.include });
+            const viewChecks = views.map((view) => {
+              const box = el('input', { type: 'checkbox', checked: choice.viewIds.has(view.id) });
+              box.addEventListener('change', () => {
+                if (box.checked) choice.viewIds.add(view.id);
+                else choice.viewIds.delete(view.id);
+                discardPreview();
+              });
+              return el('label', {}, [box, ` ${labels.get(view.id)}`]);
+            });
+            const about = el('select', {}, [el('option', { value: '', textContent: 'Choose what it is about' }), ...targets.map((target) => el('option', { value: target.id, textContent: target.label }))]);
+            about.value = choice.targetId;
+            about.addEventListener('change', () => {
+              choice.targetId = about.value;
+              discardPreview();
+            });
+            details.append(el('p', { className: 'hint', textContent: 'Goes with these views:' }), ...viewChecks, field('About', about));
+            include.addEventListener('change', () => {
+              choice.include = include.checked === true;
+              details.hidden = !choice.include;
+              discardPreview();
+            });
+            return el('div', { className: 'share-recording' }, [el('label', {}, [include, ` ${recordingChoiceLabel(entry)}`]), details]);
+          })
+        : [el('p', { className: 'hint', textContent: 'No contributor recording can be included.' })]),
+    );
+  }
+
   function renderChoices() {
     const currentVersion = bridge.editor().version;
     const choices = viewChoices({ history, variants: collaboration?.variants ?? [], currentVersion });
@@ -264,12 +347,14 @@ export function mountShares(container, bridge) {
         renderStart();
         renderStories();
         renderPhotos();
+        renderRecordings();
         discardPreview();
       });
     }
     renderStart();
     renderStories();
     renderPhotos();
+    renderRecordings();
 
     const chosenQuotes = new Set(quoteBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id));
     const eligible = (collaboration?.contributions ?? []).filter(quotable);
@@ -282,6 +367,13 @@ export function mountShares(container, bridge) {
     for (const { box } of quoteBoxes) box.addEventListener('change', () => discardPreview());
   }
 
+  function includedRecordings() {
+    const byId = new Map((collaboration?.contributions ?? []).map((entry) => [entry.id, entry]));
+    return [...recordingChoices.entries()]
+      .filter(([id, choice]) => choice.include && byId.has(id))
+      .map(([id, choice]) => ({ contributionId: id, viewIds: [...choice.viewIds], targetId: choice.targetId, captionSha256: byId.get(id).voice.captions.sha256 }));
+  }
+
   function candidateInput() {
     return {
       title: title.value,
@@ -292,6 +384,8 @@ export function mountShares(container, bridge) {
       storyIds: storyBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id),
       // Optional: sent only when a contributor photo is chosen.
       ...(photoBoxes.some(({ box }) => box.checked === true) ? { evidencePhotoIds: photoBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id) } : {}),
+      // Optional: sent only when a recording is included, with its pinned captions.
+      ...(includedRecordings().length ? { recordings: includedRecordings() } : {}),
       synthetic: synthetic.checked === true,
     };
   }
@@ -488,8 +582,18 @@ export function mountShares(container, bridge) {
   let choicesToken = 0;
   async function loadChoices() {
     const token = ++choicesToken;
-    const [collab, versions, saved] = await Promise.all([request(`${bridge.jobUrl}/collaboration`), request(`${bridge.jobUrl}/history`), request(`${bridge.jobUrl}/stories`)]);
+    const [collab, versions, saved, scene] = await Promise.all([request(`${bridge.jobUrl}/collaboration`), request(`${bridge.jobUrl}/history`), request(`${bridge.jobUrl}/stories`), request(bridge.jobUrl)]);
     if (disposed || token !== choicesToken) return;
+    // The objects a recording can be about; the whole place is always offered.
+    const objects = Array.isArray(scene.body?.objects) ? scene.body.objects : null;
+    targets = [
+      { id: 'place', label: 'This place as a whole' },
+      ...(objects
+        ? objects.map((object, index) => ({ id: object.id, label: `${index === 0 ? 'A' : 'B'}: ${object.label}` }))
+        : scene.ok && Array.isArray(scene.body?.box)
+          ? [{ id: 'selected-foreground', label: 'The selected object' }]
+          : []),
+    ];
     collaboration = collab.ok && Array.isArray(collab.body?.variants) ? collab.body : { variants: [], contributions: [] };
     history = versions.ok && Array.isArray(versions.body) ? versions.body : [];
     stories = saved.ok && Array.isArray(saved.body?.stories) ? saved.body.stories : [];

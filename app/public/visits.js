@@ -55,6 +55,7 @@ export function visitSource(token) {
     check: async (signal) => (await fetch('/api/visit', init(signal, 'HEAD'))).ok,
     asset: (viewId, name, signal) => fetch(`/api/visit/assets/${encodeURIComponent(viewId)}/${name}`, init(signal)),
     storyAudio: (storyId, signal) => fetch(`/api/visit/stories/${encodeURIComponent(storyId)}/audio.wav`, init(signal)),
+    recordingAudio: (recordingId, signal) => fetch(`/api/visit/recordings/${encodeURIComponent(recordingId)}/audio.wav`, init(signal)),
   };
 }
 
@@ -71,6 +72,7 @@ export function previewSource(sharesUrl, previewId) {
     check: async (signal) => (await fetch(url, init(signal))).ok,
     asset: (viewId, name, signal) => fetch(`${url}/assets/${encodeURIComponent(viewId)}/${name}`, init(signal)),
     storyAudio: (storyId, signal) => fetch(`${url}/stories/${encodeURIComponent(storyId)}/audio.wav`, init(signal)),
+    recordingAudio: (recordingId, signal) => fetch(`${url}/recordings/${encodeURIComponent(recordingId)}/audio.wav`, init(signal)),
   };
 }
 
@@ -255,7 +257,40 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
             ...(player ? [player.element] : []),
           ]);
         }),
+        ...renderRecordings(viewId),
       );
+    };
+    // Contributor recordings the owner linked to this view: about the whole
+    // place (kept under any object choice) or one object. Each is a person's
+    // own recording with captions they wrote, shown as such.
+    const contributorRecordings = Array.isArray(manifest.contributorRecordings) ? manifest.contributorRecordings : [];
+    const renderRecordings = (viewId) => {
+      const linked = contributorRecordings.filter(
+        (recording) => Array.isArray(recording.viewIds) && recording.viewIds.includes(viewId) && (!objectId || recording.target?.id === 'place' || recording.target?.id === objectId),
+      );
+      if (!linked.length) return [];
+      return [
+        el('h3', { textContent: 'Contributor recordings for this view' }),
+        ...(comparing ? [el('p', { className: 'hint', textContent: 'Recordings can be played after you leave the comparison with the photograph.' })] : []),
+        ...linked.map((recording) => {
+          const player = comparing
+            ? null
+            : createStoryPlayer({
+                story: { title: recording.title, cues: recording.cues ?? [], durationMs: recording.durationMs, audio: recording.audio },
+                fetchAudio: (signal) => source.recordingAudio(recording.id, signal),
+              });
+          if (player) players.push(player);
+          return el('div', { className: 'visit-story' }, [
+            el('p', { className: 'space-choice-label', textContent: recording.title }),
+            el('p', { className: 'hint', textContent: `${recording.target?.label ?? 'About this place'} · ${recording.label}` }),
+            el('p', {
+              className: 'hint',
+              textContent: `Recording by ${recording.providerLabel || 'a contributor'}. Captions written by ${recording.captionAuthorLabel || recording.providerLabel || 'the contributor'}; not a transcript. Nothing plays until you press Play.`,
+            }),
+            ...(player ? [player.element] : []),
+          ]);
+        }),
+      ];
     };
     // Only photos related to the current view, collapsed until asked for and
     // fetched only then. Each is a contributor's photo, shown as such.

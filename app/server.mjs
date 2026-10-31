@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AccessStore, isToken } from './access.mjs';
 import { CollaborationStore } from './collaboration.mjs';
-import { CONTRIBUTION_PHOTO_LIMITS, pythonPhotoDecoder, readPhotoForm } from './contribution-photos.mjs';
+import { CONTRIBUTION_BUNDLE_LIMITS, CONTRIBUTION_PHOTO_LIMITS, pythonPhotoDecoder, readBundleForm, readPhotoForm } from './contribution-photos.mjs';
+import { createRecordingPreparer } from './contribution-recordings.mjs';
 import { ShareStore, UNAVAILABLE as VISIT_UNAVAILABLE, isVisitToken } from './shares.mjs';
 import { createAudioDecoder } from './audio-derivative.mjs';
 import { INTAKE_LIMITS, IntakeStore } from './intakes.mjs';
@@ -89,8 +90,9 @@ const RELATIONSHIP_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/re
 const OBJECTS_CONFIRM_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/confirm$/;
 const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
 const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/(contributions|collaboration)$/;
-const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo)$/;
+const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo|recording\.wav)$/;
 const CONTRIBUTION_PHOTO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/photo$/;
+const CONTRIBUTION_BUNDLE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/bundle$/;
 const ERA_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/era$/;
 const NOT_FOUND = 'This scene could not be found.';
 const SHARES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares$/;
@@ -100,6 +102,8 @@ const PREVIEW_ASSET_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/s
 const SHARE_REVOKE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/([^/]+)\/revoke$/;
 const VISIT_ASSET_PATH = /^\/api\/visit\/assets\/([^/]+)\/([^/]+)$/;
 const VISIT_STORY_PATH = /^\/api\/visit\/stories\/([^/]+)\/audio\.wav$/;
+const VISIT_RECORDING_PATH = /^\/api\/visit\/recordings\/([^/]+)\/audio\.wav$/;
+const PREVIEW_RECORDING_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews\/([^/]+)\/recordings\/([^/]+)\/audio\.wav$/;
 const PREVIEW_STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews\/([^/]+)\/stories\/([^/]+)\/audio\.wav$/;
 const STORIES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories$/;
 const STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)$/;
@@ -331,6 +335,7 @@ export function createAppServer({
   accessStore = new AccessStore({ dataDir }),
   audioDecoder = createAudioDecoder(),
   contributionPhotoDecoder = pythonPhotoDecoder(),
+  recordingPreparer = createRecordingPreparer(),
   mediaVerifier = createMediaVerifier(),
 } = {}) {
   const store = new DraftStore(dataDir);
@@ -338,7 +343,7 @@ export function createAppServer({
   const reconstructions = new ReconstructionStore({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage,
   });
-  const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder });
+  const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder, prepareRecording: recordingPreparer });
   const stories = new StoryStore({ reconstructions, audioDecoder });
   const intakes = new IntakeStore({ dataDir, drafts: store, verifier: mediaVerifier });
   const shares = new ShareStore({ reconstructions, stories });
@@ -350,9 +355,11 @@ export function createAppServer({
     const unavailable = () => sendJson(res, 404, { error: VISIT_UNAVAILABLE });
     const assetMatch = VISIT_ASSET_PATH.exec(pathname);
     const storyMatch = VISIT_STORY_PATH.exec(pathname);
+    const recordingMatch = VISIT_RECORDING_PATH.exec(pathname);
     const token = visitToken(req);
     const reading = req.method === 'GET' || req.method === 'HEAD';
-    const known = pathname === '/api/visit' || (assetMatch && sharedAsset(assetMatch[1], assetMatch[2])) || (storyMatch && UUID.test(storyMatch[1]));
+    const known = pathname === '/api/visit' || (assetMatch && sharedAsset(assetMatch[1], assetMatch[2])) || (storyMatch && UUID.test(storyMatch[1]))
+      || (recordingMatch && UUID.test(recordingMatch[1]));
     if (!reading || !token || !known) {
       unavailable();
       return;
@@ -360,6 +367,7 @@ export function createAppServer({
     try {
       if (assetMatch) sendAsset(req, res, await shares.visitAsset(token, assetMatch[1], assetMatch[2]));
       else if (storyMatch) sendAsset(req, res, await shares.visitStoryAudio(token, storyMatch[1]));
+      else if (recordingMatch) sendAsset(req, res, await shares.visitRecordingAudio(token, recordingMatch[1]));
       else sendJson(res, 200, await shares.visit(token));
     } catch (error) {
       if (res.headersSent) {
@@ -518,6 +526,18 @@ export function createAppServer({
       sendJson(res, 200, await collaboration.submitPhoto(draftId, jobId, current, form));
       return;
     }
+    // Writing, an optional photo and an optional recording. Scope and the
+    // request origin are checked before any media is read.
+    const bundleSubmission = CONTRIBUTION_BUNDLE_PATH.exec(pathname);
+    if (bundleSubmission) {
+      const [, draftId, jobId] = bundleSubmission;
+      const current = await requireScope(draftId);
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
+      const form = await readBundleForm(await readForm(req, CONTRIBUTION_BUNDLE_LIMITS.requestBytes));
+      sendJson(res, 200, await collaboration.submitBundle(draftId, jobId, current, form));
+      return;
+    }
     const sceneCollaboration = SCENE_COLLABORATION_PATH.exec(pathname);
     const contributionAction = CONTRIBUTION_ACTION_PATH.exec(pathname);
     const eraMatch = ERA_PATH.exec(pathname);
@@ -527,7 +547,7 @@ export function createAppServer({
       const current = await requireScope(draftId);
       const ownerOnly = eraMatch || fourth === 'review';
       if (ownerOnly && current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
-      const photoRead = fourth === 'photo';
+      const photoRead = fourth === 'photo' || fourth === 'recording.wav';
       const writing = !photoRead && req.method === 'POST' && (!sceneCollaboration || third === 'contributions');
       if (!((sceneCollaboration || photoRead) && reading) && !writing) throw new RequestError(405, 'Method not allowed.');
       if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
@@ -542,7 +562,7 @@ export function createAppServer({
       }
       if (!UUID.test(third)) throw new RequestError(404, eraMatch ? 'This version could not be found.' : 'This contribution could not be found.');
       if (photoRead) {
-        sendAsset(req, res, await collaboration.photo(draftId, jobId, current, third));
+        sendAsset(req, res, await (fourth === 'photo' ? collaboration.photo(draftId, jobId, current, third) : collaboration.recording(draftId, jobId, current, third)));
         return;
       }
       if (eraMatch) {
@@ -551,11 +571,12 @@ export function createAppServer({
         return;
       }
       if (fourth === 'review') {
-        // photoReviewed is an optional extra key; the store decides when it is required.
+        // photoReviewed and voiceReviewed are optional extra keys; the store
+        // decides when each is required.
         const raw = await readJsonBody(req);
         const keys = ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'];
-        const reviewed = raw !== null && typeof raw === 'object' && !Array.isArray(raw) && Object.hasOwn(raw, 'photoReviewed');
-        const body = strictBody(raw, reviewed ? [...keys, 'photoReviewed'] : keys);
+        const extra = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? ['photoReviewed', 'voiceReviewed'].filter((key) => Object.hasOwn(raw, key)) : [];
+        const body = strictBody(raw, [...keys, ...extra]);
         sendJson(res, 200, await collaboration.review(draftId, jobId, current, third, body));
         return;
       }
@@ -611,6 +632,14 @@ export function createAppServer({
         return;
       }
       throw new RequestError(405, 'Method not allowed.');
+    }
+    const previewRecordingMatch = PREVIEW_RECORDING_PATH.exec(pathname);
+    if (previewRecordingMatch) {
+      const [, draftId, jobId, previewId, publicId] = previewRecordingMatch;
+      if (![draftId, jobId, previewId, publicId].every((id) => UUID.test(id))) throw new RequestError(404, 'Not found.');
+      if (!reading) throw new RequestError(405, 'Method not allowed.');
+      sendAsset(req, res, await shares.previewRecordingAudio(draftId, jobId, owner, previewId, publicId));
+      return;
     }
     const previewStoryMatch = PREVIEW_STORY_PATH.exec(pathname);
     if (previewStoryMatch) {

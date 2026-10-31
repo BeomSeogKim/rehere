@@ -8,12 +8,28 @@ separate access and recovery card described in [the access guide](ACCESS.md).
 
 ## Submit and review
 
-A contributor chooses a ready scene and submits a written recollection,
-optionally with one JPEG or PNG. Writing and photo have separate
-place-construction, model-processing and visitor-sharing grants, all initially
-off. An optional description of the time as remembered stays an attributed
-claim; it does not set a capture date or create an era. Recording contributions
-are not yet supported.
+A contributor chooses a ready scene and submits writing, a recording, or both,
+optionally with one JPEG or PNG. A photo alone is insufficient. Each present
+material has separate place-construction, model-processing and visitor-sharing
+grants, all initially off. An optional description of the time as remembered
+stays an attributed claim; it does not set a capture date or create an era.
+
+Recording offers Record, Stop, listening and Discard. No microphone request is
+made until Record is pressed, and declining it does not block writing or photo
+submission. The recorder stops at 4:59; decoded audio must fit within five
+minutes and 50 MiB. A photo and recording together must also fit within the
+64 MiB request limit. Changing places stops capture. A take and its facts stay
+with their original place; another place starts without that take or its grants.
+
+The server checks the actual WebM, Ogg or MP4 bytes through one strict local
+decode. The immutable original stays private; a separately checksummed 16 kHz
+mono WAV is used for listening. No audio or captions are sent to a model.
+Optional human-written listening captions stay separate from the recording
+and independent writing. They are not automatic or verified transcription.
+Private submission and listening work without captions; visitor sharing needs
+confirmed captions. Post-submission caption correction is not yet supported.
+The provider can listen again from their own received-contributions list;
+the owner has a separate private review player. Neither starts automatically.
 
 A photo keeps its immutable original and a separate inspection JPEG, with
 checksums and a source relationship. Attribution comes from the signed-in
@@ -57,6 +73,14 @@ and owner's manual interpretation remain distinct. This does not automatically
 match the second image to an object, register its camera or recover a measured
 position. A different viewpoint can be held for review without inventing an era.
 
+A recording-backed correction or alternative additionally needs an explicit
+listening acknowledgment. The interface enables it after playback successfully
+starts; this does not prove completed listening, attention or historical truth.
+Unavailable material can still be held or rejected. An owner can separately
+link an eligible recording to selected visitor views and an object or the whole
+place, without changing geometry. That narrative association does not claim
+the recording informed the reconstruction.
+
 A changed saved version requires another review. An unconfirmed response keeps
 the prepared request for an exact retry; reusing a request ID with different
 input is refused. Switching views or signing out clears temporary previews.
@@ -65,10 +89,12 @@ Rendering failure is not counted as a completed spatial preview.
 An uncertain submission keeps its request ID. The page checks the provider's
 own submissions after a reload before starting another. Browser persistence
 contains only scoped pending IDs, never writing, photos or source settings.
-If no receipt can be confirmed after a reload, retrying the same attempt needs
-the original text, settings and file again. An explicit new submission is
-separate from that retry. Closing the page aborts client requests but does not
-prove that accepted server work was cancelled.
+An uncertain attempt keeps its exact input only while the page remains open.
+After reload, recovery can only look up its receipt; current form contents
+cannot recreate the earlier request. Sending new material requires an explicit
+new submission with a new request ID; the earlier outcome may remain unknown.
+Closing the page aborts client requests but does not prove accepted server work
+was cancelled.
 
 ## Alternatives and explicit time
 
@@ -92,16 +118,17 @@ model permission for every inherited contribution, because a transform can
 carry information from that memory even without its words. Sharing permission
 is recorded separately; having an edited scene is not a sharing grant.
 
-The first photo-backed workflow treats writing and photo as one reviewed bundle.
-Every spatial use needs both place grants, hosted processing also needs both
-model grants, and sharing needs both share grants. Hiding the photo or omitting
-the quotation does not remove the dependency. Component withdrawal is not
-supported; the provider withdraws the whole bundle.
+Writing, photo and recording form one reviewed bundle. Construction, model
+processing and visitor sharing require the corresponding grant from every
+present material; absent writing has no
+writing grant. Hiding a photo, omitting a quotation or selecting only the
+recording does not remove the bundle's restrictions. Component withdrawal is
+not supported; the provider withdraws the whole bundle.
 
 Only the providing principal can withdraw their contribution. Closing an old
 invitation does not erase that principal or remove this right. Key recovery
-preserves the identity. Withdrawal redacts the wording from subsequent API
-responses and prevents further use. It does not claim to erase copies already
+preserves the identity. Withdrawal redacts writing and captions from subsequent
+API responses, blocks listening copies and prevents further use. It does not claim to erase copies already
 downloaded or remove private stored originals from disk.
 
 Dependent alternatives become unavailable. If the current scene depends on the
@@ -117,11 +144,16 @@ same current grants and withdrawals even when their versions are fixed.
 These records use the existing reconstruction manifest and mutation queue.
 Adoption and withdrawal publish one atomic manifest within one server process.
 There is no multi-process coordination or power-loss guarantee. Referenced
-photo files are checked when the manifest is read; successful hashes may be
-reused while the file identity, size and nanosecond modification/change times
+photo and recording files are checked when the manifest is read; successful
+hashes may be reused while the file identity, size and nanosecond modification/change times
 stay unchanged. Corruption with an unchanged stat identity can escape that
-cache until restart. Serving an inspection image always checks its bytes.
-Unavailable photo files block dependent spatial uses without claiming a
+cache until restart. Serving an inspection image or recording always checks
+its bytes.
+Unavailable media files block dependent uses without claiming a
 provider withdrawal. Repaired files can be checked again.
-Model-assisted contribution review, recording contributions and general
-multi-view reconstruction remain unfinished.
+One contribution-media preparation runs at a time; another request receives a
+busy response. A published exact retry reuses its receipt without decoding
+again. Photo and voice preparation are sequential outside the scene mutation
+queue; their files and contribution publish together.
+Model-assisted contribution review and general multi-view reconstruction remain
+unfinished.

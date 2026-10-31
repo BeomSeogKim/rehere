@@ -20,8 +20,20 @@ export const CONTRIBUTION_PHOTO_LIMITS = Object.freeze({
   timeoutMs: 15_000,
 });
 
+// Writing, an optional photo and an optional recording in one request.
+export const CONTRIBUTION_BUNDLE_LIMITS = Object.freeze({
+  payloadBytes: 128 * 1024,
+  requestBytes: 64 * MIB,
+  photoBytes: 20 * MIB,
+  voiceBytes: 50 * MIB,
+});
+const VOICE_UNREADABLE = 'The recording could not be read. Record it again.';
+
 export const REVIEW_NAME = 'review.jpg';
 const ORIGINAL_NAMES = new Set(['original.jpg', 'original.png']);
+// A contributed recording's stored files, beside the photo files.
+export const PLAYBACK_NAME = 'playback.wav';
+export const VOICE_ORIGINAL_NAMES = Object.freeze({ webm: 'voice-original.webm', ogg: 'voice-original.ogg', m4a: 'voice-original.m4a' });
 const SPATIAL_DIR = fileURLToPath(new URL('./spatial/', import.meta.url));
 const SCRIPT = path.join(SPATIAL_DIR, 'prepare_contribution_photo.py');
 // Non-secret variables only; credentials in the server environment never reach the decoder.
@@ -65,6 +77,49 @@ export async function readPhotoForm(form) {
   const size = imageSize(detected.type, bytes);
   if (!size) throw fail(400, PHOTO_UNREADABLE);
   return { body, bytes, type: detected.type, extension: detected.extension, ...size };
+}
+
+// Reads the bundle form: one JSON payload string and at most one photo and
+// one recording file, nothing else. File names and declared types are never
+// used; a file is present exactly when the payload describes it, which the
+// caller checks once the payload is parsed. Only cheap checks happen here.
+export async function readBundleForm(form) {
+  const names = [...form.keys()];
+  const allowed = new Set(['payload', 'photo', 'voice']);
+  if (!names.includes('payload') || names.some((name) => !allowed.has(name)) || new Set(names).size !== names.length) throw fail(400, UNREADABLE);
+  const payload = form.get('payload');
+  if (typeof payload !== 'string' || Buffer.byteLength(payload, 'utf8') > CONTRIBUTION_BUNDLE_LIMITS.payloadBytes) throw fail(400, UNREADABLE);
+  let body;
+  try {
+    body = JSON.parse(payload);
+  } catch {
+    throw fail(400, UNREADABLE);
+  }
+  let photo = null;
+  if (names.includes('photo')) {
+    const file = form.get('photo');
+    if (typeof file === 'string') throw fail(400, UNREADABLE);
+    if (file.size === 0) throw fail(400, PHOTO_UNREADABLE);
+    if (file.size > CONTRIBUTION_BUNDLE_LIMITS.photoBytes) throw fail(413, `The photo must be ${CONTRIBUTION_BUNDLE_LIMITS.photoBytes / MIB} MB or smaller.`);
+    const bytes = Buffer.from(await file.arrayBuffer());
+    const detected = detectMedia('photo', bytes);
+    if (detected.error) throw fail(415, detected.error);
+    const size = imageSize(detected.type, bytes);
+    if (!size) throw fail(400, PHOTO_UNREADABLE);
+    photo = { bytes, type: detected.type, extension: detected.extension, ...size };
+  }
+  let voice = null;
+  if (names.includes('voice')) {
+    const file = form.get('voice');
+    if (typeof file === 'string') throw fail(400, UNREADABLE);
+    if (file.size === 0) throw fail(400, VOICE_UNREADABLE);
+    if (file.size > CONTRIBUTION_BUNDLE_LIMITS.voiceBytes) throw fail(413, `The recording must be ${CONTRIBUTION_BUNDLE_LIMITS.voiceBytes / MIB} MB or smaller.`);
+    const bytes = Buffer.from(await file.arrayBuffer());
+    const detected = detectMedia('voice', bytes);
+    if (detected.error) throw fail(415, VOICE_UNREADABLE);
+    voice = { bytes, type: detected.type, extension: detected.extension };
+  }
+  return { body, photo, voice };
 }
 
 const exactKeys = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -208,12 +263,16 @@ export const PHOTO_ATTESTATIONS = Symbol('contributionPhotoAttestations');
 
 // Binds an attestation to the exact place, scene, contribution, provider and
 // photo records, so a replaced or newly appended record is never covered.
+// The attestation covers every stored material of the bundle: the photo and
+// its inspection copy, and the recording and its playback copy.
 export function photoFingerprint(draftId, jobId, contribution) {
-  return sha256(JSON.stringify([draftId, jobId, contribution.id, contribution.principalId, contribution.photo]));
+  return sha256(JSON.stringify([draftId, jobId, contribution.id, contribution.principalId, contribution.photo ?? null, contribution.voice ?? null]));
 }
 
+// True when the bundle has no stored files, or every one was verified for
+// exactly these records. The name is kept from the photo-only unit.
 export function photoAttested(manifest, contribution) {
-  if (!contribution.photo) return true;
+  if (!contribution.photo && !contribution.voice) return true;
   const entry = manifest[PHOTO_ATTESTATIONS]?.get(contribution.id);
   return entry?.available === true && entry.fingerprint === photoFingerprint(manifest.draftId, manifest.id, contribution);
 }
@@ -242,17 +301,25 @@ async function verifyFile(file, expected) {
 }
 
 async function bundleAvailable(jobDir, contribution) {
-  const { source, review } = contribution.photo;
-  if (!ORIGINAL_NAMES.has(source?.name) || review?.name !== REVIEW_NAME) return false;
   const dir = photoDir(jobDir, contribution.id);
-  return (await verifyFile(path.join(dir, source.name), source)) && verifyFile(path.join(dir, REVIEW_NAME), review);
+  if (contribution.photo) {
+    const { source, review } = contribution.photo;
+    if (!ORIGINAL_NAMES.has(source?.name) || review?.name !== REVIEW_NAME) return false;
+    if (!(await verifyFile(path.join(dir, source.name), source)) || !(await verifyFile(path.join(dir, REVIEW_NAME), review))) return false;
+  }
+  if (contribution.voice) {
+    const { source, playback } = contribution.voice;
+    if (!Object.values(VOICE_ORIGINAL_NAMES).includes(source?.name) || playback?.name !== PLAYBACK_NAME) return false;
+    if (!(await verifyFile(path.join(dir, source.name), source)) || !(await verifyFile(path.join(dir, PLAYBACK_NAME), playback))) return false;
+  }
+  return true;
 }
 
-// Attests every photo bundle that is not withdrawn. Any read error is unavailable.
+// Attests every bundle with stored files that is not withdrawn. Any read error is unavailable.
 export async function attestPhotos(manifest, draftId, jobId, jobDir) {
   const attestations = new Map();
   for (const contribution of manifest.collaboration?.contributions ?? []) {
-    if (!contribution?.photo || contribution.withdrawnAt !== null) continue;
+    if ((!contribution?.photo && !contribution?.voice) || contribution.withdrawnAt !== null) continue;
     const available = await bundleAvailable(jobDir, contribution).catch(() => false);
     attestations.set(contribution.id, { fingerprint: photoFingerprint(draftId, jobId, contribution), available });
   }
@@ -264,7 +331,17 @@ export async function attestPhotos(manifest, draftId, jobId, jobDir) {
 // longer match the record.
 export async function readReviewPhoto(jobDir, contribution, expected = contribution.photo.review) {
   if (contribution.photo.review.name !== REVIEW_NAME) return null;
-  const file = path.join(photoDir(jobDir, contribution.id), REVIEW_NAME);
+  return readChecked(path.join(photoDir(jobDir, contribution.id), REVIEW_NAME), expected);
+}
+
+// The playback WAV bytes for serving, rehashed on every read; null when they
+// no longer match the record.
+export async function readPlayback(jobDir, contribution, expected = contribution.voice.playback) {
+  if (contribution.voice.playback.name !== PLAYBACK_NAME) return null;
+  return readChecked(path.join(photoDir(jobDir, contribution.id), PLAYBACK_NAME), expected);
+}
+
+async function readChecked(file, expected) {
   try {
     const info = await lstat(file);
     if (!info.isFile() || info.size !== expected.size) return null;

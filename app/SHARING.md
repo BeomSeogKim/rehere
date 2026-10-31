@@ -20,6 +20,13 @@ verified history. The provider's original, source reference and raw date
 metadata stay private. The inspection JPEG removes file metadata but still
 shows visible people and text. Review the actual pixels before issuing a link.
 
+Contributor recordings are selected separately, with no default selection.
+Choose the saved views and the object or whole place each recording is about.
+The recording needs confirmed human-written listening captions. Its attribution
+and captions appear alongside the player; they are not automatic transcription
+or verified history. A submitted recording can be linked without adopting a
+spatial change. This association does not make it geometry evidence.
+
 A current saved version has unknown time. Explicitly selected immutable
 alternatives can carry the owner's separate time assertion. If an assertion
 relates one alternative to another, both must be selected. A disagreement does
@@ -32,10 +39,9 @@ result's dependencies or bypass those grants. Recollections that allow manual
 construction and sharing can be used without a model-processing grant; they
 cannot thereby authorize later hosted processing.
 
-For a contribution containing a photo, both the writing and photo need place
-and share grants. Omitting the image does not make its dependent arrangement
-independent or bypass either grant. Missing or corrupt contributed photos
-also make their dependent snapshots unavailable.
+For a contribution bundle, all present writing, photo and recording need place
+and share grants. Omitting a material does not bypass its grant. Missing or
+corrupt contributed media also make their dependent snapshots unavailable.
 
 The preview is an actual read-only visitor screen, not a live link. It expires
 after fifteen minutes. Confirm that visitors may see the chosen reconstruction
@@ -78,6 +84,10 @@ A link lasts up to seven days or until revoked. It preserves its selected
 transforms, source-derived assets, quotations, time assertions and camera.
 Selected contributor inspection photos are pinned by checksum with the views
 they support; later submissions do not silently replace them.
+Selected contributor recordings pin the audio and confirmed captions, with
+their chosen views and object or place association. Their live rights checks
+apply even when they did not inform a view's geometry. Owner-recorded stories
+and contributor recordings keep separate provenance.
 For a [two-object scene](OBJECTS.md) it keeps both objects' transforms and the
 relationship rule of each selected arrangement, plus the owner's object names
 and source boxes so visitors can tell the objects apart.
@@ -121,8 +131,9 @@ requires fresh authorization. Late requests cannot reopen a stopped view.
 Already delivered bytes or recordings made outside the app cannot be recalled.
 
 Spatial views, permitted writing and explicitly selected [recorded stories with
-captions](STORIES.md) can be shared. A story stays with its exact saved view;
-private edits do not rebind it. Hosted operation is not connected. Owners can narrow
+captions](STORIES.md) and captioned contributor recordings can be shared.
+A story stays with its exact saved view; private edits do not rebind it.
+Hosted operation is not connected. Owners can narrow
 original-source grants or stop their use through [source controls](SOURCE-USES.md);
 current restrictions override every affected frozen snapshot. One server process
 owns the data directory; no multi-server or power-loss guarantee is claimed.

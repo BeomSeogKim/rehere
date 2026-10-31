@@ -154,7 +154,7 @@ describe('contributor screen', () => {
   it('uses only the scoped place list and own recollections, with every use unchecked', async () => {
     const ui = await mount();
     assert.deepEqual(requests.map((r) => r.url), ['/api/contributor/places', `${JOB_URL}/collaboration`]);
-    assert.equal(ui.checkboxes().length, 6, 'three uses for the words and three for an optional photo');
+    assert.equal(ui.checkboxes().length, 10, 'three uses each for the words, an optional photo and an optional recording, and the caption confirmation');
     assert.ok(ui.checkboxes().every((box) => !box.checked));
     assert.equal(ui.find((node) => node.tag === 'input' && node.type === 'file').length, 1, 'an optional photo, sent only with the recollection');
   });

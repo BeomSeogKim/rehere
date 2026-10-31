@@ -82,7 +82,9 @@ async function readBounded(response, limit) {
 
 // story: { title, cues:[{startMs,endMs,text}], durationMs, audio:{type,size} }.
 // fetchAudio(signal) -> Response from the caller's authorized fetch.
-export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story') }) {
+// onPlaying() is called each time this player's current play() has actually
+// started, never for a stale or abandoned one.
+export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story'), onPlaying = null }) {
   let generation = 0;
   let controller = null;
   let url = null;
@@ -105,7 +107,7 @@ export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story') }
     el('div', { className: 'actions space-camera' }, [play, pause, stop]),
     status,
     now,
-    el('p', { className: 'hint', textContent: story.cues.length ? 'Captions (written by a person, not checked by Rehere):' : 'No captions are available for this recording.' }),
+    el('p', { className: 'hint', textContent: story.cues.length ? 'Captions (written by a person, not checked by Rehere):' : 'No captions supplied.' }),
     el('ol', { className: 'story-cues' }, cueItems),
   ]);
 
@@ -162,6 +164,7 @@ export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story') }
     pause.disabled = false;
     stop.disabled = false;
     status.textContent = 'Playing.';
+    onPlaying?.();
   }
 
   async function start() {

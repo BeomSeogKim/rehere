@@ -4,8 +4,9 @@ One server instance has one private workspace owner. Credentials establish
 possession of that authority, not a verified name or relationship. Scoped
 contributors have separate credentials; enrolling one does not give them the
 owner's source files or editing APIs. Enrolled contributors can submit their
-own [written recollections](COLLABORATION.md) for review. [Visitor links](SHARING.md)
-provide a separate read-only capability without an account.
+own [written or recorded recollections](COLLABORATION.md) for review.
+[Visitor links](SHARING.md) provide a separate read-only capability without an
+account.
 
 ## First setup
 

@@ -42,13 +42,16 @@ model reconstruction from one photograph, not a complete room or calibrated
 geometry. A scene can instead hold exactly two named objects that are confirmed,
 moved and related separately; see [two objects](OBJECTS.md).
 
-Scoped contributors can submit written recollections with an optional photo.
-The photo retains its own original, source facts and default-off uses; private
-review and explicitly selected visitor evidence use a metadata-stripped copy.
+Scoped contributors can submit writing, a real recording, or both, with an
+optional photo. Each material retains its own original, source facts and
+default-off uses. Photo inspection uses a metadata-stripped copy; recordings
+use a locally decoded listening copy. Human-written listening captions are
+optional for private review and required for explicitly selected visitor audio.
 Owners can preview a manual change, adopt it or preserve an alternative, and
-record a separate
-explicit time assertion. Withdrawal blocks dependent spatial uses. See the
-[collaboration guide](COLLABORATION.md) for grants, review and restoration.
+record a separate explicit time assertion. Recordings can also be linked to a
+visitor view and object or place without changing geometry. Withdrawal blocks
+dependent uses. See the [collaboration guide](COLLABORATION.md) for grants,
+review and restoration.
 
 Recorded stories connect a permitted imported recording to an explicitly chosen
 saved arrangement and its foreground object, or one named object of a
@@ -57,9 +60,9 @@ Human-supplied captions
 and provider attribution accompany a converted playback copy, with explicit
 visitor selection and current withdrawal checks. See [recorded stories](STORIES.md).
 
-Not included: automatic transcription, multi-view alignment, voice
-contributions, hosted account integration, and recovery of input that never
-reached the server.
+Not included: automatic transcription, post-submission contributor-caption
+correction, multi-view alignment, hosted account integration, and recovery of
+input that never reached the server.
 
 Saved visitor snapshots can include selected arrangements and permitted written
 recollections. Preview the actual visitor screen before issuing a local link;
@@ -340,8 +343,9 @@ decoded PCM timestamps from sample counts, without changing the samples, so a
 valid browser recording is not refused for an output-muxer timestamp warning.
 Extra tracks are not checked.
 Pipe-only MP4 decoding cannot seek to a remote index; some end-index files may
-need to be recorded again. Synthetic-oscillator MediaRecorder samples from
-Chrome WebM and Safari WebM/MP4 exercise encoding compatibility; they are not
+need to be recorded again. Short samples and samples lasting about five minutes,
+generated with an oscillator through Chrome WebM and Safari WebM/MP4
+MediaRecorder, exercise encoding compatibility; they are not
 real microphone tests. Firefox remains unverified. The browser stops at 4:59,
 but a delayed timer can still
 produce an overlong file that the server refuses.

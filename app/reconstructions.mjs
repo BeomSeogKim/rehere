@@ -282,7 +282,7 @@ function assertReplayUsable(manifest, version) {
 // left by an interrupted submission, or a folder renamed before its manifest
 // write failed. Referenced folders are never touched.
 async function sweepContributionPhotos(jobDir, manifest) {
-  const referenced = new Set((manifest.collaboration?.contributions ?? []).filter((item) => item?.photo).map((item) => item.id));
+  const referenced = new Set((manifest.collaboration?.contributions ?? []).filter((item) => item?.photo || item?.voice).map((item) => item.id));
   let names;
   try {
     names = await readdir(contributionsDir(jobDir));
@@ -418,9 +418,9 @@ export class ReconstructionStore {
     // The one story decode in progress, set and cleared by the story store:
     // { draftId, sourceIds, controller, done }.
     this.activeStory = null;
-    // The one contributor photo being prepared, set and cleared by the
-    // collaboration store: { controller, done }.
-    this.activePhoto = null;
+    // The one contributed bundle whose photo or recording is being prepared,
+    // set and cleared by the collaboration store: { controller, done }.
+    this.activeContributionMedia = null;
     this.rootDir = path.join(dataDir, 'reconstructions');
     this.stagingDir = path.join(dataDir, 'reconstruction-staging');
     this.queue = Promise.resolve();
@@ -1276,8 +1276,8 @@ export class ReconstructionStore {
     this.active?.controller.abort();
     this.activeProposal?.controller.abort();
     this.activeStory?.controller.abort();
-    this.activePhoto?.controller.abort();
+    this.activeContributionMedia?.controller.abort();
     await this.serialize(() => {});
-    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activePhoto?.done]);
+    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done]);
   }
 }

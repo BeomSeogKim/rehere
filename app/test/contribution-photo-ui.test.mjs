@@ -212,7 +212,7 @@ describe('contributor photo bundle', () => {
     assert.notEqual(posts(`${JOB_URL}/contributions/photo`)[2].body.requestId, first.body.requestId, 'only an explicit new submission gets a new ID');
   });
 
-  it('after a reload, settles a pending ID from the own record, or explains how to retry it exactly', async () => {
+  it('after a reload, settles a pending ID from the own record only, and sends new writing or a photo only as a new submission', async () => {
     storage.set(STORE_KEY, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee');
     const found = await mount([contribution({ requestId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' })]);
     await settle();
@@ -223,12 +223,23 @@ describe('contributor photo bundle', () => {
     storage.set(STORE_KEY, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee');
     const missing = await mount([]);
     await settle();
-    assert.match(missing.ui.message(), /no record of your earlier recollection yet\. To retry it exactly, enter the same words and settings and choose the same photo/);
+    assert.match(missing.ui.message(), /no record of your earlier recollection yet; it may still arrive\. You can check again, or start a new submission/);
+    assert.doesNotMatch(missing.ui.message(), /retry it exactly|same words/);
+    // New writing and a new photo are never sent under the restored ID.
     missing.fill();
-    routes[`POST ${JOB_URL}/contributions`] = () => json(201, contribution({ photo: null }));
-    missing.ui.button('Send again (same request)').dispatch('click');
+    await missing.choose(jpeg());
+    routes[`POST ${JOB_URL}/contributions/photo`] = () => json(201, contribution());
+    const reads = requests.filter((r) => r.url === `${JOB_URL}/collaboration`).length;
+    missing.ui.button('Check earlier submission').dispatch('click');
     await settle();
-    assert.equal(posts(`${JOB_URL}/contributions`)[0].body.requestId, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'the pending ID, not a new one');
+    assert.equal(requests.filter((r) => r.method === 'POST').length, 0, 'no submission, only a lookup');
+    assert.equal(requests.filter((r) => r.url === `${JOB_URL}/collaboration`).length, reads + 1, 'the own record was checked again');
+    assert.match(missing.ui.message(), /To send what the form holds now, start a new submission\./);
+    missing.ui.button('Start a new submission instead').dispatch('click');
+    missing.ui.button('Send recollection').dispatch('click');
+    await settle();
+    const [sent] = posts(`${JOB_URL}/contributions/photo`);
+    assert.notEqual(sent.body.requestId, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'a new ID for the new submission');
   });
 
   it('refuses a file that is not a JPEG or PNG without sending anything', async () => {
@@ -350,11 +361,17 @@ describe('contributor photo bundle', () => {
     await settle();
     textArea().value = 'Words for place B.';
     routes[`POST ${B_URL}/contributions`] = () => json(201, contribution({ photo: null }));
-    ui.button('Send again (same request)').dispatch('click');
+    const aId = posts(`${JOB_URL}/contributions`)[0].body.requestId;
+    // B has only its restored ID: the button looks it up, nothing is sent.
+    ui.button('Check earlier submission').dispatch('click');
+    await settle();
+    assert.equal(posts(`${B_URL}/contributions`).length, 0, 'never A’s payload, and never B’s form under B’s old ID');
+    ui.button('Start a new submission instead').dispatch('click');
+    ui.button('Send recollection').dispatch('click');
     await settle();
     const [sent] = posts(`${B_URL}/contributions`);
-    assert.equal(sent.body.requestId, B_ID, 'B’s own pending ID');
-    assert.equal(sent.body.text, 'Words for place B.', 'never A’s payload');
+    assert.equal(sent.body.text, 'Words for place B.');
+    assert.ok(sent.body.requestId !== B_ID && sent.body.requestId !== aId, 'a new ID, neither B’s restored one nor A’s');
     view.dispose();
   });
 
@@ -397,7 +414,7 @@ describe('contributor photo bundle', () => {
     assert.equal(ui.find((node) => node.tag === 'img' && node.alt?.startsWith('Your photo')).length, 1);
     ui.button('Withdraw').dispatch('click');
     assert.ok(ui.button('Withdraw this recollection and its photo'));
-    assert.match(root.textContent, /these words and this photo/);
+    assert.match(root.textContent, /what you sent, including the photo/);
   });
 });
 

@@ -7,7 +7,8 @@ import {
 import { RequestError } from './drafts.mjs';
 import { ACTIVE_PROPOSAL } from './memory-proposals.mjs';
 import {
-  PHOTO_BUSY, PHOTO_PREPARE_FAILED, REVIEW_NAME, contributionsDir, parsePhotoFacts, photoAttested, photoDir, readReviewPhoto, reviewJpegInfo,
+  PHOTO_BUSY, PHOTO_PREPARE_FAILED, PLAYBACK_NAME, REVIEW_NAME, VOICE_ORIGINAL_NAMES, contributionsDir, parsePhotoFacts, photoAttested, photoDir,
+  readPlayback, readReviewPhoto, reviewJpegInfo,
 } from './contribution-photos.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -16,7 +17,7 @@ const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Text limits count UTF-16 code units, as browsers report string length.
-export const COLLABORATION_LIMITS = Object.freeze({ text: 10_000, periodClaim: 300, reason: 1000, eraLabel: 300, eraStatement: 2000, contributions: 200 });
+export const COLLABORATION_LIMITS = Object.freeze({ text: 10_000, captionText: 20_000, periodClaim: 300, reason: 1000, eraLabel: 300, eraStatement: 2000, contributions: 200 });
 const OFFSET_LIMIT = 2;
 const DECISIONS = Object.freeze({ reviewing: 'reviewing', adopt: 'adopted', alternative: 'alternative', hold: 'held', reject: 'rejected' });
 const CONFLICTS = new Set(['unknown', 'viewpoint', 'time', 'memory', 'recognition']);
@@ -63,23 +64,41 @@ export function versionDependencies(manifest, version) {
 
 export const currentDependencies = (manifest) => versionDependencies(manifest, manifest.edit.version);
 
-// A text+photo bundle allows a purpose only when both of its grants do.
+// A bundle allows a purpose only when every material it has allows it:
+// its writing (when there is writing), its photo and its recording.
 export function contributionAllows(contribution, purpose) {
-  return contribution.permissions[purpose] === true && (!contribution.photo || contribution.photo.source.permissions[purpose] === true);
+  return (contribution.permissions === null || contribution.permissions?.[purpose] === true)
+    && (!contribution.photo || contribution.photo.source.permissions[purpose] === true)
+    && (!contribution.voice || contribution.voice.source.permissions[purpose] === true);
+}
+
+// The canonical caption hash: it binds the provider's cues to the exact
+// original recording, its listening copy and the caption author.
+export const captionHash = (source, playback, authorId, cues) => sha256(JSON.stringify([source.sha256, playback.sha256, authorId, cues]));
+
+// True only for confirmed captions whose stored hash is recomputed from their
+// current content and identity, written by the bundle's own provider. A stored
+// hash is never trusted on its own.
+export function captionsIntact(contribution) {
+  const captions = contribution.voice?.captions;
+  if (!captions || captions.confirmed !== true || captions.author?.principalId !== contribution.principalId || !Array.isArray(captions.cues)) return false;
+  return captions.sha256 === captionHash(contribution.voice.source, contribution.voice.playback, captions.author.principalId, captions.cues);
 }
 
 // Grants apply per purpose to every inherited contribution. Any use needs each
-// one present, not withdrawn, and granted for place construction; a hosted model
-// use also needs each model grant, because the saved transform itself carries
-// the memory. A photo bundle also needs its photo's place grant and a current
-// attestation of its stored files. Returns 'withdrawn', 'unavailable', 'model' or null.
+// one present, not withdrawn, granted for place construction on every material
+// and with every stored file currently verified; a hosted model use also needs
+// each model grant, because the saved transform itself carries the memory.
+// Only an explicit withdrawal is 'withdrawn'; a missing record, an ungranted
+// material or a missing or changed file is 'unavailable'. Returns
+// 'withdrawn', 'unavailable', 'model' or null.
 export function dependencyIssue(manifest, ids, purpose = 'place') {
   const contributions = manifest.collaboration?.contributions ?? [];
   let issue = null;
   for (const id of ids) {
     const contribution = contributions.find((item) => item.id === id);
-    if (!contribution || contribution.withdrawnAt !== null || contribution.permissions.place !== true) return 'withdrawn';
-    if (contribution.photo && (contribution.photo.source.permissions.place !== true || !photoAttested(manifest, contribution))) issue = 'unavailable';
+    if (contribution && contribution.withdrawnAt !== null) return 'withdrawn';
+    if (!contribution || !contributionAllows(contribution, 'place') || !photoAttested(manifest, contribution)) issue = 'unavailable';
     else if (purpose === 'model' && !contributionAllows(contribution, 'model') && issue === null) issue = 'model';
   }
   return issue;
@@ -101,6 +120,10 @@ export const usageBlocked = (manifest) => manifest.status === 'ready' && depende
 export const modelBlocked = (manifest) => manifest.status === 'ready' && dependencyIssue(manifest, currentDependencies(manifest), 'model') !== null;
 
 const UNAVAILABLE_PHOTO = 'This contributor photo is not available right now.';
+const UNAVAILABLE_RECORDING = 'This contributed recording is not available right now.';
+const UNAVAILABLE_MATERIAL = 'A photo or recording in this contribution is not available right now.';
+export const BUNDLE_BUSY = 'Another recording or photo is being prepared. Nothing was started for this request. Try again in a moment.';
+const SHUTTING_DOWN = 'The app is shutting down. Try again later.';
 const SOURCE_STOPPED_MESSAGE = 'The owner stopped using this photo or turned off its place use, so no version of this scene can be changed.';
 
 export const REDACTED_PROPOSAL_MESSAGE = 'This proposal was made from a saved version that depends on a withdrawn contribution, so its content is no longer shown.';
@@ -153,11 +176,13 @@ function parseTransform(transform, twoObjects) {
 // The saved edit fields of a scene version, in its own shape.
 const editFields = (edit) => (Array.isArray(edit.objects) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw });
 
-// photoReviewed is accepted only as an extra key; whether it is required or
-// refused depends on the contribution, checked by the caller.
+// photoReviewed and voiceReviewed are accepted only as extra keys; whether
+// each is required or refused depends on the contribution, checked by the caller.
+const ACKNOWLEDGMENTS = ['photoReviewed', 'voiceReviewed'];
 function parseReview(body, twoObjects) {
   const keys = ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'];
-  if (!exactKeys(body, keys) && !exactKeys(body, [...keys, 'photoReviewed'])) throw fail(400, UNREADABLE);
+  const extra = body !== null && typeof body === 'object' ? ACKNOWLEDGMENTS.filter((key) => Object.hasOwn(body, key)) : [];
+  if (!exactKeys(body, [...keys, ...extra])) throw fail(400, UNREADABLE);
   const { requestId, baseVersion, baseRevision, decision, reason, conflict } = body;
   const valid = isId(requestId) && Number.isInteger(baseVersion) && baseVersion >= 1 && Number.isInteger(baseRevision) && baseRevision >= 1
     && Object.hasOwn(DECISIONS, decision) && plain(reason, COLLABORATION_LIMITS.reason) && CONFLICTS.has(conflict);
@@ -166,8 +191,42 @@ function parseReview(body, twoObjects) {
   const transform = body.transform === null ? null : parseTransform(body.transform, twoObjects);
   if (geometry ? !transform : body.transform !== null) throw fail(400, 'The candidate position and turn could not be read.');
   const request = { requestId, baseVersion, baseRevision, decision, reason, conflict, transform };
-  if (Object.hasOwn(body, 'photoReviewed')) request.photoReviewed = body.photoReviewed;
+  for (const key of extra) request[key] = body[key];
   return request;
+}
+
+// The bundle payload: writing that may be blank, its grants only when there is
+// writing, and the photo's and recording's facts when those files are sent.
+// Blank writing is stored as '' with no grants; captions are the provider's
+// own listening captions, never a transcript.
+function parseBundleSubmit(body, files) {
+  if (!exactKeys(body, ['requestId', 'text', 'permissions', 'periodClaim', 'photo', 'voice']) || !isId(body.requestId)) throw fail(400, UNREADABLE);
+  if (!plain(body.text, COLLABORATION_LIMITS.text) || !plain(body.periodClaim, COLLABORATION_LIMITS.periodClaim)) throw fail(400, UNREADABLE);
+  const writing = body.text.trim() !== '';
+  let permissions = null;
+  if (writing) {
+    const valid = exactKeys(body.permissions, ['place', 'model', 'share']) && ['place', 'model', 'share'].every((key) => typeof body.permissions[key] === 'boolean');
+    if (!valid) throw fail(400, UNREADABLE);
+    const { place, model, share } = body.permissions;
+    permissions = { place, model, share };
+  } else if (body.permissions !== null) {
+    throw fail(400, UNREADABLE);
+  }
+  if ((body.photo !== null) !== Boolean(files.photo) || (body.voice !== null) !== Boolean(files.voice)) throw fail(400, UNREADABLE);
+  if (!writing && body.voice === null) throw fail(400, 'Add your writing or a recording before sending.');
+  const photo = body.photo === null ? null : parsePhotoFacts(body.photo);
+  let voice = null;
+  if (body.voice !== null) {
+    if (!exactKeys(body.voice, ['origin', 'dates', 'permissions', 'captionText', 'captionConfirmed'])) throw fail(400, UNREADABLE);
+    const { captionText, captionConfirmed, ...facts } = body.voice;
+    if (!plain(captionText, COLLABORATION_LIMITS.captionText) || typeof captionConfirmed !== 'boolean') throw fail(400, UNREADABLE);
+    const captioned = captionText.trim() !== '';
+    if (captioned !== captionConfirmed) {
+      throw fail(400, captioned ? 'Confirm that the captions are your own description of what can be heard.' : UNREADABLE);
+    }
+    voice = { ...parsePhotoFacts(facts), captionText: captioned ? captionText : '', captionConfirmed };
+  }
+  return { requestId: body.requestId, text: writing ? body.text : '', permissions, periodClaim: body.periodClaim, photo, voice };
 }
 
 // The multipart payload: the existing text submission plus the photo's facts.
@@ -241,7 +300,7 @@ function projectContribution(manifest, contribution, principal) {
     text: withdrawn ? null : contribution.text,
     periodClaim: withdrawn ? null : contribution.periodClaim,
     textSha256: contribution.textSha256,
-    permissions: { ...contribution.permissions },
+    permissions: contribution.permissions ? { ...contribution.permissions } : null,
     createdAt: contribution.createdAt,
     revision: contribution.revision,
     status: contribution.status,
@@ -249,6 +308,29 @@ function projectContribution(manifest, contribution, principal) {
     withdrawnAt: contribution.withdrawnAt,
     ...(contribution.principalId === principal.id && { requestId: contribution.requestId }),
     photo: projectPhoto(manifest, contribution),
+    voice: projectVoice(manifest, contribution),
+  };
+}
+
+// The recording without IDs, raw hashes or names. The caption hash is the
+// pin an owner sends when choosing it for a shared view.
+function projectVoice(manifest, contribution) {
+  if (!contribution.voice) return null;
+  const { source, playback, captions } = contribution.voice;
+  const withdrawn = contribution.withdrawnAt !== null;
+  const available = !withdrawn && photoAttested(manifest, contribution);
+  return {
+    available,
+    type: source.type,
+    durationMs: playback.durationMs,
+    // The listening copy's exact size, for the player's size check; never the original's.
+    audio: { type: 'audio/wav', size: playback.size },
+    origin: { kind: source.origin.kind, reference: withdrawn ? '' : source.origin.reference },
+    dates: withdrawn ? null : { ...source.dates },
+    permissions: { ...source.permissions },
+    receivedAt: source.receivedAt,
+    captions: withdrawn || !captions ? null : { cues: captions.cues.map((cue) => ({ ...cue })), sha256: captions.sha256, authorLabel: captions.author.displayName },
+    url: available ? `/api/drafts/${manifest.draftId}/reconstructions/${manifest.id}/contributions/${contribution.id}/recording.wav` : null,
   };
 }
 
@@ -312,7 +394,7 @@ function addContribution(manifest, collaboration, principal, request, now, extra
     principalId: principal.id,
     provider: { displayName: principal.displayName },
     text: request.text,
-    textSha256: sha256(request.text),
+    textSha256: request.text === '' ? null : sha256(request.text),
     periodClaim: request.periodClaim,
     permissions: request.permissions,
     createdAt: now,
@@ -322,6 +404,7 @@ function addContribution(manifest, collaboration, principal, request, now, extra
     reviews: [],
     withdrawnAt: null,
     ...(extra.photo && { photo: extra.photo }),
+    ...(extra.voice && { voice: extra.voice }),
   };
   const variants = collaboration.variants.length > 0 ? collaboration.variants : [{
     id: randomUUID(),
@@ -345,9 +428,12 @@ function addContribution(manifest, collaboration, principal, request, now, extra
 export class CollaborationStore {
   // decodePhoto prepares the private inspection JPEG; tests may inject one,
   // which does not change the stored-photo or privacy rules.
-  constructor({ reconstructions, decodePhoto = null }) {
+  // prepareRecording verifies a recording and makes its listening copy
+  // (contribution-recordings.mjs); tests may inject one in the same way.
+  constructor({ reconstructions, decodePhoto = null, prepareRecording = null }) {
     this.reconstructions = reconstructions;
     this.decodePhoto = decodePhoto;
+    this.prepareRecording = prepareRecording;
     // Photo submissions being prepared, keyed by principal, place, scene and
     // request ID, so an identical retry joins the same work.
     this.inflight = new Map();
@@ -455,20 +541,34 @@ export class CollaborationStore {
     }
   }
 
-  // Writing plus one photo, as one indivisible contribution. The photo is
-  // decoded outside the manifest mutex in the one preparation slot, staged
-  // beside the scene, and published with its manifest record in one write.
+  // Writing plus one photo, as one indivisible contribution (the earlier
+  // route, kept exactly: its payload, digest and 409 busy answer).
   async submitPhoto(draftId, jobId, principal, form) {
     this.#scope(principal, draftId);
     const request = parsePhotoSubmit(form.body);
-    const original = form;
-    const photoSha256 = createHash('sha256').update(original.bytes).digest('hex');
-    const requestDigest = digest({ ...request, photoSha256 });
+    const photoSha256 = createHash('sha256').update(form.bytes).digest('hex');
+    return this.#submitMedia(draftId, jobId, principal, request, { photo: form, voice: null }, digest({ ...request, photoSha256 }), [409, PHOTO_BUSY]);
+  }
+
+  // Writing (which may be blank), an optional photo and an optional
+  // recording, as one indivisible contribution. Busy is 503.
+  async submitBundle(draftId, jobId, principal, form) {
+    this.#scope(principal, draftId);
+    const request = parseBundleSubmit(form.body, form);
+    const hash = (file) => (file ? createHash('sha256').update(file.bytes).digest('hex') : null);
+    const requestDigest = digest({ ...request, photoSha256: hash(form.photo), voiceSha256: hash(form.voice) });
+    return this.#submitMedia(draftId, jobId, principal, request, { photo: form.photo, voice: form.voice }, requestDigest, [503, BUNDLE_BUSY]);
+  }
+
+  // The shared pipeline: exact replay and identical in-flight work answer
+  // before the busy check; then the files are prepared outside the manifest
+  // mutex in the one contribution media slot, photo first, then recording,
+  // staged beside the scene and published with the record in one write.
+  async #submitMedia(draftId, jobId, principal, request, media, requestDigest, busy) {
     const target = `${draftId}/${jobId}`;
     await this.reconstructions.recover();
     const joined = this.#running(principal, draftId, jobId, request, requestDigest);
     if (joined) return joined;
-    // An exact replay of published work answers before any busy check.
     const current = await this.#scene(draftId, jobId);
     const replay = this.#receipt(collaborationOf(current), request, 'submit', principal.id, target, requestDigest);
     if (replay) return projectContribution(current, collaborationOf(current).contributions.find((item) => item.id === replay.contributionId), principal);
@@ -476,19 +576,19 @@ export class CollaborationStore {
     // receipt, and work started meanwhile is joined.
     const running = this.#running(principal, draftId, jobId, request, requestDigest);
     if (running) return running;
-    if (this.reconstructions.closed) throw fail(503, 'The app is shutting down. Try again later.');
+    if (this.reconstructions.closed) throw fail(503, SHUTTING_DOWN);
     this.#ready(current);
     this.#roomFor(collaborationOf(current));
-    if (this.reconstructions.activePhoto) throw fail(409, PHOTO_BUSY);
+    if (this.reconstructions.activeContributionMedia) throw fail(...busy);
     const controller = new AbortController();
-    const promise = this.#preparePhoto(draftId, jobId, principal, request, original, photoSha256, requestDigest, controller.signal);
+    const promise = this.#prepareMedia(draftId, jobId, principal, request, media, requestDigest, controller.signal);
     const slot = { controller, done: promise.catch(() => {}) };
-    this.reconstructions.activePhoto = slot;
+    this.reconstructions.activeContributionMedia = slot;
     const key = JSON.stringify([principal.id, draftId, jobId, request.requestId]);
     this.inflight.set(key, { digest: requestDigest, promise });
     slot.done.finally(() => {
       this.inflight.delete(key);
-      if (this.reconstructions.activePhoto === slot) this.reconstructions.activePhoto = null;
+      if (this.reconstructions.activeContributionMedia === slot) this.reconstructions.activeContributionMedia = null;
     });
     return promise;
   }
@@ -501,25 +601,57 @@ export class CollaborationStore {
     return running.promise;
   }
 
-  async #preparePhoto(draftId, jobId, principal, request, original, photoSha256, requestDigest, signal) {
+  async #preparePhotoFiles(original, signal) {
     const decode = this.decodePhoto;
     if (!decode) throw fail(503, PHOTO_PREPARE_FAILED);
     const reviewBytes = await decode({ bytes: original.bytes, signal });
-    if (signal.aborted) throw fail(503, 'The app is shutting down. Try again later.');
+    if (signal.aborted) throw fail(503, SHUTTING_DOWN);
     const reviewInfo = reviewJpegInfo(reviewBytes);
     if (!reviewInfo) throw fail(503, PHOTO_PREPARE_FAILED);
+    return { reviewBytes, reviewInfo };
+  }
+
+  // One strict decode by the recording preparer verifies the bytes and makes
+  // the listening copy; its result must describe exactly the received bytes.
+  async #prepareVoiceFiles(original, signal) {
+    if (!this.prepareRecording) throw fail(503, 'Recordings cannot be prepared on this computer right now. Nothing was saved.');
+    const prepared = await this.prepareRecording({ bytes: original.bytes, signal });
+    if (signal.aborted) throw fail(503, SHUTTING_DOWN);
+    const originalSha256 = createHash('sha256').update(original.bytes).digest('hex');
+    const wavSha256 = Buffer.isBuffer(prepared?.wav) ? createHash('sha256').update(prepared.wav).digest('hex') : null;
+    const { playback } = prepared ?? {};
+    const consistent = prepared?.original?.sha256 === originalSha256 && prepared.original.size === original.bytes.length
+      && prepared.original.type === original.type && prepared.original.extension === original.extension
+      && playback?.type === 'audio/wav' && playback.sha256 === wavSha256 && playback.size === prepared.wav.length && playback.parentSha256 === originalSha256
+      && Number.isInteger(playback.durationMs) && playback.durationMs >= 0 && playback.durationMs <= 300_000
+      && playback.sampleRate === 16_000 && playback.channels === 1 && playback.bitsPerSample === 16;
+    if (!consistent) throw fail(503, 'The recording could not be prepared right now. Nothing was saved.');
+    return { originalSha256, wav: prepared.wav, playback };
+  }
+
+  async #prepareMedia(draftId, jobId, principal, request, media, requestDigest, signal) {
+    const photoFiles = media.photo ? await this.#preparePhotoFiles(media.photo, signal) : null;
+    const voiceFiles = media.voice ? await this.#prepareVoiceFiles(media.voice, signal) : null;
     const jobDir = this.reconstructions.jobDir(draftId, jobId);
     const parent = contributionsDir(jobDir);
     await mkdir(parent, { recursive: true, mode: 0o700 });
     const staging = path.join(parent, `.staging-${request.requestId}-${randomUUID()}`);
-    const originalName = `original.${original.extension}`;
+    const photoName = media.photo && `original.${media.photo.extension}`;
+    const voiceName = media.voice && VOICE_ORIGINAL_NAMES[media.voice.extension];
+    if (media.voice && !voiceName) throw fail(503, 'The recording could not be prepared right now. Nothing was saved.');
     let published = false;
     try {
       await mkdir(staging, { mode: 0o700 });
-      await writeFile(path.join(staging, originalName), original.bytes, { mode: 0o600, flag: 'wx' });
-      await writeFile(path.join(staging, REVIEW_NAME), reviewBytes, { mode: 0o600, flag: 'wx' });
+      if (media.photo) {
+        await writeFile(path.join(staging, photoName), media.photo.bytes, { mode: 0o600, flag: 'wx' });
+        await writeFile(path.join(staging, REVIEW_NAME), photoFiles.reviewBytes, { mode: 0o600, flag: 'wx' });
+      }
+      if (media.voice) {
+        await writeFile(path.join(staging, voiceName), media.voice.bytes, { mode: 0o600, flag: 'wx' });
+        await writeFile(path.join(staging, PLAYBACK_NAME), voiceFiles.wav, { mode: 0o600, flag: 'wx' });
+      }
       return await this.reconstructions.serialize(async () => {
-        if (this.reconstructions.closed || signal.aborted) throw fail(503, 'The app is shutting down. Try again later.');
+        if (this.reconstructions.closed || signal.aborted) throw fail(503, SHUTTING_DOWN);
         this.#scope(principal, draftId);
         const manifest = await this.#scene(draftId, jobId);
         const collaboration = collaborationOf(manifest);
@@ -531,20 +663,46 @@ export class CollaborationStore {
         if (await this.#sourceBlocked(manifest)) throw fail(409, SOURCE_STOPPED_MESSAGE);
         const id = randomUUID();
         const now = new Date().toISOString();
-        const sourceId = randomUUID();
-        const photo = {
-          source: {
-            id: sourceId, kind: 'photo', role: 'original', parentSourceId: null, name: originalName,
-            sha256: photoSha256, size: original.bytes.length, type: original.type, width: original.width, height: original.height,
-            provider: { principalId: principal.id, displayName: principal.displayName },
-            origin: request.photo.origin, dates: request.photo.dates, permissions: request.photo.permissions, receivedAt: now,
-          },
-          review: {
-            id: randomUUID(), kind: 'photo', role: 'derived', parentSourceId: sourceId, name: REVIEW_NAME,
-            sha256: createHash('sha256').update(reviewBytes).digest('hex'), size: reviewBytes.length, type: 'image/jpeg', ...reviewInfo,
-          },
-        };
-        const added = addContribution(manifest, collaboration, principal, request, now, { id, photo });
+        const provider = { principalId: principal.id, displayName: principal.displayName };
+        let photo = null;
+        if (media.photo) {
+          const sourceId = randomUUID();
+          photo = {
+            source: {
+              id: sourceId, kind: 'photo', role: 'original', parentSourceId: null, name: photoName,
+              sha256: createHash('sha256').update(media.photo.bytes).digest('hex'), size: media.photo.bytes.length, type: media.photo.type,
+              width: media.photo.width, height: media.photo.height, provider,
+              origin: request.photo.origin, dates: request.photo.dates, permissions: request.photo.permissions, receivedAt: now,
+            },
+            review: {
+              id: randomUUID(), kind: 'photo', role: 'derived', parentSourceId: sourceId, name: REVIEW_NAME,
+              sha256: createHash('sha256').update(photoFiles.reviewBytes).digest('hex'), size: photoFiles.reviewBytes.length, type: 'image/jpeg', ...photoFiles.reviewInfo,
+            },
+          };
+        }
+        let voice = null;
+        if (media.voice) {
+          const sourceId = randomUUID();
+          const { playback } = voiceFiles;
+          const source = {
+            id: sourceId, kind: 'voice', role: 'original', parentSourceId: null, name: voiceName,
+            sha256: voiceFiles.originalSha256, size: media.voice.bytes.length, type: media.voice.type, provider,
+            origin: request.voice.origin, dates: request.voice.dates, permissions: request.voice.permissions, receivedAt: now,
+          };
+          const derived = {
+            id: randomUUID(), kind: 'voice', role: 'derived', parentSourceId: sourceId, name: PLAYBACK_NAME, sha256: playback.sha256, size: playback.size,
+            type: 'audio/wav', durationMs: playback.durationMs, sampleRate: playback.sampleRate, channels: playback.channels, bitsPerSample: playback.bitsPerSample,
+          };
+          // One whole-recording cue in the provider's own words, bound to
+          // both the original and the listening copy.
+          let captions = null;
+          if (request.voice.captionText) {
+            const cues = [{ startMs: 0, endMs: playback.durationMs, text: request.voice.captionText }];
+            captions = { version: 1, cues, author: provider, confirmed: true, createdAt: now, sha256: captionHash(source, derived, provider.principalId, cues) };
+          }
+          voice = { source, playback: derived, captions };
+        }
+        const added = addContribution(manifest, collaboration, principal, request, now, { id, photo, voice });
         const { write } = this.#save(manifest, added.collaboration, {
           requestId: request.requestId, action: 'submit', principalId: principal.id, target, digest: requestDigest, contributionId: id,
         });
@@ -556,7 +714,7 @@ export class CollaborationStore {
         // write. Once that write starts it may finish as committed.
         if (this.reconstructions.closed || signal.aborted) {
           await rm(final, { recursive: true, force: true }).catch(() => {});
-          throw fail(503, 'The app is shutting down. Try again later.');
+          throw fail(503, SHUTTING_DOWN);
         }
         const writing = write();
         try {
@@ -574,6 +732,23 @@ export class CollaborationStore {
     } finally {
       if (!published) await rm(staging, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  // The listening copy of a contributed recording, for the owner or the
+  // providing principal, rehashed against its record in the mutex. The
+  // original recording has no route.
+  async recording(draftId, jobId, principal, contributionId) {
+    this.#scope(principal, draftId);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const contribution = collaborationOf(manifest).contributions.find((item) => item.id === contributionId);
+      const visible = contribution && (principal.role === 'owner' || contribution.principalId === principal.id);
+      if (!visible || !contribution.voice || contribution.withdrawnAt !== null) throw fail(404, 'This recording could not be found.');
+      const bytes = photoAttested(manifest, contribution) ? await readPlayback(this.reconstructions.jobDir(draftId, jobId), contribution) : null;
+      if (!bytes) throw fail(409, UNAVAILABLE_RECORDING);
+      return { name: PLAYBACK_NAME, type: 'audio/wav', body: bytes };
+    });
   }
 
   // The private inspection JPEG, for the owner or the providing principal,
@@ -606,12 +781,16 @@ export class CollaborationStore {
       if (!contribution) throw fail(404, CONTRIBUTION_NOT_FOUND);
       const replay = this.#receipt(collaboration, request, 'review', principal.id, contributionId);
       if (replay) return this.#reviewResult(manifest, collaboration, contributionId, replay, await this.#sourceBlocked(manifest), principal);
-      // A photo-backed adoption or alternative needs the owner's explicit
-      // acknowledgment that they reviewed the photo; nothing else accepts it.
-      const photoGeometry = Boolean(contribution.photo) && request.transform !== null;
-      if (photoGeometry ? request.photoReviewed !== true : Object.hasOwn(request, 'photoReviewed')) {
-        throw fail(400, photoGeometry ? 'Confirm that you reviewed the contributor photo beside the scene.' : UNREADABLE);
+      // An adoption or alternative needs the owner's explicit acknowledgment
+      // for each photo or recording in the bundle; nothing else accepts one.
+      // It records the owner's statement, not completed viewing or listening.
+      const geometry = request.transform !== null;
+      const needed = { photoReviewed: geometry && Boolean(contribution.photo), voiceReviewed: geometry && Boolean(contribution.voice) };
+      const prompts = { photoReviewed: 'Confirm that you reviewed the contributor photo beside the scene.', voiceReviewed: 'Confirm that you listened to the contributed recording.' };
+      for (const key of ACKNOWLEDGMENTS) {
+        if (needed[key] ? request[key] !== true : Object.hasOwn(request, key)) throw fail(400, needed[key] ? prompts[key] : UNREADABLE);
       }
+      const photoGeometry = needed.photoReviewed;
       if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was withdrawn by the person who provided it.');
       if (!REVIEWABLE.has(contribution.status)) throw fail(409, 'This contribution already has a final decision.');
       if (request.baseRevision !== contribution.revision) throw fail(409, 'This contribution changed. Reload it before deciding.');
@@ -621,6 +800,7 @@ export class CollaborationStore {
         decision: request.decision, reason: request.reason, conflict: request.conflict,
         reviewedBy: principal.id, reviewedAt: now, baseRevision: request.baseRevision, variantId: null, version: null,
         ...(photoGeometry && { photoReviewed: true }),
+        ...(needed.voiceReviewed && { voiceReviewed: true }),
       };
       let variant = null;
       let edit = null;
@@ -628,7 +808,7 @@ export class CollaborationStore {
       if (request.transform) {
         this.#ready(manifest);
         if (!contributionAllows(contribution, 'place')) throw fail(403, 'This contribution was not shared with permission to change the place.');
-        if (!photoAttested(manifest, contribution)) throw fail(409, UNAVAILABLE_PHOTO);
+        if (!photoAttested(manifest, contribution)) throw fail(409, contribution.voice ? UNAVAILABLE_MATERIAL : UNAVAILABLE_PHOTO);
         await this.reconstructions.permittedPhoto(draftId, manifest.sourceId);
         if (request.baseVersion !== manifest.edit.version) throw fail(409, 'The scene was changed elsewhere. Reload the saved version before deciding.');
         const parent = currentDependencies(manifest);
