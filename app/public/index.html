@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rehere</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <p class="brand">Rehere</p>
+    <p class="tagline">Revisit places through the memories you share.</p>
+  </header>
+
+  <main>
+    <section id="compose" aria-labelledby="compose-title">
+      <h1 id="compose-title">Add your memories of a place</h1>
+      <p class="lead">Photographs and a few written lines are enough. A voice recording is optional.</p>
+
+      <form id="draft-form" novalidate>
+        <section class="panel" aria-labelledby="photos-title">
+          <div class="panel-head">
+            <h2 id="photos-title">Photographs</h2>
+            <button type="button" id="add-photos" class="secondary">Add photos</button>
+          </div>
+          <p class="hint">JPEG or PNG, up to 20 photos and 20 MB each.</p>
+          <input id="photo-input" type="file" accept="image/jpeg,image/png" multiple hidden>
+          <ul id="photo-list" class="photo-grid" aria-label="Selected photos"></ul>
+        </section>
+
+        <section class="panel" aria-labelledby="text-title">
+          <h2 id="text-title"><label for="memory-text">Written memory</label></h2>
+          <textarea id="memory-text" rows="6" maxlength="10000" placeholder="What do you remember about this place?"></textarea>
+          <p class="hint"><span id="text-count">0</span> / 10,000 characters</p>
+        </section>
+
+        <section class="panel" aria-labelledby="voice-title">
+          <h2 id="voice-title">Voice <span class="optional">optional</span></h2>
+          <p id="voice-status" class="voice-status" role="status" aria-live="polite"></p>
+          <div class="voice-controls">
+            <button type="button" id="record" class="secondary">Record</button>
+            <button type="button" id="stop" class="secondary" hidden>Stop</button>
+            <button type="button" id="discard" class="secondary" hidden>Discard</button>
+          </div>
+          <audio id="voice-preview" controls hidden></audio>
+        </section>
+
+        <p id="form-message" class="form-message" role="alert"></p>
+        <div class="actions">
+          <button type="button" id="save-without-voice" class="secondary" hidden>Save without voice</button>
+          <button type="submit" id="save">Save</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="viewer" aria-labelledby="viewer-title" hidden>
+      <a href="#" class="back">Back to adding memories</a>
+      <h1 id="viewer-title">Saved memory</h1>
+      <p id="viewer-date" class="hint"></p>
+      <p id="viewer-message" class="form-message" role="alert"></p>
+      <ul id="viewer-photos" class="photo-grid" aria-label="Photos"></ul>
+      <p id="viewer-text" class="memory-text"></p>
+      <audio id="viewer-voice" controls hidden></audio>
+    </section>
+
+    <section id="saved" class="saved" aria-labelledby="saved-title">
+      <h2 id="saved-title">Saved memories</h2>
+      <p id="saved-empty" class="hint">Nothing has been saved yet.</p>
+      <ul id="saved-list" class="saved-list"></ul>
+    </section>
+  </main>
+</body>
+</html>

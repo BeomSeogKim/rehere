@@ -9,9 +9,12 @@ Photographic evidence, personal recollections, and AI proposals remain distinct.
 
 ## Status
 
-This hackathon repository currently contains development conventions and
-repository checks. There is no application, model integration, or live demo yet.
-The application stack, spatial engine, and model path are not selected.
+The [local memory-entry app](app/README.md) saves photographs, written memories
+and optional voice recordings, then reopens them for viewing and playback.
+It runs on Node.js 26 with no package dependencies. Place generation, sharing
+and accounts are not connected to the app yet.
+
+The production deployment stack is not selected.
 
 ## Getting started
 
@@ -23,6 +26,17 @@ git config core.hooksPath .githooks
 python3 tools/check-repository.py
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
+
+For the local app, install Node.js 26 or later, then run:
+
+```sh
+cd app
+npm test
+npm start
+```
+
+Open `http://127.0.0.1:4317/`. See the [app guide](app/README.md) for storage,
+supported input, limits and recording behavior.
 
 ## Development
 
