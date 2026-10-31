@@ -10,7 +10,7 @@ import {
 } from './photo-scene.js';
 import { mountBlockedScene, mountCollaboration, mountInvitations } from './collaboration.js';
 import { mountMemoryEdit } from './memory-edit.js';
-import { createViewer } from './scene-viewer.js';
+import { createExploreToggle, createViewer } from './scene-viewer.js';
 import { createArrangementSession, describeArrangement, objectNames, objectState, ruleText as ruleWords, withObject } from './arrangement.js';
 import { stopAll } from './playback.js';
 import { mountShares } from './shares.js';
@@ -20,7 +20,14 @@ const POLL_MS = 2000;
 const SOURCE_BLOCKED_TEXT = 'Its photo is no longer allowed to be used for reconstructing this place, or its use was stopped. Every saved version depends on that photo, so none can be restored. The original photo is kept, not deleted.';
 const sourceBlocked = (job) => job.blockedReason === 'source';
 const UNCONFIRMED_BUILD = 'Rehere could not confirm whether the build was accepted. Pressing Build again safely repeats the same request.';
-const SCENE_NOTE = 'Drag to look around; scroll or pinch to zoom; arrow keys move the view when the scene has focus. Only surfaces visible in the photo exist: dark gaps, hidden areas and the backs of objects are unknown and left empty. Depth is a relative model estimate, not a measurement.';
+// A ready scene: the 3D stage and its always-visible notes on one side, the
+// tools that act on it on the other (one column on small or short screens).
+// The same nodes are placed once, before the viewer starts.
+function sceneWorkspace(stage, inspector) {
+  return el('div', { className: 'scene-workspace' }, [el('div', { className: 'scene-stage' }, stage), el('div', { className: 'scene-inspector' }, inspector)]);
+}
+
+const SCENE_NOTE = 'A partial scene from one photo. Only surfaces visible in the photo exist: dark gaps, hidden areas and the backs of objects are unknown and left empty. Depth is a relative model estimate, not a measurement.';
 
 function el(tag, { onclick, ...props } = {}, children = []) {
   const node = document.createElement(tag);
@@ -331,6 +338,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     image.focus?.();
   }
 
+  // Who provided the photo, shown beside the scene when it is recorded.
+  const photoCredit = (job) => {
+    const provider = sourceFor(job.sourceId)?.provider?.trim();
+    return provider ? [el('p', { className: 'hint', textContent: `Photo provided by ${provider}` })] : [];
+  };
+
   async function openScene(jobId) {
     closePanel();
     const token = panelGeneration;
@@ -383,6 +396,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const viewMessage = el('p', { className: 'form-message', role: 'alert' });
     const original = el('button', { type: 'button', className: 'secondary', textContent: 'Original viewpoint' });
     const side = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect from the side' });
+    const explore = createExploreToggle();
     const [x1, y1, x2, y2] = job.box;
     const proposals = el('details', { className: 'source-details' }, [
       el('summary', { textContent: 'Model proposals: outline and depth' }),
@@ -594,23 +608,24 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
     panel.replaceChildren(
       heading,
-      el('div', { className: 'actions space-camera' }, [original, side]),
-      viewport,
-      viewMessage,
-      el('p', { className: 'hint', textContent: SCENE_NOTE }),
-      el('fieldset', { className: 'space-edit' }, [
-        el('legend', { textContent: 'Move the selected object' }),
-        el('p', { className: 'hint', textContent: 'Changes are a preview until you apply and save them. Moving the object leaves an empty gap where it was; nothing is generated to fill it.' }),
-        ...controls.map(({ name, range, number }) => el('div', { className: 'space-axis' }, [el('span', { textContent: name }), range, number])),
-        editStatus,
-        editMessage,
-        el('div', { className: 'actions' }, [reload, reset, revert, save]),
-      ]),
-      memorySection,
-      collaborationSection,
-      storiesSection,
-      sharesSection,
-      proposals,
+      sceneWorkspace(
+        [el('div', { className: 'actions space-camera' }, [explore.button, original, side]), explore.status, viewport, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })],
+        [
+          el('fieldset', { className: 'space-edit' }, [
+            el('legend', { textContent: 'Move the selected object' }),
+            el('p', { className: 'hint', textContent: 'Changes are a preview until you apply and save them. Moving the object leaves an empty gap where it was; nothing is generated to fill it.' }),
+            ...controls.map(({ name, range, number }) => el('div', { className: 'space-axis' }, [el('span', { textContent: name }), range, number])),
+            editStatus,
+            editMessage,
+            el('div', { className: 'actions' }, [reload, reset, revert, save]),
+          ]),
+          memorySection,
+          collaborationSection,
+          storiesSection,
+          sharesSection,
+          proposals,
+        ],
+      ),
     );
     const editorFor = (name) => () => ({
       ...session.saved,
@@ -719,6 +734,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       return;
     }
     viewer = created;
+    explore.attach(viewer);
     original.addEventListener('click', () => viewer?.originalView());
     side.addEventListener('click', () => viewer?.sideView());
     showEdit();
@@ -939,13 +955,15 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         return false;
       }
       viewer = created;
+      explore.attach(viewer);
       original.addEventListener('click', () => viewer?.originalView());
       side.addEventListener('click', () => viewer?.sideView());
       viewer?.applyArrangement(shown);
       return true;
     }
 
-    const viewerBlock = [el('div', { className: 'actions space-camera' }, [original, side]), el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, el('p', { className: 'hint', textContent: SCENE_NOTE })];
+    const explore = createExploreToggle();
+    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side]), explore.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })];
 
     if (!job.objectsConfirmed) {
       let confirmId = null;
@@ -973,19 +991,20 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         message.textContent = 'This build stays as it is and cannot be edited, planned, shared or given stories. Build again with different boxes to get new outlines.';
       });
       panel.append(
-        ...viewerBlock,
-        el('section', { className: 'memory-edit object-confirm' }, [
-          el('h4', { textContent: 'Check the two outlines' }),
-          el('p', { className: 'hint', textContent: 'The model proposed these outlines inside your boxes. Nothing can be edited, planned, shared or given a story until you confirm they match the objects you named.' }),
-          el('div', { className: 'anchor-frame' }, [el('img', { src: assetUrl(jobId, 'mask-overlay.jpg'), alt: `Photo ${number} with the two proposed outlines tinted` }), ...objects.map(boxOver)]),
-          el('ul', { className: 'hint' }, [
-            ...objects.map((object) => el('li', { textContent: `${nameOf(object.id)}: the tinted area inside box ${letterOf(object.id)}.` })),
-            el('li', { textContent: 'Background: the rest of the photo, not tinted.' }),
-            el('li', { textContent: 'White: the two outlines overlapped there; those pixels are left empty in the scene.' }),
+        sceneWorkspace(stage, [
+          el('section', { className: 'memory-edit object-confirm' }, [
+            el('h4', { textContent: 'Check the two outlines' }),
+            el('p', { className: 'hint', textContent: 'The model proposed these outlines inside your boxes. Nothing can be edited, planned, shared or given a story until you confirm they match the objects you named.' }),
+            el('div', { className: 'anchor-frame' }, [el('img', { src: assetUrl(jobId, 'mask-overlay.jpg'), alt: `Photo ${number} with the two proposed outlines tinted` }), ...objects.map(boxOver)]),
+            el('ul', { className: 'hint' }, [
+              ...objects.map((object) => el('li', { textContent: `${nameOf(object.id)}: the tinted area inside box ${letterOf(object.id)}.` })),
+              el('li', { textContent: 'Background: the rest of the photo, not tinted.' }),
+              el('li', { textContent: 'White: the two outlines overlapped there; those pixels are left empty in the scene.' }),
+            ]),
+            el('img', { className: 'space-proposal', src: assetUrl(jobId, 'depth-preview.png'), alt: `Relative depth estimate for photo ${number} as a greyscale image` }),
+            el('div', { className: 'actions' }, [mismatch, confirm]),
+            message,
           ]),
-          el('img', { className: 'space-proposal', src: assetUrl(jobId, 'depth-preview.png'), alt: `Relative depth estimate for photo ${number} as a greyscale image` }),
-          el('div', { className: 'actions' }, [mismatch, confirm]),
-          message,
         ]),
       );
       await mountViewer();
@@ -1051,6 +1070,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const toggle = el('button', { type: 'button', className: 'secondary', textContent: 'Show saved arrangement' });
     const strip = el('div', { className: 'relation-strip' });
     const evidence = el('div', { className: 'object-evidence' });
+    const evidenceSummary = el('summary');
+    const evidenceBox = el('details', { className: 'source-details' }, [evidenceSummary, evidence]);
     const ruleState = el('p', { className: 'hint' });
     const ruleOrder = el('select');
     for (const [leftId, rightId] of [[objects[0]?.id, objects[1]?.id], [objects[1]?.id, objects[0]?.id]]) {
@@ -1082,6 +1103,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     };
 
     function renderEvidence() {
+      evidenceSummary.textContent = selected ? `Photo evidence for ${nameOf(selected)}` : 'Photo evidence (choose an object)';
       if (!selected) {
         evidence.replaceChildren(el('p', { className: 'hint', textContent: 'Choose an object to see the box you drew for it in the photo.' }));
         return;
@@ -1361,31 +1383,34 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     ruleRemove.addEventListener('click', () => invalid.size === 0 && !ruleSaving && !ruleUncertain && saveRule(null));
 
     panel.append(
-      ...viewerBlock,
-      el('div', { className: 'actions', role: 'group' }, [el('span', { textContent: 'Object: ' }), ...pick]),
-      evidence,
-      el('fieldset', { className: 'space-edit' }, [
-        el('legend', { textContent: 'Move the chosen object' }),
-        el('p', { className: 'hint', textContent: 'Only the chosen object moves; the other object and the background stay as saved. Changes are a preview until you apply and save them.' }),
-        ...controls.map(({ name, range, number: field }) => el('div', { className: 'space-axis' }, [el('span', { textContent: name }), range, field])),
-        el('div', { className: 'actions' }, [toggle]),
-        editStatus,
-        editMessage,
-        el('div', { className: 'actions' }, [reload, reset, revert, save]),
+      sceneWorkspace(stage, [
+        el('div', { className: 'actions', role: 'group' }, [el('span', { textContent: 'Object: ' }), ...pick]),
+        el('fieldset', { className: 'space-edit' }, [
+          el('legend', { textContent: 'Move the chosen object' }),
+          el('p', { className: 'hint', textContent: 'Only the chosen object moves; the other object and the background stay as saved. Changes are a preview until you apply and save them.' }),
+          ...controls.map(({ name, range, number: field }) => el('div', { className: 'space-axis' }, [el('span', { textContent: name }), range, field])),
+          el('div', { className: 'actions' }, [toggle]),
+          editStatus,
+          editMessage,
+          el('div', { className: 'actions' }, [reload, reset, revert, save]),
+        ]),
+        strip,
+        el('fieldset', { className: 'space-edit' }, [
+          el('legend', { textContent: 'Rule between the two objects' }),
+          ruleState,
+          el('label', {}, ['Rule ', ruleOrder]),
+          el('label', { className: 'memory-consent' }, [ruleConfirm, ' I want to change the rule; this saves a new version of the arrangement']),
+          el('div', { className: 'actions' }, [ruleRemove, ruleSave]),
+          ruleMessage,
+        ]),
+        // The memory panel, with any face-anchor point and its confirmation,
+        // stays open; only the general photo evidence can be collapsed.
+        memorySection,
+        evidenceBox,
+        collaborationSection,
+        storiesSection,
+        sharesSection,
       ]),
-      strip,
-      el('fieldset', { className: 'space-edit' }, [
-        el('legend', { textContent: 'Rule between the two objects' }),
-        ruleState,
-        el('label', {}, ['Rule ', ruleOrder]),
-        el('label', { className: 'memory-consent' }, [ruleConfirm, ' I want to change the rule; this saves a new version of the arrangement']),
-        el('div', { className: 'actions' }, [ruleRemove, ruleSave]),
-        ruleMessage,
-      ]),
-      memorySection,
-      collaborationSection,
-      storiesSection,
-      sharesSection,
     );
     mountObjectPanels();
     renderEvidence();

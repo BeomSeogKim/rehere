@@ -33,6 +33,19 @@ The server issues exactly the stored preview and rechecks its current rights
 and selected state atomically. A selected change or withdrawn dependency requires
 a new preview. Another link requires another preview.
 
+## Explore and compare
+
+On a wide desktop, the scene stays beside the view choices, object evidence
+and stories while the page scrolls. Smaller views use one column. Choose
+**Explore in 3D** to control the camera, then choose it again to scroll the
+page over the scene. Switching saved arrangements keeps the camera; selecting
+an object shows its evidence and related stories without moving the camera.
+Opening evidence or resizing the layout preserves the view and player state.
+
+Photo attribution, synthetic labeling when applicable, and the limits of the
+inferred surfaces stay beside the scene. The 2D fallback disables exploration
+and remains a separate way to read the permitted material.
+
 ## Fixed content and current rights
 
 A link lasts up to seven days or until revoked. It preserves its selected

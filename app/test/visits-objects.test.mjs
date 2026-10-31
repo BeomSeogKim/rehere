@@ -149,6 +149,7 @@ describe('visitor view of a two-object scene', () => {
   it('names both objects and the rule in text', async () => {
     const v = await open();
     assert.equal(v.states.at(-1), '3d');
+    assert.equal(v.button('Explore in 3D').disabled, false, 'exploring is offered once the 3D view exists');
     const text = v.container.textContent;
     assert.match(text, /Rule: A: Counter stays left of B: Flour stack from the original photo\./);
     assert.match(text, /Arrangement in this view: A: Counter left\/right 0\.00.*; B: Flour stack left\/right 0\.50/);
@@ -166,6 +167,7 @@ describe('visitor view of a two-object scene', () => {
     assert.equal(v.button('B: Flour stack').attributes['aria-pressed'], 'true');
     assert.deepEqual(v.titles(), ['About the Flour stack']);
     assert.match(v.container.textContent, /Photo evidence for B: Flour stack: the box the owner drew\./);
+    assert.equal(v.find((node) => node.tag === 'summary')[0].textContent, 'Photo evidence for B: Flour stack', 'named even while collapsed');
     const box = v.find((node) => node.className === 'box-overlay box-overlay-b')[0];
     assert.deepEqual([box.style.left, box.style.width], ['49%', '49.2%']);
     v.button('All objects').dispatch('click');

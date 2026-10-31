@@ -335,6 +335,9 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
   background: rgba(20, 18, 16, 0.8);
   border-radius: 0 0 6px 0;
   white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .space-viewport-wrap { position: relative; }
 .object-badges { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
@@ -353,3 +356,39 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
 .relation-strip { margin: 12px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); }
 .relation-strip p { margin: 4px 0; }
 [aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+
+/* Object labels and provider names can be long single words: let them wrap
+   inside the scene rather than widen it. Badges over boxes are cut short;
+   the full names are in the text beside them. */
+.scene-stage, .scene-inspector { min-width: 0; }
+.scene-workspace :is(button, summary, p, li, span, label) { overflow-wrap: anywhere; }
+
+/* Scene workspace: while a ready scene is open, the page widens so the 3D
+   stage and its tools sit side by side; everything else keeps the reading
+   width. Closing the scene removes the workspace and the page narrows again. */
+@supports selector(:has(*)) {
+  main:has(.scene-workspace) { max-width: 1680px; }
+  main:has(.scene-workspace) > .access-area,
+  main:has(.scene-workspace) #owner-app > :not(#viewer),
+  main:has(.scene-workspace) #viewer > :not(#viewer-space),
+  main:has(.scene-workspace) #viewer-space > :not(.space-panel),
+  main:has(.scene-workspace) .space-panel > :not(.scene-workspace),
+  main:has(.scene-workspace) .visit-area > :not(.scene-workspace) {
+    max-width: 728px;
+    margin-inline: auto;
+  }
+
+  /* Only the outer workspace splits: the owner's share preview reuses the
+     visitor screen inside the inspector and stays one column. The stage has
+     no scroll area of its own, so the wheel always scrolls the page. */
+  @media (min-width: 1100px) and (min-height: 700px) {
+    .scene-workspace:not(.scene-inspector .scene-workspace) {
+      display: grid;
+      grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr);
+      gap: 24px;
+      align-items: start;
+    }
+    .scene-workspace:not(.scene-inspector .scene-workspace) > .scene-stage { position: sticky; top: 16px; }
+    .scene-workspace:not(.scene-inspector .scene-workspace) > .scene-stage .space-viewport { height: min(calc(100vh - 260px), 760px); }
+  }
+}

@@ -4,7 +4,7 @@
 // links to files. Access is re-checked on a heartbeat and whenever the page
 // returns to view; any doubt closes the scene.
 
-import { createViewer } from './scene-viewer.js';
+import { createExploreToggle, createViewer } from './scene-viewer.js';
 import { createStoryPlayer } from './story-player.js';
 import { describeArrangement, objectNames, ruleText } from './arrangement.js';
 
@@ -82,6 +82,9 @@ function eraText(era, labelOf) {
   return `Owner’s assertion: ${when}${relation}`;
 }
 
+// Shown beside the scene for every view, so it stays in sight while scrolling.
+const SCENE_NOTE = 'Shape and depth: a model estimate from this one photo, not a measurement. Areas the photo did not show are left empty.';
+
 function viewDetails(view, labelOf) {
   const nodes = [el('h3', { textContent: view.label })];
   nodes.push(el('p', { textContent: eraText(view.era, labelOf) }));
@@ -97,7 +100,6 @@ function viewDetails(view, labelOf) {
       }),
     );
   }
-  nodes.push(el('p', { className: 'hint', textContent: 'Shape and depth: a model estimate from this one photo, not a measurement. Areas the photo did not show are left empty.' }));
   for (const support of view.evidence?.support ?? []) {
     if (support?.kind !== 'human_recollection') continue;
     nodes.push(
@@ -199,10 +201,14 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     let objectId = null;
     const objectButtons = el('div', { className: 'actions', role: 'group' });
     const evidence = el('div', { className: 'object-evidence' });
+    const evidenceSummary = el('summary', { textContent: 'Photo evidence (choose an object)' });
+    const evidenceBox = el('details', { className: 'source-details' }, [evidenceSummary, evidence]);
+    const credit = el('p', { className: 'hint' });
     const renderObjects = () => {
       if (!objects) return;
       for (const button of objectButtons.children) if (button.objectId !== undefined) button.setAttribute('aria-pressed', String(button.objectId === objectId));
       const object = objects.find((entry) => entry.id === objectId);
+      evidenceSummary.textContent = object ? `Photo evidence for ${nameOf(object.id)}` : 'Photo evidence (choose an object)';
       if (!object) {
         evidence.replaceChildren();
         return;
@@ -242,6 +248,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       if (view.edit?.objects) viewer?.applyArrangement(view.edit);
       else viewer?.applyEdit(view.edit);
       details.replaceChildren(...viewDetails(view, labelOf));
+      const provider = view.evidence?.photo?.providerLabel;
+      credit.textContent = provider ? `Photo provided by ${provider}` : '';
       if (objects && view.edit?.objects) {
         details.append(
           el('p', { textContent: `Rule: ${ruleText(view.edit.relationship, nameOf)}.${view.edit.relationship ? ' It compares where the two centres appear from the original photo; it does not measure distance.' : ''}` }),
@@ -256,6 +264,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       buttons.append(button);
     }
     const back = el('button', { type: 'button', className: 'secondary', textContent: 'Back to the starting view' });
+    const explore = createExploreToggle();
     if (objects) {
       const pickObject = (id) => {
         objectId = id;
@@ -280,15 +289,26 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
             ? 'Preview — not yet issued'
             : `Shared ${new Date(manifest.createdAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })} · saved copy ${String(manifest.id).slice(0, 8)}`,
       }),
-      el('p', { className: 'hint', textContent: manifest.synthetic ? 'Synthetic test material, shared by the owner.' : 'Shared by the owner.' }),
-      viewport,
-      message,
-      buttons,
-      back,
-      ...(objects ? [objectButtons, evidence] : []),
-      details,
-      storyBox,
-      el('p', { className: 'hint', textContent: DEVICE_NOTE }),
+      // The stage keeps the scene and its notes in sight; the inspector beside
+      // it (below it on small or short screens) scrolls with the page.
+      el('div', { className: 'scene-workspace' }, [
+        el('div', { className: 'scene-stage' }, [
+          el('p', { className: 'hint', textContent: manifest.synthetic ? 'Synthetic test material, shared by the owner.' : 'Shared by the owner.' }),
+          el('div', { className: 'actions space-camera' }, [explore.button, back]),
+          explore.status,
+          viewport,
+          message,
+          credit,
+          el('p', { className: 'hint', textContent: SCENE_NOTE }),
+        ]),
+        el('div', { className: 'scene-inspector' }, [
+          buttons,
+          ...(objects ? [objectButtons, evidenceBox] : []),
+          details,
+          storyBox,
+          el('p', { className: 'hint', textContent: DEVICE_NOTE }),
+        ]),
+      ]),
     );
 
     let created = null;
@@ -314,9 +334,10 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       return;
     }
     viewer = created;
+    explore.attach(viewer);
     viewer.setCamera(manifest.camera);
     back.addEventListener('click', () => viewer?.setCamera(manifest.camera));
-    message.textContent = 'Drag to look around; switching views keeps the same camera so they can be compared.';
+    message.textContent = 'Switching views keeps the same camera so they can be compared.';
     showView(currentId);
     setState('3d');
     scheduleHeartbeat(mine);

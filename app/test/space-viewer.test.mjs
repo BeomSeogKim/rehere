@@ -56,8 +56,10 @@ export class Line extends T.Line {
 const controlsShim = `
 import { Vector3 } from '${three}';
 export class OrbitControls {
-  constructor() {
+  constructor(camera) {
+    this.object = camera;
     this.target = new Vector3();
+    globalThis.viewerControls = this;
     globalThis.viewerLog.push('controls');
   }
   listenToKeyEvents() {}
@@ -76,6 +78,9 @@ registerHooks({
 });
 
 class FakeResizeObserver {
+  constructor(callback) {
+    globalThis.viewerResize = callback;
+  }
   observe() {
     if (globalThis.viewerFail === 'observe') throw new Error('observe failed');
     globalThis.viewerLog.push('observer');
@@ -777,6 +782,61 @@ describe('typing a manual value', () => {
     x.dispatch('input');
     view.button('Apply and save').dispatch('click');
     assert.deepEqual(posts[0].body.offset, [0.3, 0.1, 0]);
+    view.space.dispose();
+  });
+});
+
+describe('page scrolling and exploring the scene', () => {
+  const cameraNow = () => ({ position: globalThis.viewerControls.object.position.toArray(), target: globalThis.viewerControls.target.toArray() });
+
+  it('starts in page scrolling, explores only on request, and never moves the camera when the mode or size changes', async () => {
+    const view = await openScene();
+    const [canvas] = view.canvases();
+    const controls = globalThis.viewerControls;
+    assert.equal(controls.enabled, false, 'pointer, wheel and keys reach the page');
+    assert.equal(canvas.style.touchAction, 'auto');
+    assert.equal(canvas.tabIndex, -1, 'not a tab stop while it does nothing');
+    assert.ok(view.find((node) => node.attributes?.role === 'status' && /^Scroll here to move the page\. Choose Explore in 3D to look around the scene\.$/.test(node.textContent)).length);
+    let focused = 0;
+    canvas.focus = () => (focused += 1);
+    view.button('Inspect from the side').dispatch('click');
+    const before = cameraNow();
+    assert.equal(focused, 0);
+    const toggle = view.button('Explore in 3D');
+    assert.equal(toggle.attributes['aria-pressed'], 'false');
+
+    toggle.dispatch('click');
+    assert.equal(toggle.textContent, 'Explore in 3D', 'the label stays; the pressed state changes');
+    assert.equal(toggle.attributes['aria-pressed'], 'true');
+    assert.equal(controls.enabled, true);
+    assert.equal(canvas.style.touchAction, 'none');
+    assert.equal(canvas.tabIndex, 0);
+    assert.equal(focused, 1, 'the explicit choice moves focus to the scene');
+    assert.ok(view.find((node) => node.attributes?.role === 'status' && /^Exploring: drag to look around.*Choose Explore in 3D again to return to page scrolling\.$/.test(node.textContent)).length);
+    assert.deepEqual(cameraNow(), before, 'exploring does not move the camera');
+
+    const viewport = view.find((node) => node.className === 'space-viewport')[0];
+    Object.assign(viewport, { clientWidth: 900, clientHeight: 500 });
+    globalThis.viewerResize();
+    assert.deepEqual(cameraNow(), before, 'a resize keeps the camera');
+    assert.equal(controls.enabled, true, 'and keeps the mode');
+
+    toggle.dispatch('click');
+    assert.equal(toggle.attributes['aria-pressed'], 'false');
+    assert.equal(controls.enabled, false);
+    assert.equal(canvas.style.touchAction, 'auto');
+    assert.equal(canvas.tabIndex, -1);
+    assert.equal(focused, 1, 'finishing does not move focus');
+    assert.deepEqual(cameraNow(), before);
+    view.space.dispose();
+  });
+
+  it('offers no exploring without a 3D view', async () => {
+    globalThis.viewerFail = 'webgl';
+    const view = await openScene();
+    assert.equal(view.button('Explore in 3D').disabled, true);
+    assert.equal(view.button('Explore in 3D').attributes['aria-pressed'], 'false');
+    assert.equal(view.find((node) => node.attributes?.role === 'status' && /Scroll here|Exploring/.test(node.textContent)).length, 0);
     view.space.dispose();
   });
 });

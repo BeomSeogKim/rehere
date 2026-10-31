@@ -80,7 +80,6 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   const camera = new THREE.PerspectiveCamera(verticalFov, 1, 0.01, 50);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   const canvas = renderer.domElement;
-  canvas.tabIndex = 0;
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', label);
   viewport.append(canvas);
@@ -90,6 +89,23 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   controls.minDistance = CAMERA_LIMITS.minDistance;
   controls.maxDistance = CAMERA_LIMITS.maxDistance;
   controls.listenToKeyEvents(canvas);
+  // Page scrolling by default: until the person chooses to explore, the
+  // controls ignore pointer, wheel and keys, touch scrolls the page, and the
+  // canvas is not a tab stop. Changing the mode never moves the camera. Only
+  // the explicit choice to explore moves focus, to the canvas, so arrow keys
+  // work at once; callers use setInteractive(true) only for that choice.
+  let interactive = false;
+  const setInteractive = (on) => {
+    interactive = Boolean(on);
+    controls.enabled = interactive;
+    canvas.style.touchAction = interactive ? 'none' : 'auto';
+    canvas.tabIndex = interactive ? 0 : -1;
+  };
+  setInteractive(false);
+  const explore = (on) => {
+    setInteractive(on);
+    if (interactive) canvas.focus();
+  };
   const draw = () => {
     renderer.render(objects.scene, camera);
     onDraw?.();
@@ -137,6 +153,8 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   releases.push(clearGuide);
 
   return {
+    setInteractive: explore,
+    isInteractive: () => interactive,
     originalView: () => look([0, 0, 0]),
     showGuide(transform, point, targetId = null) {
       clearGuide();
@@ -206,5 +224,44 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       draw();
     },
     dispose: release,
+  };
+}
+
+const EXPLORE_STATUS = {
+  page: 'Scroll here to move the page. Choose Explore in 3D to look around the scene.',
+  explore: 'Exploring: drag to look around, scroll or pinch to zoom, arrow keys move the view. Choose Explore in 3D again to return to page scrolling.',
+};
+
+// The one control that switches a viewer between page scrolling and exploring:
+// a toggle button with a stable label whose pressed state says which is on.
+// attach(viewer) after the viewer exists; attach(null) when there is no 3D view.
+export function createExploreToggle() {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'secondary';
+  button.textContent = 'Explore in 3D';
+  const status = document.createElement('p');
+  status.className = 'hint';
+  status.setAttribute('role', 'status');
+  let viewer = null;
+  const render = () => {
+    const exploring = Boolean(viewer?.isInteractive());
+    button.setAttribute('aria-pressed', String(exploring));
+    button.disabled = !viewer;
+    status.textContent = viewer ? EXPLORE_STATUS[exploring ? 'explore' : 'page'] : '';
+  };
+  button.addEventListener('click', () => {
+    if (!viewer) return;
+    viewer.setInteractive(!viewer.isInteractive());
+    render();
+  });
+  render();
+  return {
+    button,
+    status,
+    attach(next) {
+      viewer = next;
+      render();
+    },
   };
 }

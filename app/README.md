@@ -151,6 +151,17 @@ The original camera view and a depth-inspection view make the limits visible.
 The local viewer requires WebGL; the original memory remains readable when
 it is unavailable.
 
+On a wide desktop with enough vertical space, the scene stays beside the
+scrolling editor. Narrow or short views use a single column. The photo credit
+and the limits of the reconstruction stay beside the scene; selected-object
+photo evidence can be expanded in the editor. Layout changes preserve the
+camera and unsaved preview.
+
+Page scrolling starts enabled over the scene. Choose **Explore in 3D** to
+drag, zoom or use arrow keys, and choose it again to return to page scrolling.
+The toggle's pressed state identifies the current mode. Original and side
+view buttons remain available in either mode.
+
 Reconstruction jobs are stored separately with source IDs and checksums.
 Derived textures strip image metadata and retain a relation to their original.
 Only completed, validated outputs are served. One model process runs at a time
