@@ -8,5 +8,8 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "three": "0.187.0"
   }
 }

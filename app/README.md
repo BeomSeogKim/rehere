@@ -1,4 +1,4 @@
-# Rehere memory entry
+# Rehere local app
 
 A local web application for gathering the material behind a remembered place:
 photographs, a written memory and an optional voice recording. Photographs and
@@ -28,21 +28,36 @@ model processing and visitor sharing. Permissions start off. Provider labels
 are attribution, not verified identity, and selecting a permission does not
 start processing or publish anything.
 
-Not included: transcription, sharing, accounts, recovery of unsaved input,
-and place generation.
+Saved photographs with both place-construction and model-processing permission
+can be used to build a partial scene. Select a foreground box, review the
+inferred depth and mask, explore the visible surfaces, and preview a foreground
+move or rotation before saving it. Unseen areas stay empty. This is a local
+model reconstruction from one photograph, not a complete room or calibrated
+geometry.
+
+Not included: transcription, multi-view alignment, natural-language spatial
+editing, sharing, accounts, and recovery of unsaved input.
 
 ## Getting started
 
-Requires Node.js 26 or later. There are no package dependencies.
+Requires Node.js 26 or later. Three.js is pinned for the spatial viewer.
 
 ```sh
 cd app
+npm ci --ignore-scripts --no-audit --no-fund
 npm start   # http://127.0.0.1:4317/ (set PORT to change it)
 npm test
 ```
 
 The server listens on the loopback interface only. Saved memories are written
 to `app/data/`, which is ignored by Git. Delete that folder to remove them.
+
+Photo reconstruction additionally requires the isolated Python environment
+and locally cached model weights described in [the worker guide](spatial/README.md).
+The server uses `spatial/.venv/bin/python` by default. Set `PHOTO_PYTHON` for
+this process to use another prepared Python executable. Missing dependencies
+or weights produce a failed job with a setup message; there is no download
+or paid-API fallback.
 
 ## Storage
 
@@ -66,9 +81,9 @@ source details. Photo and voice entries refer to those records through
 `sourceId`; `textSourceId` identifies the written original. Meaningful written
 text is preserved as received, including whitespace, and hashed as UTF-8.
 Multipart string fields normalize line breaks to CRLF during transport; the
-checksum describes that received original. No
-derived copy replaces an original. A future derivative needs its own record
-and a reference to its original.
+checksum describes that received original. No derived copy replaces an
+original. Derived assets have separate records and a reference to their
+original.
 
 Capture date, file creation time, file modification time and a person's
 estimated period are distinct. Unknown dates remain unknown. Browser file
@@ -102,6 +117,45 @@ dates, wrong types and mismatched material counts. Metadata is stored
 atomically with the originals. `canUseSource` checks a specific source and
 purpose; absent or legacy permissions deny use. It does not implement
 authentication, visitor access control or permission changes.
+
+## Partial scenes
+
+Building a scene preserves the saved photograph and source metadata. The
+selected box identifies a foreground candidate; its mask and the relative
+depth are model proposals. Inspect them before relying on the spatial result.
+The original camera view and a depth-inspection view make the limits visible.
+The local viewer requires WebGL; the original memory remains readable when
+it is unavailable.
+
+Reconstruction jobs are stored separately with source IDs and checksums.
+Derived textures strip image metadata and retain a relation to their original.
+Only completed, validated outputs are served. One model process runs at a time
+to bound memory. Jobs time out after three minutes, and unfinished jobs found
+after a restart become interrupted. A repeated request ID with the same input
+reopens the original job; a deliberate retry after failure uses a new ID.
+
+Foreground controls create a preview. **Apply and save** checks the saved
+version and persists an offset and rotation before reporting success. An old
+base version is refused; saving the same request again does not create another
+version. The source surface and background remain unchanged. This is manual
+editing of inferred visible surfaces; no historical layout or collision check
+is claimed.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/drafts/<id>/sources/<source>/image-size` | Stored pixel dimensions for a permitted original photo, independent of EXIF rotation |
+| `POST /api/drafts/<id>/reconstructions` | Start or reopen a job using `requestId`, `sourceId` and pixel `box` |
+| `GET /api/drafts/<id>/reconstructions` | Saved jobs, newest first |
+| `GET /api/drafts/<id>/reconstructions/<job>` | One job and its saved transform |
+| `GET /api/drafts/<id>/reconstructions/<job>/assets/<name>` | A validated derivative of a ready job |
+| `POST /api/drafts/<id>/reconstructions/<job>/edit` | Save `requestId`, `baseVersion`, `offset` and `yaw` |
+
+These controls coordinate one local server process. They do not implement
+multi-process locking, authentication, sharing, undo history, power-loss
+durability or the full spatial editing contract.
+
+Three.js uses the MIT license; its notice is supplied with the package and
+served at `/vendor/THREE-LICENSE`. The project license remains undecided.
 
 ## Upload limits
 

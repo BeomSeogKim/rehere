@@ -11,8 +11,12 @@ Photographic evidence, personal recollections, and AI proposals remain distinct.
 
 The [local memory-entry app](app/README.md) saves photographs, written memories
 and optional voice recordings, then reopens them for viewing and playback.
-It runs on Node.js 26 with no package dependencies. Place generation, sharing
-and accounts are not connected to the app yet.
+It preserves original checksums, source attribution, independent use permissions
+and unknown dates. Permitted photos can become partial depth scenes through
+local depth estimation and SAM2 segmentation. People can inspect model
+proposals, explore the visible surfaces, preview foreground changes and save
+versioned transforms. Unseen areas remain empty. Sharing, accounts, multi-view
+alignment and natural-language spatial editing are not connected yet.
 
 The production deployment stack is not selected.
 
@@ -31,12 +35,14 @@ For the local app, install Node.js 26 or later, then run:
 
 ```sh
 cd app
+npm ci --ignore-scripts --no-audit --no-fund
 npm test
 npm start
 ```
 
 Open `http://127.0.0.1:4317/`. See the [app guide](app/README.md) for storage,
-supported input, limits and recording behavior.
+supported input, limits, recording behavior and the additional local Python
+model setup needed for reconstruction. Node.js 26 or later is required.
 
 ## Development
 

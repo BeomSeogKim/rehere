@@ -48,6 +48,7 @@ const els = {
   viewerTextSource: $('viewer-text-source'),
   viewerVoice: $('viewer-voice'),
   viewerVoiceSource: $('viewer-voice-source'),
+  viewerSpace: $('viewer-space'),
   savedEmpty: $('saved-empty'),
   savedList: $('saved-list'),
 };
@@ -57,6 +58,8 @@ const els = {
 const photos = [];
 let textSource = { details: createSourceDetails(), state: {} };
 const viewRequests = latestOnly();
+let space = null;
+let spaceGeneration = 0;
 let saving = false;
 let previewBlob = null;
 let ticker = null;
@@ -374,11 +377,39 @@ async function showDraft(id) {
     els.viewerVoice.hidden = false;
     els.viewerVoiceSource.append(renderSavedSource(document, source(draft.voice.sourceId)));
   }
+  if (draft.photos.length) openSpace(draft, source);
+}
+
+// The 3D module loads only for a memory with photos; if it cannot load, the
+// rest of the memory stays readable.
+async function openSpace(draft, source) {
+  const generation = spaceGeneration;
+  els.viewerSpace.hidden = false;
+  try {
+    const module = await import('./space.js');
+    if (generation !== spaceGeneration) return;
+    space = module.mountSpace(els.viewerSpace, { draft, sourceFor: source });
+  } catch {
+    if (generation !== spaceGeneration) return;
+    const message = document.createElement('p');
+    message.className = 'hint';
+    message.textContent = 'Partial scenes could not be loaded in this browser. The photos, writing and recording are still here.';
+    els.viewerSpace.replaceChildren(message);
+  }
+}
+
+function closeSpace() {
+  spaceGeneration += 1;
+  space?.dispose();
+  space = null;
+  els.viewerSpace.replaceChildren();
+  els.viewerSpace.hidden = true;
 }
 
 function route() {
   const match = /^#\/memories\/([0-9a-f-]{36})$/.exec(location.hash);
   viewRequests.invalidate();
+  closeSpace();
   els.compose.hidden = Boolean(match);
   els.viewer.hidden = !match;
   if (match) {

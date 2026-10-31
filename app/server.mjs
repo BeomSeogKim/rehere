@@ -4,10 +4,13 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
+import { ReconstructionStore, parseBuildRequest, parseEditRequest, pythonRunner } from './reconstructions.mjs';
 
 const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 const DEFAULT_DATA_DIR = fileURLToPath(new URL('./data/', import.meta.url));
 const DEFAULT_PORT = 4317;
+const THREE_DIR = fileURLToPath(new URL('./node_modules/three/', import.meta.url));
+const JSON_BODY_BYTES = 16 * 1024;
 
 // A fixed list keeps request paths from ever reaching the file system directly.
 const STATIC_FILES = new Map([
@@ -17,6 +20,17 @@ const STATIC_FILES = new Map([
   ['/recorder.js', ['recorder.js', 'text/javascript; charset=utf-8']],
   ['/latest.js', ['latest.js', 'text/javascript; charset=utf-8']],
   ['/source-details.js', ['source-details.js', 'text/javascript; charset=utf-8']],
+  ['/space.js', ['space.js', 'text/javascript; charset=utf-8']],
+  ['/photo-scene.js', ['photo-scene.js', 'text/javascript; charset=utf-8']],
+]);
+
+// Pinned local Three.js files. OrbitControls imports the bare specifier
+// 'three', which browsers cannot resolve without an inline import map.
+const VENDOR_FILES = new Map([
+  ['/vendor/three.module.js', ['build/three.module.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/three.core.js', ['build/three.core.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/OrbitControls.js', ['examples/jsm/controls/OrbitControls.js', 'text/javascript; charset=utf-8', (text) => text.replace("from 'three';", "from '/vendor/three.module.js';")]],
+  ['/vendor/THREE-LICENSE', ['LICENSE', 'text/plain; charset=utf-8']],
 ]);
 
 const SECURITY_HEADERS = {
@@ -29,6 +43,11 @@ const SECURITY_HEADERS = {
 
 const ASSET_PATH = /^\/api\/drafts\/([^/]+)\/assets\/([^/]+)$/;
 const DRAFT_PATH = /^\/api\/drafts\/([^/]+)$/;
+const SOURCE_SIZE_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/image-size$/;
+const JOBS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions$/;
+const JOB_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)$/;
+const JOB_EDIT_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/edit$/;
+const JOB_ASSET_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/assets\/([^/]+)$/;
 
 function sendJson(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
@@ -96,6 +115,29 @@ async function readForm(req, maxBytes) {
   }
 }
 
+async function readJsonBody(req) {
+  if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] ?? '')) {
+    throw new RequestError(415, 'The request could not be read.');
+  }
+  const declared = Number(req.headers['content-length']);
+  if (declared > JSON_BODY_BYTES) throw new RequestError(413, 'The request is too large.');
+  const body = await readBody(req, JSON_BODY_BYTES).catch((error) => {
+    throw error instanceof RequestError ? new RequestError(413, 'The request is too large.') : error;
+  });
+  try {
+    return JSON.parse(body.toString('utf8'));
+  } catch {
+    throw new RequestError(400, 'The request could not be read.');
+  }
+}
+
+async function sendStatic(req, res, file, type, transform) {
+  let body = await readFile(file);
+  if (transform) body = Buffer.from(transform(body.toString('utf8')));
+  res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': type, 'content-length': body.length, 'cache-control': 'no-cache' });
+  res.end(req.method === 'HEAD' ? undefined : body);
+}
+
 function summary(draft) {
   return {
     id: draft.id,
@@ -150,8 +192,16 @@ function sendAsset(req, res, asset) {
     .pipe(res);
 }
 
-export function createAppServer({ dataDir = DEFAULT_DATA_DIR, limits = LIMITS } = {}) {
+// reconstructionRunner and reconstructionTimeoutMs are for tests and local
+// wiring only; no request can choose the runner or its arguments.
+export function createAppServer({
+  dataDir = DEFAULT_DATA_DIR,
+  limits = LIMITS,
+  reconstructionRunner = pythonRunner(),
+  reconstructionTimeoutMs,
+} = {}) {
   const store = new DraftStore(dataDir);
+  const reconstructions = new ReconstructionStore({ dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs });
 
   async function handle(req, res) {
     const { port } = server.address();
@@ -164,12 +214,51 @@ export function createAppServer({ dataDir = DEFAULT_DATA_DIR, limits = LIMITS } 
     const { pathname } = new URL(req.url, `http://${host}`);
     const reading = req.method === 'GET' || req.method === 'HEAD';
 
-    if (pathname === '/api/drafts' && req.method === 'POST') {
+    if (req.method === 'POST') {
       const origin = req.headers.origin;
       if (origin !== undefined && origin !== `http://${host}`) {
         sendJson(res, 403, { error: 'This request is not allowed.' });
         return;
       }
+    }
+
+    const sizeMatch = SOURCE_SIZE_PATH.exec(pathname);
+    if (sizeMatch && reading) {
+      sendJson(res, 200, await reconstructions.imageSize(sizeMatch[1], sizeMatch[2]));
+      return;
+    }
+    const jobsMatch = JOBS_PATH.exec(pathname);
+    if (jobsMatch && req.method === 'POST') {
+      const request = parseBuildRequest(await readJsonBody(req));
+      sendJson(res, 202, await reconstructions.create(jobsMatch[1], request));
+      return;
+    }
+    if (jobsMatch && reading) {
+      sendJson(res, 200, await reconstructions.list(jobsMatch[1]));
+      return;
+    }
+    const jobMatch = JOB_PATH.exec(pathname);
+    if (jobMatch && reading) {
+      const job = await reconstructions.get(jobMatch[1], jobMatch[2]);
+      if (job) sendJson(res, 200, job);
+      else sendJson(res, 404, { error: 'This scene could not be found.' });
+      return;
+    }
+    const editMatch = JOB_EDIT_PATH.exec(pathname);
+    if (editMatch && req.method === 'POST') {
+      const request = parseEditRequest(await readJsonBody(req));
+      sendJson(res, 200, await reconstructions.edit(editMatch[1], editMatch[2], request));
+      return;
+    }
+    const jobAssetMatch = JOB_ASSET_PATH.exec(pathname);
+    if (jobAssetMatch && reading) {
+      const asset = await reconstructions.asset(...jobAssetMatch.slice(1));
+      if (!asset) sendJson(res, 404, { error: 'Not found.' });
+      else sendAsset(req, res, asset);
+      return;
+    }
+
+    if (pathname === '/api/drafts' && req.method === 'POST') {
       const draft = await store.create(await parseDraft(await readForm(req, limits.requestBytes), limits));
       sendJson(res, 201, draft);
       return;
@@ -195,12 +284,16 @@ export function createAppServer({ dataDir = DEFAULT_DATA_DIR, limits = LIMITS } 
     const staticFile = STATIC_FILES.get(pathname);
     if (staticFile && reading) {
       const [name, type] = staticFile;
-      const body = await readFile(path.join(PUBLIC_DIR, name));
-      res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': type, 'content-length': body.length, 'cache-control': 'no-cache' });
-      res.end(req.method === 'HEAD' ? undefined : body);
+      await sendStatic(req, res, path.join(PUBLIC_DIR, name), type);
       return;
     }
-    if (staticFile || pathname.startsWith('/api/drafts')) {
+    const vendorFile = VENDOR_FILES.get(pathname);
+    if (vendorFile && reading) {
+      const [name, type, transform] = vendorFile;
+      await sendStatic(req, res, path.join(THREE_DIR, name), type, transform);
+      return;
+    }
+    if (staticFile || vendorFile || pathname.startsWith('/api/drafts')) {
       sendJson(res, 405, { error: 'Method not allowed.' });
       return;
     }
@@ -222,6 +315,12 @@ export function createAppServer({ dataDir = DEFAULT_DATA_DIR, limits = LIMITS } 
       sendJson(res, 500, { error: 'Something went wrong. Please try again.' }, { connection: 'close' });
     });
   });
+  // Closing the server also stops an active model process.
+  const closeServer = server.close.bind(server);
+  server.close = (callback) => {
+    reconstructions.close();
+    return closeServer(callback);
+  };
   return server;
 }
 
