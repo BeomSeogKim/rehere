@@ -1,0 +1,40 @@
+{
+  "syntheticDiagramsNotHeldOutPhotographs": true,
+  "inputs": [
+    {
+      "id": "A",
+      "file": "room-A.png",
+      "sha256": "9950c82385ab34bc2720537304627f712e6c7678b1f5a4436ee97b4bcc0eebd1",
+      "imageSize": [1024, 768],
+      "objects": [
+        {"label": "Chair", "box": [195, 385, 415, 700]},
+        {"label": "Counter", "box": [565, 445, 905, 685]}
+      ],
+      "windowBox": [645, 140, 825, 330],
+      "doorBox": [215, 165, 335, 380]
+    },
+    {
+      "id": "B",
+      "file": "room-B.png",
+      "sha256": "d39e7678e4d4a1a49a30c8b13df4bc40e0625303eca66c42e5e1fc01a2450862",
+      "imageSize": [1024, 768],
+      "objects": [
+        {"label": "Chair", "box": [195, 385, 415, 700]},
+        {"label": "Counter", "box": [565, 445, 905, 685]}
+      ],
+      "windowBox": [185, 140, 365, 330],
+      "doorBox": [695, 165, 815, 380]
+    }
+  ],
+  "cases": [
+    {"id":"A-chair-window","input":"A","targetId":"object-1","text":"Turn the photographed side of this chair toward the window.","expect":{"action":"face_anchor","targetId":"object-1","anchorIn":"windowBox"}},
+    {"id":"A-counter-window","input":"A","targetId":"object-2","text":"Turn the photographed side of this counter toward the window.","expect":{"action":"face_anchor","targetId":"object-2","anchorIn":"windowBox"}},
+    {"id":"B-chair-window","input":"B","targetId":"object-1","text":"Turn the photographed side of this chair toward the window.","expect":{"action":"face_anchor","targetId":"object-1","anchorIn":"windowBox"}},
+    {"id":"B-counter-window","input":"B","targetId":"object-2","text":"Turn the photographed side of this counter toward the window.","expect":{"action":"face_anchor","targetId":"object-2","anchorIn":"windowBox"}},
+    {"id":"wrong-selected-target","input":"A","targetId":"object-1","text":"Move the counter to the right.","expect":{"action":"clarify","nonemptyQuestion":true}},
+    {"id":"unspecified-side","input":"B","targetId":"object-2","text":"Another side of this counter used to face the window.","expect":{"action":"clarify","nonemptyQuestion":true}},
+    {"id":"absent-fireplace","input":"A","targetId":"object-1","text":"Turn this chair toward the fireplace.","expect":{"action":"clarify","nonemptyQuestion":true}},
+    {"id":"explicit-selected-translation","input":"B","targetId":"object-2","text":"Move this counter 0.15 scene units to the right; keep its turn unchanged.","expect":{"action":"translate","targetId":"object-2","delta":[0.15,0,0],"unchangedYaw":true}}
+  ],
+  "executionChecksSeparateFromMeaning": ["Other object unchanged", "Preserved rule violation rejects entire save", "Stale global version refuses apply", "Snapshot and story retain exact object and whole arrangement"]
+}

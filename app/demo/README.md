@@ -36,3 +36,33 @@ drawing can differ from photographs. These cases do not establish reliability,
 emotional value, historical accuracy, or superiority over a photo album.
 Live model calls require the app's explicit enablement, permissions, consent
 and a separately checked bounded budget; this generator sends nothing.
+
+## Two-object fixture
+
+[two-object-cases.json](two-object-cases.json) holds two constructed synthetic
+room diagrams, each with a chair (`object-1`) and a counter (`object-2`), and
+eight frozen planner cases. They are drawings, not held-out real photographs,
+personal stories or memories. The expected answers check specific planner and
+app behavior on these inputs: facing a visible window, asking a question for
+the wrong object, an unspecified side or an absent landmark, and an explicit
+translation of the selected object. They are not a measure of general accuracy,
+and no benchmark result is recorded here.
+
+Generate the PNGs with the reconstruction environment's Pillow; no model is
+called:
+
+```sh
+../spatial/.venv/bin/python generate_two_objects.py
+```
+
+Files go to `generated/two-objects/`, which Git ignores, or to
+`--output-dir`; existing files are never overwritten. Each image is checked
+against its frozen SHA-256. Use the Pillow version pinned in
+[the worker requirements](../spatial/requirements.txt); any hash mismatch fails,
+and the frozen data is never updated to fit. Use the listed boxes when building a
+two-object scene, and judge a facing answer by whether its point lies in the
+case's `windowBox`.
+
+Running these cases against a hosted model is a separate, deliberate action:
+it needs the app's explicit live enablement, permissions, consent and a
+checked budget. This folder includes no automated paid runner.
