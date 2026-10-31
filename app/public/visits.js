@@ -5,6 +5,7 @@
 // returns to view; any doubt closes the scene.
 
 import { createViewer } from './scene-viewer.js';
+import { createStoryPlayer } from './story-player.js';
 
 export const HEARTBEAT_MS = 15_000;
 export const HEARTBEAT_TIMEOUT_MS = 5_000;
@@ -52,6 +53,7 @@ export function visitSource(token) {
     },
     check: async (signal) => (await fetch('/api/visit', init(signal, 'HEAD'))).ok,
     asset: (viewId, name, signal) => fetch(`/api/visit/assets/${encodeURIComponent(viewId)}/${name}`, init(signal)),
+    storyAudio: (storyId, signal) => fetch(`/api/visit/stories/${encodeURIComponent(storyId)}/audio.wav`, init(signal)),
   };
 }
 
@@ -67,6 +69,7 @@ export function previewSource(sharesUrl, previewId) {
     },
     check: async (signal) => (await fetch(url, init(signal))).ok,
     asset: (viewId, name, signal) => fetch(`${url}/assets/${encodeURIComponent(viewId)}/${name}`, init(signal)),
+    storyAudio: (storyId, signal) => fetch(`${url}/stories/${encodeURIComponent(storyId)}/audio.wav`, init(signal)),
   };
 }
 
@@ -127,6 +130,12 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   let controller = null;
   let viewer = null;
   let urls = [];
+  // Story players of the view on screen; every close or view change disposes
+  // them, which stops and forgets their audio.
+  let players = [];
+  const disposePlayers = () => {
+    for (const player of players.splice(0)) player.dispose();
+  };
   let timer = null;
   let state = 'loading';
   let disposed = false;
@@ -141,6 +150,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   function clear() {
     clearTimeout(timer);
     timer = null;
+    disposePlayers();
     controller?.abort();
     controller = null;
     viewer?.dispose();
@@ -180,11 +190,32 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     const details = el('div', { className: 'visit-details' });
     const message = el('p', { className: 'hint', role: 'status' });
     const buttons = el('div', { className: 'actions space-camera' });
+    const storyBox = el('div', { className: 'visit-stories' });
+    const renderStories = (viewId) => {
+      disposePlayers();
+      const viewStories = (manifest.stories ?? []).filter((story) => story.viewId === viewId);
+      storyBox.replaceChildren(
+        ...(viewStories.length ? [el('h3', { textContent: 'Recorded stories for this view' })] : []),
+        ...viewStories.map((story) => {
+          const player = createStoryPlayer({ story, fetchAudio: (signal) => source.storyAudio(story.id, signal) });
+          players.push(player);
+          return el('div', { className: 'visit-story' }, [
+            el('p', { className: 'space-choice-label', textContent: story.title }),
+            el('p', {
+              className: 'hint',
+              textContent: `Recording by ${story.providerLabel || 'an unnamed provider'}. Captions written by ${story.captionAuthorLabel || 'the owner'}; they are not checked by Rehere. Nothing plays until you press Play.`,
+            }),
+            player.element,
+          ]);
+        }),
+      );
+    };
     const showView = (id) => {
       currentId = id;
       const view = views.get(id);
       viewer?.applyEdit(view.edit);
       details.replaceChildren(...viewDetails(view, labelOf));
+      renderStories(id);
       for (const button of buttons.children) button.setAttribute('aria-pressed', String(button.viewId === id));
     };
     for (const view of manifest.views) {
@@ -209,6 +240,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       buttons,
       back,
       details,
+      storyBox,
       el('p', { className: 'hint', textContent: DEVICE_NOTE }),
     );
 

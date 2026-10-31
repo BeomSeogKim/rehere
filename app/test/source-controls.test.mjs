@@ -71,6 +71,7 @@ describe('source control helpers', () => {
     assert.match(cancellationText({ status: 'unconfirmed' }), /restriction is saved/);
     assert.equal(impactText({ scenes: 1, snapshots: 0, processing: 2 }), 'Currently used by 1 scene and 0 shared links, with 2 pieces of work in progress.');
     assert.match(impactText(null), /could not count/);
+    assert.equal(impactText({ scenes: 2, stories: 1, snapshots: 3, processing: 0 }), 'Currently used by 2 scenes, 1 recorded story and 3 shared links, with 0 pieces of work in progress.');
   });
 
   it('marks stopped material by provider and checksum only', () => {

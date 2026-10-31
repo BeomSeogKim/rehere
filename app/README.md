@@ -41,9 +41,13 @@ manual change, adopt it or preserve an alternative, and record a separate
 explicit time assertion. Withdrawal blocks dependent spatial uses. See the
 [collaboration guide](COLLABORATION.md) for grants, review and restoration.
 
-Not included: transcription, multi-view alignment, photo or voice contributions,
-recorded visitor stories and captions, hosted account integration, and recovery
-of unsaved input.
+Recorded stories connect a permitted imported recording to an explicitly chosen
+saved arrangement and the selected foreground object. Human-supplied captions
+and provider attribution accompany a converted playback copy, with explicit
+visitor selection and current withdrawal checks. See [recorded stories](STORIES.md).
+
+Not included: automatic transcription, multi-view alignment, photo or voice
+contributions, hosted account integration, and recovery of unsaved input.
 
 Saved visitor snapshots can include selected arrangements and permitted written
 recollections. Preview the actual visitor screen before issuing a local link;

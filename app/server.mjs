@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { AccessStore, isToken } from './access.mjs';
 import { CollaborationStore } from './collaboration.mjs';
 import { ShareStore, UNAVAILABLE as VISIT_UNAVAILABLE, isVisitToken } from './shares.mjs';
+import { createAudioDecoder } from './audio-derivative.mjs';
+import { StoryStore } from './stories.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest, parseProposalRequest, parseUndoRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
@@ -19,6 +21,8 @@ const JSON_BODY_BYTES = 16 * 1024;
 // A written recollection may hold 10,000 UTF-16 code units; even with every
 // unit escaped as \uXXXX (6 bytes) the body stays under this cap.
 const CONTRIBUTION_BODY_BYTES = 64 * 1024;
+// A recorded story may carry 20,000 code units of captions in up to 200 cues.
+const STORY_BODY_BYTES = 256 * 1024;
 
 // A fixed list keeps request paths from ever reaching the file system directly.
 const STATIC_FILES = new Map([
@@ -37,6 +41,9 @@ const STATIC_FILES = new Map([
   ['/scene-viewer.js', ['scene-viewer.js', 'text/javascript; charset=utf-8']],
   ['/shares.js', ['shares.js', 'text/javascript; charset=utf-8']],
   ['/source-controls.js', ['source-controls.js', 'text/javascript; charset=utf-8']],
+  ['/playback.js', ['playback.js', 'text/javascript; charset=utf-8']],
+  ['/story-player.js', ['story-player.js', 'text/javascript; charset=utf-8']],
+  ['/stories.js', ['stories.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // Pinned local Three.js files. OrbitControls imports the bare specifier
@@ -80,6 +87,11 @@ const PREVIEW_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\
 const PREVIEW_ASSET_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews\/([^/]+)\/assets\/([^/]+)\/([^/]+)$/;
 const SHARE_REVOKE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/([^/]+)\/revoke$/;
 const VISIT_ASSET_PATH = /^\/api\/visit\/assets\/([^/]+)\/([^/]+)$/;
+const VISIT_STORY_PATH = /^\/api\/visit\/stories\/([^/]+)\/audio\.wav$/;
+const PREVIEW_STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews\/([^/]+)\/stories\/([^/]+)\/audio\.wav$/;
+const STORIES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories$/;
+const STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)$/;
+const STORY_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)\/(audio\.wav|withdraw)$/;
 const SHARE_ASSETS = new Set(['surface.json', 'texture.jpg']);
 // Accepts exactly one Authorization header holding a canonical visit token.
 function visitToken(req) {
@@ -303,6 +315,7 @@ export function createAppServer({
   proposalModel = null,
   prepareModelImage = pythonModelImage(),
   accessStore = new AccessStore({ dataDir }),
+  audioDecoder = createAudioDecoder(),
 } = {}) {
   const store = new DraftStore(dataDir);
   const attempts = attemptLimiter();
@@ -310,7 +323,8 @@ export function createAppServer({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage,
   });
   const collaboration = new CollaborationStore({ reconstructions });
-  const shares = new ShareStore({ reconstructions });
+  const stories = new StoryStore({ reconstructions, audioDecoder });
+  const shares = new ShareStore({ reconstructions, stories });
 
   // Visitor routes authenticate only with a Bearer visit token; cookies and
   // query strings are never read. Every refusal looks the same, and errors are
@@ -318,14 +332,17 @@ export function createAppServer({
   async function handleVisit(req, res, pathname) {
     const unavailable = () => sendJson(res, 404, { error: VISIT_UNAVAILABLE });
     const assetMatch = VISIT_ASSET_PATH.exec(pathname);
+    const storyMatch = VISIT_STORY_PATH.exec(pathname);
     const token = visitToken(req);
     const reading = req.method === 'GET' || req.method === 'HEAD';
-    if (!reading || !token || (pathname !== '/api/visit' && !(assetMatch && UUID.test(assetMatch[1]) && SHARE_ASSETS.has(assetMatch[2])))) {
+    const known = pathname === '/api/visit' || (assetMatch && UUID.test(assetMatch[1]) && SHARE_ASSETS.has(assetMatch[2])) || (storyMatch && UUID.test(storyMatch[1]));
+    if (!reading || !token || !known) {
       unavailable();
       return;
     }
     try {
       if (assetMatch) sendAsset(req, res, await shares.visitAsset(token, assetMatch[1], assetMatch[2]));
+      else if (storyMatch) sendAsset(req, res, await shares.visitStoryAudio(token, storyMatch[1]));
       else sendJson(res, 200, await shares.visit(token));
     } catch (error) {
       if (res.headersSent) {
@@ -526,6 +543,46 @@ export function createAppServer({
       return;
     }
 
+    const storiesMatch = STORIES_PATH.exec(pathname);
+    const storyMatch = STORY_PATH.exec(pathname);
+    const storyActionMatch = STORY_ACTION_PATH.exec(pathname);
+    const anyStoryMatch = storiesMatch ?? storyMatch ?? storyActionMatch;
+    if (anyStoryMatch) {
+      const [, draftId, jobId, storyId, action] = anyStoryMatch;
+      if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
+      if (storyId !== undefined && !UUID.test(storyId)) throw new RequestError(404, 'This story could not be found.');
+      if (storiesMatch && reading) {
+        sendJson(res, 200, await stories.list(draftId, jobId, owner));
+        return;
+      }
+      if (storiesMatch && req.method === 'POST') {
+        const body = await readJsonBody(req, STORY_BODY_BYTES);
+        sendJson(res, 201, await stories.create(draftId, jobId, owner, body));
+        return;
+      }
+      if (storyMatch && reading) {
+        sendJson(res, 200, await stories.get(draftId, jobId, owner, storyId));
+        return;
+      }
+      if (action === 'audio.wav' && reading) {
+        sendAsset(req, res, await stories.audio(draftId, jobId, owner, storyId));
+        return;
+      }
+      if (action === 'withdraw' && req.method === 'POST') {
+        sendJson(res, 200, await stories.withdraw(draftId, jobId, owner, storyId, await readJsonBody(req)));
+        return;
+      }
+      throw new RequestError(405, 'Method not allowed.');
+    }
+    const previewStoryMatch = PREVIEW_STORY_PATH.exec(pathname);
+    if (previewStoryMatch) {
+      const [, draftId, jobId, previewId, publicStoryId] = previewStoryMatch;
+      if (![draftId, jobId, previewId, publicStoryId].every((id) => UUID.test(id))) throw new RequestError(404, 'Not found.');
+      if (!reading) throw new RequestError(405, 'Method not allowed.');
+      sendAsset(req, res, await shares.previewStoryAudio(draftId, jobId, owner, previewId, publicStoryId));
+      return;
+    }
+
     const previewsMatch = PREVIEWS_PATH.exec(pathname);
     const previewMatch = PREVIEW_PATH.exec(pathname);
     const previewAssetMatch = PREVIEW_ASSET_PATH.exec(pathname);
@@ -539,7 +596,8 @@ export function createAppServer({
       if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
       if ((previewMatch || previewAssetMatch || revokeShareMatch) && !UUID.test(third)) throw new RequestError(404, 'This share could not be found.');
       if (previewsMatch && req.method === 'POST') {
-        const body = strictBody(await readJsonBody(req), ['requestId', 'title', 'views', 'startViewId', 'camera', 'contributionIds', 'synthetic']);
+        // Exact keys, including the optional storyIds, are checked by the share store.
+        const body = await readJsonBody(req);
         sendJson(res, 201, await shares.createPreview(draftId, jobId, owner, body));
         return;
       }

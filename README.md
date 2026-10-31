@@ -24,8 +24,9 @@ assertions; withdrawal blocks dependent uses. Saved visitor snapshots preserve
 selected arrangements and permitted writing behind revocable local links.
 Owners can narrow imported source uses or stop dependent use without rewriting
 originals; current restrictions also govern existing snapshots.
-Recorded visitor stories, photo or voice contributions, multi-view alignment
-and hosted operation are not connected yet.
+Imported recordings can be attached to exact saved arrangements with
+human-supplied captions and explicitly included in visitor snapshots. Photo or
+voice contributions, multi-view alignment and hosted operation remain absent.
 
 The production deployment stack is not selected.
 

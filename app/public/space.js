@@ -12,6 +12,7 @@ import { mountBlockedScene, mountCollaboration, mountInvitations } from './colla
 import { mountMemoryEdit } from './memory-edit.js';
 import { createViewer } from './scene-viewer.js';
 import { mountShares } from './shares.js';
+import { mountStories } from './stories.js';
 
 const POLL_MS = 2000;
 const SOURCE_BLOCKED_TEXT = 'Its photo is no longer allowed to be used for reconstructing this place, or its use was stopped. Every saved version depends on that photo, so none can be restored. The original photo is kept, not deleted.';
@@ -44,7 +45,7 @@ const serverError = (result, fallback) => (typeof result.body?.error === 'string
 // Mounts partial-scene building and viewing for one saved memory. Every request
 // is bound to this draft; dispose() stops polling and releases the 3D view so
 // nothing from this memory updates the screen after navigation.
-export function mountSpace(container, { draft, sourceFor }) {
+export function mountSpace(container, { draft, sourceFor, durationHintMs = () => null }) {
   let disposed = false;
   let pollTimer = null;
   let pollingJob = null;
@@ -52,6 +53,7 @@ export function mountSpace(container, { draft, sourceFor }) {
   let memoryEdit = null;
   let collaborationPanel = null;
   let sharesPanel = null;
+  let storiesPanel = null;
   let blockedPanel = null;
   // Bumped whenever the panel is closed or replaced; a response for an older
   // selection or scene must not change the panel that replaced it.
@@ -110,6 +112,8 @@ export function mountSpace(container, { draft, sourceFor }) {
     collaborationPanel = null;
     sharesPanel?.dispose();
     sharesPanel = null;
+    storiesPanel?.dispose();
+    storiesPanel = null;
     blockedPanel?.dispose();
     blockedPanel = null;
     viewer?.dispose();
@@ -395,6 +399,7 @@ export function mountSpace(container, { draft, sourceFor }) {
     const memorySection = el('section', { className: 'memory-edit' });
     const collaborationSection = el('section', { className: 'memory-edit collab-owner' });
     const sharesSection = el('section', { className: 'memory-edit share-owner' });
+    const storiesSection = el('section', { className: 'memory-edit story-owner' });
     let saving = false;
     // A save and a reload never overlap, so an older saved state read by a
     // reload cannot replace a newer one confirmed by a save.
@@ -507,6 +512,7 @@ export function mountSpace(container, { draft, sourceFor }) {
         memoryEdit?.refresh();
         collaborationPanel?.refresh();
         sharesPanel?.refresh();
+        storiesPanel?.refresh();
       } else if (result.status === 409) {
         editMessage.textContent = `${serverError(result, 'The saved version changed.')} Your preview is kept but not saved.`;
         conflict = true;
@@ -535,6 +541,7 @@ export function mountSpace(container, { draft, sourceFor }) {
       ]),
       memorySection,
       collaborationSection,
+      storiesSection,
       sharesSection,
       proposals,
     );
@@ -567,6 +574,7 @@ export function mountSpace(container, { draft, sourceFor }) {
         showEdit();
         collaborationPanel?.refresh();
         sharesPanel?.refresh();
+        storiesPanel?.refresh();
       },
       unconfirmed() {
         session.markUncertain();
@@ -601,6 +609,7 @@ export function mountSpace(container, { draft, sourceFor }) {
         showEdit();
         memoryEdit?.refresh();
         sharesPanel?.refresh();
+        storiesPanel?.refresh();
       },
       unconfirmed() {
         session.markUncertain();
@@ -612,6 +621,13 @@ export function mountSpace(container, { draft, sourceFor }) {
       },
     });
 
+    storiesPanel = mountStories(storiesSection, {
+      jobUrl: `${base}/${jobId}`,
+      sources: Array.isArray(draft.sources) ? draft.sources : [],
+      editor: () => session.saved,
+      durationHintMs,
+      onChanged: () => sharesPanel?.refreshOptions(),
+    });
     sharesPanel = mountShares(sharesSection, {
       sharesUrl: `${base}/${jobId}/shares`,
       jobUrl: `${base}/${jobId}`,

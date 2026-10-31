@@ -11,7 +11,7 @@ const MINUTE = 60_000;
 
 export const SHARE_LIMITS = Object.freeze({
   title: 120, views: 8, quotes: 20, cameraCoordinate: 50, cameraDistance: [0.5, 8],
-  previewMs: 15 * MINUTE, snapshotMs: 7 * 24 * 60 * MINUTE, snapshotsPerScene: 50,
+  previewMs: 15 * MINUTE, snapshotMs: 7 * 24 * 60 * MINUTE, snapshotsPerScene: 50, stories: 8,
 });
 // Only these derived files are ever served to a preview or a visitor.
 export const SHARED_ASSETS = Object.freeze({ 'surface.json': 'application/json', 'texture.jpg': 'image/jpeg' });
@@ -25,6 +25,7 @@ const REASONS = {
   era: [409, 'The time assertion for a selected alternative changed. Make a new preview.'],
   changed: [409, 'The saved scene changed after this preview. Make a new preview.'],
   asset: [409, 'The scene files no longer match this preview. Make a new preview.'],
+  story: [409, 'A selected recorded story is no longer available. Make a new preview.'],
 };
 
 const fail = (status, message) => new RequestError(status, message);
@@ -73,16 +74,23 @@ function parseViews(views) {
   return unique(parsed.map((view) => view.id)) && unique(targets) ? parsed : null;
 }
 
+const PREVIEW_KEYS = ['requestId', 'title', 'views', 'startViewId', 'camera', 'contributionIds', 'synthetic'];
+const uniqueIds = (values, max) => Array.isArray(values) && values.length <= max && values.every(isId) && new Set(values).size === values.length;
+
+// storyIds is optional so earlier callers keep working; absent means none.
 function parsePreview(body) {
-  if (!exactKeys(body, ['requestId', 'title', 'views', 'startViewId', 'camera', 'contributionIds', 'synthetic'])) throw fail(400, UNREADABLE);
+  if (!exactKeys(body, PREVIEW_KEYS) && !exactKeys(body, [...PREVIEW_KEYS, 'storyIds'])) throw fail(400, UNREADABLE);
   const views = parseViews(body.views);
   const camera = parseCamera(body.camera);
   const quotes = body.contributionIds;
+  const storyIds = body.storyIds ?? [];
   const valid = isId(body.requestId) && plain(body.title, SHARE_LIMITS.title) && body.title.trim() !== '' && views && camera
     && views.some((view) => view.id === body.startViewId) && typeof body.synthetic === 'boolean'
-    && Array.isArray(quotes) && quotes.length <= SHARE_LIMITS.quotes && quotes.every(isId) && new Set(quotes).size === quotes.length;
+    && uniqueIds(quotes, SHARE_LIMITS.quotes) && uniqueIds(storyIds, SHARE_LIMITS.stories);
   if (!valid) throw fail(400, UNREADABLE);
-  return { requestId: body.requestId, title: body.title, views, startViewId: body.startViewId, camera, contributionIds: [...quotes], synthetic: body.synthetic };
+  return {
+    requestId: body.requestId, title: body.title, views, startViewId: body.startViewId, camera, contributionIds: [...quotes], synthetic: body.synthetic, storyIds: [...storyIds],
+  };
 }
 
 function parseIssue(body) {
@@ -118,6 +126,29 @@ const sharesOf = (manifest) => manifest.shares ?? { previews: [], snapshots: [],
 const contributionsOf = (manifest) => manifest.collaboration?.contributions ?? [];
 const variantsOf = (manifest) => manifest.collaboration?.variants ?? [];
 
+// The one resolver for a saved arrangement, shared by snapshots and stories:
+// an exact retained version or an immutable variant, with its own transform
+// and inherited contribution dependencies. It never rebinds to the latest edit.
+export function savedView(manifest, view) {
+  if (view.kind === 'version') {
+    if (!Number.isInteger(view.version) || view.version < 1 || view.version > manifest.edit.version) return null;
+    const edit = view.version === 1 ? { offset: [0, 0, 0], yaw: 0 } : manifest.edits.find((item) => item.version === view.version);
+    if (!edit) return null;
+    return {
+      edit: { offset: [...edit.offset], yaw: edit.yaw }, dependencies: versionDependencies(manifest, view.version), era: null, eraRevision: null,
+      label: `Saved version ${view.version}`,
+    };
+  }
+  const variants = variantsOf(manifest);
+  const variant = variants.find((item) => item.id === view.variantId);
+  if (!variant) return null;
+  const label = variant.kind === 'baseline' ? 'Saved reconstruction' : `Alternative arrangement ${variants.filter((item) => item.kind !== 'baseline').indexOf(variant) + 1}`;
+  return {
+    edit: { offset: [...variant.edit.offset], yaw: variant.edit.yaw }, dependencies: [...variant.contributionIds],
+    era: variant.eraAssertions.at(-1) ?? null, eraRevision: variant.eraRevision, label,
+  };
+}
+
 // Visitor-facing content excludes the snapshot ID and time, so the digest
 // binds exactly what the owner previewed.
 const contentDigest = (publicView) => {
@@ -131,8 +162,9 @@ const UNKNOWN_ERA = Object.freeze({ kind: 'unknown', label: '', start: null, end
 // snapshots and receipts live in that reconstruction's manifest, so issuing
 // and a contribution withdrawal share its mutex and atomic manifest write.
 export class ShareStore {
-  constructor({ reconstructions, now = Date.now }) {
+  constructor({ reconstructions, stories, now = Date.now }) {
     this.reconstructions = reconstructions;
+    this.stories = stories;
     this.now = now;
   }
 
@@ -169,9 +201,8 @@ export class ShareStore {
     return null;
   }
 
-  // Null when the frozen selection may still be shown. `current` also requires
-  // version views to be the saved version, as at preview and issue time.
-  async #liveIssue(manifest, frozen, { current }) {
+  // Null when the frozen selection may still be shown.
+  async #liveIssue(manifest, frozen) {
     const source = await this.#sourceIssue(manifest);
     if (source) return source;
     if (manifest.sourceSha256 !== frozen.sourceSha256) return 'source';
@@ -185,12 +216,17 @@ export class ShareStore {
     const grants = this.#contributionIssue(manifest, ids);
     if (grants) return grants;
     for (const view of frozen.views) {
-      if (view.kind === 'version' && current && view.version !== manifest.edit.version) return 'changed';
+      if (view.kind === 'version' && !savedView(manifest, view)) return 'changed';
       if (view.kind === 'variant') {
         const variant = variantsOf(manifest).find((item) => item.id === view.variantId);
         if (!variant) return 'withdrawn';
         if (variant.eraRevision !== view.eraRevision) return 'era';
       }
+    }
+    // Selected recorded stories: the story itself, its voice, photo and
+    // dependencies under current share rules, and its pinned playback file.
+    for (const pinned of frozen.stories ?? []) {
+      if (await this.stories.shareIssue(manifest, pinned)) return 'story';
     }
     return null;
   }
@@ -217,17 +253,10 @@ export class ShareStore {
     if (reason) this.#throwReason(reason);
     const draft = await this.reconstructions.drafts.get(manifest.draftId);
     const source = draft.sources.find((item) => item.id === manifest.sourceId);
-    const variants = variantsOf(manifest);
-    let alternatives = 0;
     const selected = request.views.map((view) => {
-      if (view.kind === 'version') {
-        if (view.version !== manifest.edit.version) throw fail(409, 'Only the current saved version can be shared. Reload and select it again.');
-        return { view, edit: manifest.edit, dependencies: versionDependencies(manifest, view.version), era: null, eraRevision: null, label: 'Saved scene' };
-      }
-      const variant = variants.find((item) => item.id === view.variantId);
-      if (!variant) throw fail(404, 'This version of the scene could not be found.');
-      const label = variant.kind === 'baseline' ? 'Saved reconstruction' : `Alternative arrangement ${(alternatives += 1)}`;
-      return { view, edit: variant.edit, dependencies: [...variant.contributionIds], era: variant.eraAssertions.at(-1) ?? null, eraRevision: variant.eraRevision, label };
+      const resolved = savedView(manifest, view);
+      if (!resolved) throw fail(404, 'This version of the scene could not be found.');
+      return { view, ...resolved };
     });
     const dependencyReason = this.#contributionIssue(manifest, selected.flatMap((item) => item.dependencies));
     if (dependencyReason) this.#throwReason(dependencyReason);
@@ -276,9 +305,19 @@ export class ShareStore {
         },
       };
     });
+    // Each story must belong to exactly one selected view; it is never moved to another arrangement.
+    const pinnedStories = [];
+    const publicStories = [];
+    for (const storyId of request.storyIds) {
+      const shared = await this.stories.forShare(manifest, storyId, selected.map(({ view, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, eraRevision })));
+      if (!shared) this.#throwReason('story');
+      const publicId = randomUUID();
+      pinnedStories.push({ publicId, ...shared.pinned });
+      publicStories.push({ id: publicId, ...shared.publicStory });
+    }
     const publicView = {
       id: null, title: request.title, createdAt: null, synthetic: request.synthetic, startViewId: request.startViewId,
-      camera: { position: [...request.camera.position], target: [...request.camera.target] }, views,
+      camera: { position: [...request.camera.position], target: [...request.camera.target] }, views, stories: publicStories,
     };
     const assets = {};
     for (const name of Object.keys(SHARED_ASSETS)) {
@@ -292,6 +331,7 @@ export class ShareStore {
       assets,
       views: selected.map(({ view, dependencies, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision })),
       quotes: quotes.map((item) => ({ contributionId: item.id, textSha256: item.textSha256 })),
+      stories: pinnedStories,
     };
     return { publicView, frozen };
   }
@@ -349,7 +389,7 @@ export class ShareStore {
   // Callers already hold the manifest mutex.
   async #checkPreview(manifest, preview) {
     if (this.now() >= Date.parse(preview.expiresAt)) throw fail(409, 'This preview expired. Make a new preview.');
-    const reason = await this.#liveIssue(manifest, preview.frozen, { current: true });
+    const reason = await this.#liveIssue(manifest, preview.frozen);
     if (reason) this.#throwReason(reason);
   }
 
@@ -419,7 +459,7 @@ export class ShareStore {
       const now = this.now();
       if (now >= Date.parse(preview.expiresAt)) throw fail(409, 'This preview expired. Make a new preview.');
       if (shares.snapshots.length >= SHARE_LIMITS.snapshotsPerScene) throw fail(409, 'This scene has reached the number of shared snapshots it can keep.');
-      const reason = await this.#liveIssue(manifest, preview.frozen, { current: true });
+      const reason = await this.#liveIssue(manifest, preview.frozen);
       if (reason) this.#throwReason(reason);
       const createdAt = new Date(now).toISOString();
       const snapshot = {
@@ -442,7 +482,7 @@ export class ShareStore {
   async #status(manifest, snapshot) {
     if (snapshot.revokedAt) return { status: 'revoked', reason: 'Revoked by the owner.' };
     if (this.now() >= Date.parse(snapshot.expiresAt)) return { status: 'expired', reason: 'The link reached its expiry time.' };
-    const reason = await this.#liveIssue(manifest, snapshot.frozen, { current: false });
+    const reason = await this.#liveIssue(manifest, snapshot.frozen);
     return reason ? { status: 'suspended', reason: REASONS[reason][1] } : { status: 'active', reason: null };
   }
 
@@ -503,7 +543,27 @@ export class ShareStore {
   }
 
   visit(token) {
-    return this.#visitable(token, (manifest, snapshot) => structuredClone(snapshot.publicView));
+    return this.#visitable(token, (manifest, snapshot) => ({ stories: [], ...structuredClone(snapshot.publicView) }));
+  }
+
+  // Playback for a story pinned in this preview or snapshot, verified against
+  // the pinned checksum in the same mutex slot as the authorization.
+  previewStoryAudio(draftId, jobId, principal, previewId, publicStoryId) {
+    return this.#livePreview(draftId, jobId, principal, previewId, async (manifest, preview) => {
+      const pinned = (preview.frozen.stories ?? []).find((item) => item.publicId === publicStoryId);
+      const asset = pinned && (await this.stories.pinnedAudio(manifest, pinned));
+      if (!asset) throw fail(404, 'Not found.');
+      return asset;
+    });
+  }
+
+  visitStoryAudio(token, publicStoryId) {
+    return this.#visitable(token, async (manifest, snapshot) => {
+      const pinned = (snapshot.frozen.stories ?? []).find((item) => item.publicId === publicStoryId);
+      const asset = pinned && (await this.stories.pinnedAudio(manifest, pinned).catch(() => null));
+      if (!asset) throw unavailable();
+      return asset;
+    });
   }
 
   // Admission only: a stream already handed to a visitor cannot be recalled.

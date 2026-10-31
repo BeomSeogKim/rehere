@@ -150,7 +150,8 @@ describe('share store previews', () => {
       const views = change.views ?? [view];
       await assert.rejects(ctx.preview(views, { startViewId: views[0]?.id ?? view.id, ...change }), status(400), JSON.stringify(change).slice(0, 60));
     }
-    await assert.rejects(ctx.preview([ctx.versionView(2)]), status(409));
+    // A version that was never saved does not exist; it is not a newer copy of the current one.
+    await assert.rejects(ctx.preview([ctx.versionView(2)]), status(404));
     await assert.rejects(ctx.preview([ctx.variantView(randomUUID())]), status(404));
   });
 
@@ -236,7 +237,7 @@ describe('share store issue and visit', () => {
     assert.deepEqual(Object.keys(receipt).sort(), ['createdAt', 'digest', 'expiresAt', 'id', 'previewId', 'status']);
 
     const view = await ctx.shares.visit(token);
-    assert.deepEqual(Object.keys(view).sort(), ['camera', 'createdAt', 'id', 'startViewId', 'synthetic', 'title', 'views']);
+    assert.deepEqual(Object.keys(view).sort(), ['camera', 'createdAt', 'id', 'startViewId', 'stories', 'synthetic', 'title', 'views']);
     assert.equal(view.id, receipt.id);
     assert.deepEqual(view.camera, { position: [0, 0.5, 1], target: [0, 0, -3] });
     for (const item of view.views) {
@@ -323,7 +324,7 @@ describe('share store issue and visit', () => {
     assert.ok(!(await ctx.disk()).includes(token.slice(4)));
   });
 
-  it('requires a new preview after a selected change, but not after an unrelated private edit', async () => {
+  it('requires a new preview after a selected change, but not after a later private edit', async () => {
     const ctx = await setup();
     const withdrawnLater = await ctx.submit();
     const { variant } = await ctx.review(withdrawnLater, { decision: 'alternative' });
@@ -334,8 +335,11 @@ describe('share store issue and visit', () => {
     const byEdit = await ctx.preview([ctx.versionView(1)]);
     const unrelated = await ctx.preview([ctx.variantView(baseline.id)]);
 
+    // A retained version stays pinned: a later private edit neither invalidates nor rebinds it.
     await ctx.edit(1);
-    await assert.rejects(ctx.issue(byEdit), status(409));
+    const pinnedToken = visitToken();
+    assert.equal((await ctx.issue(byEdit, { token: pinnedToken })).status, 'active');
+    assert.deepEqual((await ctx.shares.visit(pinnedToken)).views[0].edit, { offset: [0, 0, 0], yaw: 0 });
     assert.equal((await ctx.issue(unrelated)).status, 'active');
     await ctx.collaboration.era(ctx.draftId, ctx.jobId, ctx.owner, baseline.id, {
       requestId: randomUUID(), baseRevision: 0, kind: 'exact', label: '', start: '1936-07-01', end: '1936-07-01', statement: 'Catalog date.', relation: null, relativeToVariantId: null, confirmed: true,
@@ -344,7 +348,10 @@ describe('share store issue and visit', () => {
     await ctx.collaboration.withdraw(ctx.draftId, ctx.jobId, ctx.alex, withdrawnLater.id, { requestId: randomUUID() });
     await assert.rejects(ctx.issue(byWithdrawal), status(409));
     const listed = await ctx.shares.list(ctx.draftId, ctx.jobId, ctx.owner);
-    assert.deepEqual(listed.map((item) => [item.status, item.reason]), [['suspended', 'The time assertion for a selected alternative changed. Make a new preview.']]);
+    assert.deepEqual(listed.map((item) => [item.status, item.reason]), [
+      ['suspended', 'The time assertion for a selected alternative changed. Make a new preview.'],
+      ['active', null],
+    ]);
   });
 
   it('keeps a clean shared version visitable when a later private version is blocked, but not a dependent one', async () => {

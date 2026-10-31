@@ -116,6 +116,7 @@ let posts;
 let heldGets;
 let proposals;
 let collaboration;
+let storyList;
 let history;
 
 before(async () => {
@@ -133,6 +134,7 @@ before(async () => {
     if (url.endsWith('/reconstructions')) return json(200, [job]);
     if (url.endsWith('/proposals')) return json(200, proposals);
     if (url.endsWith('/collaboration')) return json(200, collaboration);
+    if (url.endsWith('/stories')) return json(200, { stories: storyList });
     if (url === '/api/invitations') return json(200, []);
     if (url.endsWith('/history')) return json(200, history);
     if (heldGets) {
@@ -157,6 +159,7 @@ beforeEach(() => {
   heldGets = null;
   proposals = [];
   collaboration = { revision: 0, contributions: [], variants: [], blocked: false, currentVersion: 1 };
+  storyList = [];
   history = [{ version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial' }];
   surfaceBody = surface();
   job = {
@@ -171,9 +174,9 @@ beforeEach(() => {
   };
 });
 
-async function openScene() {
+async function openScene({ sources = [] } = {}) {
   const container = new FakeElement('section');
-  const draft = { id: DRAFT_ID, photos: [{ name: 'photo-1.jpg', sourceId: SOURCE_ID }] };
+  const draft = { id: DRAFT_ID, photos: [{ name: 'photo-1.jpg', sourceId: SOURCE_ID }], sources };
   const granted = { kind: 'photo', origin: { kind: 'public', reference: '' }, permissions: { place: true, model: true, share: false } };
   const space = mountSpace(container, { draft, sourceFor: () => granted });
   await settle();
@@ -636,6 +639,78 @@ describe('scenes whose photo can no longer be used', () => {
     assert.equal(count('renderer'), 0);
     assert.ok(view.button('Restore version 1'));
     assert.doesNotMatch(view.find((node) => node.tag === 'h3')[0].textContent, /no longer shown/);
+    view.space.dispose();
+  });
+});
+
+describe('stories and sharing in one scene', () => {
+  const VOICE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const voice = { id: VOICE, kind: 'voice', provider: 'Owner', permissions: { place: true, model: false, share: true }, policy: { revision: 0, stopped: false } };
+  const story = (overrides = {}) => ({
+    id: 'st1',
+    status: 'ready',
+    available: true,
+    blockedReason: null,
+    title: 'Morning bell',
+    target: { id: 'selected-foreground', label: 'Selected foreground object' },
+    view: { kind: 'version', version: 1, variantId: null, eraRevision: null, label: 'Saved version 1', era: null },
+    voice: { sourceId: VOICE, provider: 'Owner' },
+    captionAuthor: { displayName: 'Owner' },
+    cues: [{ startMs: 0, endMs: 1000, text: 'Synthetic test tone; no speech.' }],
+    durationMs: 1000,
+    audio: { type: 'audio/wav', size: 32044 },
+    error: null,
+    createdAt: '2026-11-01T00:00:00.000Z',
+    withdrawnAt: null,
+    ...overrides,
+  });
+
+  it('offers a just-saved story for sharing, and withdrawing it removes the option and discards an unissued preview', async () => {
+    const view = await openScene({ sources: [voice] });
+    const storyPanel = view.find((node) => node.className === 'memory-edit story-owner')[0];
+    const sharePanel = view.find((node) => node.className === 'memory-edit share-owner')[0];
+    const inStory = (text) => storyPanel.findAll((node) => node.tag === 'button' && node.textContent === text)[0];
+    const inShare = (text) => sharePanel.findAll((node) => node.tag === 'button' && node.textContent === text)[0];
+    const storyOption = () => sharePanel.findAll((node) => node.tag === 'label' && node.textContent.includes('“Morning bell”'))[0];
+    assert.match(sharePanel.textContent, /No recorded story belongs to the chosen views/);
+
+    // Save a story for the current saved version through the real composer.
+    storyPanel.findAll((node) => node.tag === 'select')[1].value = 'version:1';
+    const [title, start, end] = storyPanel.findAll((node) => node.tag === 'input' && node.type === 'text');
+    title.value = 'Morning bell';
+    start.value = '0:00';
+    end.value = '0:01.0';
+    storyPanel.findAll((node) => node.tag === 'textarea')[0].value = 'Synthetic test tone; no speech.';
+    storyPanel.findAll((node) => node.tag === 'input' && node.type === 'checkbox')[0].checked = true;
+    inStory('Save story').dispatch('click');
+    await settle();
+    const created = posts.find((post) => post.body?.voiceSourceId);
+    storyList = [story()];
+    created.respond(json(201, story()));
+    await settle();
+    assert.ok(storyOption(), 'the new story is offered for the chosen view');
+    assert.equal(storyOption().children[0].checked, false, 'never selected automatically');
+
+    // A preview made before the withdrawal no longer matches afterwards.
+    sharePanel.findAll((node) => node.tag === 'input' && node.type === 'text')[0].value = 'Shop';
+    inShare('Use the current camera view').dispatch('click');
+    inShare('Preview what visitors will see').dispatch('click');
+    await settle();
+    const preview = posts.find((post) => post.body?.camera);
+    preview.respond(json(200, { id: 'p1', digest: 'd1', expiresAt: new Date(Date.now() + 900_000).toISOString(), publicView: null }));
+    await settle();
+    assert.ok(inShare('Issue a visitor link'), 'a preview exists');
+
+    inStory('Withdraw story').dispatch('click');
+    inStory('Withdraw this story').dispatch('click');
+    await settle();
+    const withdraw = posts.find((post) => post.body && Object.keys(post.body).length === 1 && post.body.requestId && !post.body.camera);
+    storyList = [story({ status: 'withdrawn', available: false })];
+    withdraw.respond(json(200, story({ status: 'withdrawn', available: false })));
+    await settle();
+    assert.equal(storyOption(), undefined, 'the withdrawn story is no longer offered');
+    assert.equal(inShare('Issue a visitor link'), undefined, 'the unissued preview was discarded');
+    assert.match(sharePanel.textContent, /Recorded stories changed\. Make a new preview before issuing a link\./);
     view.space.dispose();
   });
 });

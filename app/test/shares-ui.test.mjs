@@ -17,6 +17,8 @@ const flush = async () => {
 };
 
 let mountShares;
+let viewChoices;
+let storyMatchesView;
 let quotable;
 let previewProblem;
 let visitLink;
@@ -57,7 +59,7 @@ before(async () => {
     const handler = routes[`${options.method ?? 'GET'} ${url}`] ?? (url.includes('/assets/') ? () => Promise.resolve(json(200, visitorSurface())) : null);
     return handler ? handler(body) : Promise.resolve(json(404, { error: 'Not found.' }));
   };
-  ({ mountShares, quotable, previewProblem, visitLink } = await import('../public/shares.js'));
+  ({ mountShares, quotable, previewProblem, visitLink, viewChoices, storyMatchesView } = await import('../public/shares.js'));
 });
 
 after(() => {
@@ -137,10 +139,32 @@ describe('sharing helpers', () => {
   });
 });
 
+describe('saved view choices', () => {
+  it('offers every retained usable version by number and usable alternatives with their era revision', () => {
+    const choices = viewChoices({
+      history: [{ version: 1, blocked: false }, { version: 2, blocked: true }, { version: 3, blocked: false }],
+      variants: [{ id: VID, label: 'Alt', blocked: false, eraRevision: 2, era: { kind: 'relative', label: 'before' } }, { id: 'b', label: 'Blocked', blocked: true }],
+      currentVersion: 3,
+    });
+    assert.deepEqual(choices.map((c) => [c.kind, c.version, c.variantId, c.eraRevision, c.label]), [
+      ['version', 3, null, null, 'Saved version 3 (current)'],
+      ['version', 1, null, null, 'Saved version 1'],
+      ['variant', null, VID, 2, 'Alt'],
+    ]);
+  });
+
+  it('matches a story only to the exact view it was saved for', () => {
+    const story = { view: { kind: 'version', version: 1, variantId: null } };
+    assert.equal(storyMatchesView(story, { kind: 'version', version: 1, variantId: null }), true);
+    assert.equal(storyMatchesView(story, { kind: 'version', version: 2, variantId: null }), false, 'never rebinds to a newer version');
+    assert.equal(storyMatchesView({ view: { kind: 'variant', variantId: VID } }, { kind: 'variant', version: null, variantId: VID }), true);
+  });
+});
+
 describe('owner sharing panel', () => {
   it('offers the current version and usable alternatives, and only quotable recollections, all quotes off', async () => {
     const ui = await mount();
-    assert.ok(ui.label('Current saved scene, version 5'));
+    assert.ok(ui.label('Saved version 5 (current)'));
     assert.ok(ui.label('Mina’s recollection'));
     assert.equal(ui.label('Blocked reconstruction'), undefined);
     const quotes = ui.find((node) => node.tag === 'label' && node.textContent.includes('Mina: '));
@@ -155,7 +179,8 @@ describe('owner sharing panel', () => {
     await previewed(ui);
     const [sent] = requests.filter((r) => r.method === 'POST' && r.url === `${SHARES}/previews`);
     const ids = sent.body.views.map((view) => view.id);
-    assert.deepEqual(Object.keys(sent.body).sort(), ['camera', 'contributionIds', 'requestId', 'startViewId', 'synthetic', 'title', 'views']);
+    assert.deepEqual(Object.keys(sent.body).sort(), ['camera', 'contributionIds', 'requestId', 'startViewId', 'storyIds', 'synthetic', 'title', 'views']);
+    assert.deepEqual(sent.body.storyIds, [], 'no story unless chosen');
     assert.deepEqual(sent.body.views, [
       { id: ids[0], kind: 'version', version: 5, variantId: null },
       { id: ids[1], kind: 'variant', version: null, variantId: VID },
@@ -168,6 +193,50 @@ describe('owner sharing panel', () => {
     assert.match(ui.root.textContent, /This preview is not a link/);
     assert.match(ui.root.textContent, /Preview — not yet issued/);
     assert.doesNotMatch(ui.root.textContent, /saved copy|Shared [A-Z][a-z]{2} \d|1970|\bnull\b|Invalid Date/, 'a preview never looks issued or shows a made-up date');
+  });
+
+  it('shares an older retained version with its own story, not the current one', async () => {
+    routes[`GET ${JOB_URL}/history`] = () => Promise.resolve(json(200, [{ version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial', blocked: false }, { version: 5, offset: [1, 0, 0], yaw: 0, kind: 'manual', blocked: false }]));
+    routes[`GET ${JOB_URL}/stories`] = () =>
+      Promise.resolve(
+        json(200, {
+          stories: [
+            { id: 'st1', status: 'ready', available: true, title: 'Morning bell', view: { kind: 'version', version: 1, variantId: null, label: 'Saved version 1' }, voice: { provider: 'Owner' }, captionAuthor: { displayName: 'Owner' } },
+            { id: 'st2', status: 'ready', available: false, title: 'Hidden', view: { kind: 'version', version: 1, variantId: null }, voice: {}, captionAuthor: {} },
+          ],
+        }),
+      );
+    const ui = await mount();
+    assert.match(ui.root.textContent, /No recorded story belongs to the chosen views/);
+    ui.tick('Saved version 5 (current)');
+    ui.tick('Saved version 1');
+    assert.match(ui.root.textContent, /“Morning bell” · Saved version 1 · recording by Owner, captions by Owner/);
+    assert.doesNotMatch(ui.root.textContent, /Hidden/);
+    ui.tick('“Morning bell”');
+    await previewed(ui);
+    const [sent] = requests.filter((r) => r.method === 'POST' && r.url === `${SHARES}/previews`);
+    assert.deepEqual(sent.body.views.map((view) => [view.kind, view.version]), [['version', 1]]);
+    assert.deepEqual(sent.body.storyIds, ['st1']);
+  });
+
+  it('keeps the latest story choices when an older combined read answers late, in both directions', async () => {
+    const readyV5 = { id: 'st1', status: 'ready', available: true, title: 'Morning bell', view: { kind: 'version', version: 5, variantId: null, label: 'Saved version 5' }, voice: { provider: 'Owner' }, captionAuthor: { displayName: 'Owner' } };
+    for (const [olderList, newerList, expected] of [[[], [readyV5], true], [[readyV5], [], false]]) {
+      const held = [];
+      let reads = 0;
+      routes[`GET ${JOB_URL}/stories`] = () => {
+        reads += 1;
+        if (reads === 1) return new Promise((resolve) => held.push(() => resolve(json(200, { stories: olderList }))));
+        return Promise.resolve(json(200, { stories: newerList }));
+      };
+      const ui = await mount();
+      ui.panel.refreshOptions();
+      await flush();
+      held[0]();
+      await flush();
+      const offered = Boolean(ui.find((node) => node.tag === 'label' && node.textContent.includes('“Morning bell”'))[0]);
+      assert.equal(offered, expected, expected ? 'a late empty read does not remove the new story' : 'a late read does not bring back a withdrawn story');
+    }
   });
 
   it('issues only after a rendered preview and consent, with a locally made token, and shows the link once', async () => {
@@ -193,6 +262,9 @@ describe('owner sharing panel', () => {
     const code = ui.find((node) => node.tag === 'code')[0].textContent;
     assert.equal(code, `http://127.0.0.1:4317/#/visit/${first.body.token}`);
     assert.match(ui.root.textContent, /shown only now/);
+    ui.panel.refreshOptions();
+    await flush();
+    assert.equal(ui.find((node) => node.tag === 'code')[0]?.textContent, code, 'a story change does not hide an issued link');
   });
 
   it('never shows an earlier preview’s link under a newer preview', async () => {

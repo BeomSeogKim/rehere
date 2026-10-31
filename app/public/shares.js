@@ -28,6 +28,27 @@ export const visitLink = (origin, token) => `${origin}/#/visit/${token}`;
 // and sharing and it is still in use.
 export const quotable = (entry) => QUOTABLE.has(entry.status) && typeof entry.text === 'string' && entry.permissions?.place === true && entry.permissions?.share === true;
 
+// Every retained saved version that is still usable, newest first, then each
+// usable alternative. A version is chosen by its number, never inferred from a
+// matching position; its time stays unknown.
+export function viewChoices({ history = [], variants = [], currentVersion }) {
+  const versions = history
+    .filter((entry) => Number.isInteger(entry.version) && entry.blocked !== true)
+    .map((entry) => entry.version)
+    .sort((a, b) => b - a);
+  if (!versions.includes(currentVersion)) versions.unshift(currentVersion);
+  return [
+    ...versions.map((version) => ({ key: `version:${version}`, kind: 'version', version, variantId: null, eraRevision: null, label: `Saved version ${version}${version === currentVersion ? ' (current)' : ''}`, era: null })),
+    ...variants
+      .filter((variant) => !variant.blocked)
+      .map((variant) => ({ key: variant.id, kind: 'variant', version: null, variantId: variant.id, eraRevision: variant.eraRevision, label: variant.label, era: variant.era ?? null })),
+  ];
+}
+
+// A story can be offered for a view only if it was saved for exactly that view.
+export const storyMatchesView = (story, view) =>
+  story.view?.kind === view.kind && (view.kind === 'version' ? story.view.version === view.version : story.view.variantId === view.variantId);
+
 export function previewProblem({ title, views, startViewId, camera, contributionIds }) {
   if (!title.trim()) return 'Give the shared view a title.';
   if ([...title].length > TITLE_LIMIT) return `Keep the title to ${TITLE_LIMIT} characters or fewer.`;
@@ -80,6 +101,9 @@ const when = (iso) => new Date(iso).toLocaleString('en-US', { dateStyle: 'medium
 export function mountShares(container, bridge) {
   let disposed = false;
   let collaboration = null;
+  let history = [];
+  let stories = [];
+  let storyBoxes = [];
   let camera = null;
   let preview = null;
   let previewView = null;
@@ -99,6 +123,7 @@ export function mountShares(container, bridge) {
   const viewList = el('div');
   const startSelect = el('select');
   const quoteList = el('div');
+  const storyList = el('div');
   const cameraNote = el('p', { className: 'hint', textContent: 'No camera view captured yet.' });
   const captureButton = el('button', { type: 'button', className: 'secondary', textContent: 'Use the current camera view' });
   const previewButton = el('button', { type: 'button', textContent: 'Preview what visitors will see' });
@@ -126,6 +151,11 @@ export function mountShares(container, bridge) {
         el('p', { className: 'hint', textContent: 'Quoting shows the person’s own words. Only recollections whose writers allowed both reconstruction and sharing can be quoted.' }),
         quoteList,
       ]),
+      el('fieldset', { className: 'source-permissions' }, [
+        el('legend', { textContent: 'Recorded stories to include (optional)' }),
+        el('p', { className: 'hint', textContent: 'Only stories saved for one of the chosen views can be included. Visitors hear the converted playback copy with its captions.' }),
+        storyList,
+      ]),
       el('div', { className: 'actions' }, [captureButton]),
       cameraNote,
       el('div', { className: 'actions' }, [previewButton]),
@@ -140,7 +170,7 @@ export function mountShares(container, bridge) {
   const selectedViews = () =>
     viewBoxes
       .filter(({ box }) => box.checked === true)
-      .map(({ key, kind, variantId }) => ({ id: idFor(key), kind, version: kind === 'version' ? bridge.editor().version : null, variantId: kind === 'variant' ? variantId : null }));
+      .map(({ key, kind, version, variantId }) => ({ id: idFor(key), kind, version: kind === 'version' ? version : null, variantId: kind === 'variant' ? variantId : null }));
 
   // Any change after a preview discards it: issue binds to the exact preview.
   function discardPreview(reason = '') {
@@ -162,22 +192,37 @@ export function mountShares(container, bridge) {
     startSelect.value = views.some((view) => view.id === previous) ? previous : views[0]?.id ?? '';
   }
 
+  function renderStories() {
+    const views = selectedViews();
+    const chosen = new Set(storyBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id));
+    const offered = stories.filter((story) => story.status === 'ready' && story.available === true && views.some((view) => storyMatchesView(story, view)));
+    storyBoxes = offered.map((story) => ({ id: story.id, story, box: el('input', { type: 'checkbox', checked: chosen.has(story.id) }) }));
+    storyList.replaceChildren(
+      ...(storyBoxes.length
+        ? storyBoxes.map(({ box, story }) =>
+            el('label', {}, [box, ` “${story.title}” · ${story.view?.label ?? 'saved view'} · recording by ${story.voice?.provider || 'an unnamed provider'}, captions by ${story.captionAuthor?.displayName || 'the owner'}`]),
+          )
+        : [el('p', { className: 'hint', textContent: 'No recorded story belongs to the chosen views.' })]),
+    );
+    for (const { box } of storyBoxes) box.addEventListener('change', () => discardPreview());
+  }
+
   function renderChoices() {
-    const version = bridge.editor().version;
-    const choices = [{ key: 'version', kind: 'version', label: `Current saved scene, version ${version}` }];
-    for (const variant of collaboration?.variants ?? []) {
-      if (!variant.blocked) choices.push({ key: variant.id, kind: 'variant', variantId: variant.id, label: variant.label });
-    }
+    const currentVersion = bridge.editor().version;
+    const choices = viewChoices({ history, variants: collaboration?.variants ?? [], currentVersion });
     const checked = new Set(viewBoxes.filter(({ box }) => box.checked === true).map(({ key }) => key));
-    viewBoxes = choices.map((choice) => ({ ...choice, box: el('input', { type: 'checkbox', checked: checked.has(choice.key) || (checked.size === 0 && choice.key === 'version') }) }));
+    const fallback = `version:${currentVersion}`;
+    viewBoxes = choices.map((choice) => ({ ...choice, box: el('input', { type: 'checkbox', checked: checked.has(choice.key) || (checked.size === 0 && choice.key === fallback) }) }));
     viewList.replaceChildren(...viewBoxes.map(({ box, label }) => el('label', {}, [box, ` ${label}`])));
     for (const { box } of viewBoxes) {
       box.addEventListener('change', () => {
         renderStart();
+        renderStories();
         discardPreview();
       });
     }
     renderStart();
+    renderStories();
 
     const chosenQuotes = new Set(quoteBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id));
     const eligible = (collaboration?.contributions ?? []).filter(quotable);
@@ -197,6 +242,7 @@ export function mountShares(container, bridge) {
       startViewId: startSelect.value,
       camera,
       contributionIds: quoteBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id),
+      storyIds: storyBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id),
       synthetic: synthetic.checked === true,
     };
   }
@@ -386,23 +432,37 @@ export function mountShares(container, bridge) {
   });
   previewButton.addEventListener('click', makePreview);
 
-  (async () => {
-    const result = await request(`${bridge.jobUrl}/collaboration`);
-    if (disposed) return;
-    collaboration = result.ok && Array.isArray(result.body?.variants) ? result.body : { variants: [], contributions: [] };
+  // Views, quotes and stories come from the saved history, alternatives and
+  // stories of this scene, read together so the choices agree.
+  // Only the latest combined read may set the choices, so an older read that
+  // answers late cannot remove a newer story or bring back a withdrawn one.
+  let choicesToken = 0;
+  async function loadChoices() {
+    const token = ++choicesToken;
+    const [collab, versions, saved] = await Promise.all([request(`${bridge.jobUrl}/collaboration`), request(`${bridge.jobUrl}/history`), request(`${bridge.jobUrl}/stories`)]);
+    if (disposed || token !== choicesToken) return;
+    collaboration = collab.ok && Array.isArray(collab.body?.variants) ? collab.body : { variants: [], contributions: [] };
+    history = versions.ok && Array.isArray(versions.body) ? versions.body : [];
+    stories = saved.ok && Array.isArray(saved.body?.stories) ? saved.body.stories : [];
     renderChoices();
-  })();
+  }
+
+  loadChoices();
   loadList();
 
   return {
+    // Stories were saved or withdrawn: the choices are read again, keeping the
+    // owner's selections that are still offered and never selecting a story.
+    // A preview not yet issued no longer matches and is discarded; a link
+    // already issued stays on screen.
+    refreshOptions() {
+      if (preview && issuedFor !== preview.id) discardPreview('Recorded stories changed. Make a new preview before issuing a link.');
+      loadChoices();
+    },
     // The saved version changed: views and quotes are chosen again.
     refresh() {
       discardPreview();
-      request(`${bridge.jobUrl}/collaboration`).then((result) => {
-        if (disposed) return;
-        collaboration = result.ok && Array.isArray(result.body?.variants) ? result.body : collaboration;
-        renderChoices();
-      });
+      loadChoices();
       loadList();
     },
     dispose() {

@@ -1,5 +1,6 @@
 import { mountAccess } from './access-ui.js';
 import { mountContributor } from './collaboration.js';
+import { registerElement, stopAll } from './playback.js';
 import { isStopped, mountSourceControls, renderStoppedMarker } from './source-controls.js';
 import { latestOnly } from './latest.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
@@ -348,6 +349,7 @@ async function loadSaved() {
 // Stops a playing recording and drops its address, so stopped or closed
 // material is not heard after it leaves the screen.
 function stopViewerVoice() {
+  stopAll();
   els.viewerVoice.pause?.();
   els.viewerVoice.removeAttribute('src');
   els.viewerVoice.load?.();
@@ -460,7 +462,11 @@ async function openSpace(draft, source) {
   try {
     const module = await import('./space.js');
     if (generation !== spaceGeneration) return;
-    space = module.mountSpace(els.viewerSpace, { draft, sourceFor: source });
+    // An advisory caption bound from the saved recording's already loaded
+    // metadata; the server checks the converted recording itself.
+    const durationHintMs = (sourceId) =>
+      draft.voice?.sourceId === sourceId && Number.isFinite(els.viewerVoice.duration) ? Math.round(els.viewerVoice.duration * 1000) : null;
+    space = module.mountSpace(els.viewerSpace, { draft, sourceFor: source, durationHintMs });
   } catch {
     if (generation !== spaceGeneration) return;
     const message = document.createElement('p');
@@ -539,6 +545,7 @@ function startOwner() {
 // Removes everything private from the page and stops capture, synchronously,
 // before any sign-out request is sent.
 function stopOwner() {
+  stopAll();
   ownerActive = false;
   sessionGeneration += 1;
   viewRequests.invalidate();
@@ -587,6 +594,7 @@ async function routeVisit() {
   if (!match) {
     if (!visiting) return false;
     // Leaving a visit removes it completely before the normal app starts.
+    stopAll();
     visiting = false;
     visitor?.dispose();
     visitor = null;
@@ -596,6 +604,7 @@ async function routeVisit() {
     return false;
   }
   visiting = true;
+  stopAll();
   // Drops any pending session or sign-in answer and any contributor screen, so
   // nothing private starts or stays while the visit is shown.
   access.suspend();
@@ -613,6 +622,14 @@ async function routeVisit() {
 }
 
 window.addEventListener('hashchange', routeVisit);
+
+// One playback across the page; a hidden or closing page plays nothing.
+registerElement(els.preview, 'recorder-listen-back');
+registerElement(els.viewerVoice, 'saved-recording');
+document.addEventListener?.('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') stopAll();
+});
+window.addEventListener('pagehide', () => stopAll());
 
 renderTextSource();
 renderVoiceSource();

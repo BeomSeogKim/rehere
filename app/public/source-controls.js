@@ -26,7 +26,11 @@ export function cancellationText(cancellation) {
 export function impactText(impacts) {
   if (!impacts) return 'Rehere could not count where this material is used.';
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-  return `Currently used by ${plural(impacts.scenes ?? 0, 'scene', 'scenes')} and ${plural(impacts.snapshots ?? 0, 'shared link', 'shared links')}, with ${plural(impacts.processing ?? 0, 'piece of work', 'pieces of work')} in progress.`;
+  const uses = [plural(impacts.scenes ?? 0, 'scene', 'scenes')];
+  if (Number.isInteger(impacts.stories)) uses.push(plural(impacts.stories, 'recorded story', 'recorded stories'));
+  uses.push(plural(impacts.snapshots ?? 0, 'shared link', 'shared links'));
+  const listed = uses.length === 2 ? uses.join(' and ') : `${uses.slice(0, -1).join(', ')} and ${uses.at(-1)}`;
+  return `Currently used by ${listed}, with ${plural(impacts.processing ?? 0, 'piece of work', 'pieces of work')} in progress.`;
 }
 
 function el(tag, { onclick, ...props } = {}, children = []) {

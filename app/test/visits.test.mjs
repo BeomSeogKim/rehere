@@ -55,11 +55,21 @@ let HEARTBEAT_TIMEOUT_MS;
 let revoked;
 let created;
 let docListeners;
+let audios = [];
 
 before(async () => {
   docListeners = {};
   globalThis.document = {
-    createElement: (tag) => new FakeElement(tag),
+    createElement: (tag) => {
+      if (tag !== 'audio') return new FakeElement(tag);
+      const audio = new FakeElement('audio');
+      audio.calls = [];
+      audio.play = () => (audio.calls.push('play'), Promise.resolve());
+      audio.pause = () => audio.calls.push('pause');
+      audio.load = () => audio.calls.push('load');
+      audios.push(audio);
+      return audio;
+    },
     visibilityState: 'visible',
     addEventListener: (type, listener) => (docListeners[type] = listener),
     removeEventListener: (type) => delete docListeners[type],
@@ -76,6 +86,7 @@ beforeEach(() => {
   globalThis.viewerFail = null;
   revoked = [];
   created = [];
+  audios = [];
   const realCreate = URL.createObjectURL;
   mock.method(URL, 'createObjectURL', (blob) => {
     const url = realCreate(blob);
@@ -329,5 +340,69 @@ describe('visitor screen', () => {
     }
     v.view.dispose();
     delete globalThis.fetch;
+  });
+});
+
+describe('recorded stories for visitors', () => {
+  function storyWav() {
+    const bytes = new Uint8Array(44 + 16);
+    const view = new DataView(bytes.buffer);
+    const write = (offset, text) => [...text].forEach((char, i) => (bytes[offset + i] = char.charCodeAt(0)));
+    write(0, 'RIFF');
+    view.setUint32(4, bytes.length - 8, true);
+    write(8, 'WAVE');
+    write(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, 16000, true);
+    view.setUint32(28, 32000, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    write(36, 'data');
+    view.setUint32(40, 16, true);
+    return bytes;
+  }
+
+  function withStory() {
+    const data = manifest();
+    data.stories = [{ id: 'pub-story', viewId: ALT, title: 'Bell', providerLabel: 'Owner', captionAuthorLabel: 'Owner', cues: [{ startMs: 0, endMs: 500, text: 'Synthetic test tone; no speech.' }], durationMs: 500, audio: { type: 'audio/wav', size: 60 } }];
+    return data;
+  }
+
+  it('lists a story only on its own view, plays nothing until Play, and stops it on a view change', async () => {
+    const requested = [];
+    let allowed = true;
+    const src = source({ manifest: () => Promise.resolve(withStory()), check: () => Promise.resolve(allowed) });
+    src.storyAudio = (id) => {
+      requested.push(id);
+      const bytes = storyWav();
+      return Promise.resolve({ ok: true, status: 200, headers: { get: (name) => (name === 'content-type' ? 'audio/wav' : '60') }, arrayBuffer: async () => bytes.buffer });
+    };
+    const v = open(src);
+    await flush();
+    assert.doesNotMatch(v.container.textContent, /Recorded stories/, 'not on the start view');
+    v.button('Mina’s recollection').dispatch('click');
+    assert.match(v.container.textContent, /Recorded stories for this view/);
+    assert.match(v.container.textContent, /Recording by Owner\. Captions written by Owner; they are not checked by Rehere\. Nothing plays until you press Play\./);
+    assert.deepEqual(requested, []);
+    v.find((node) => node.tag === 'button' && node.textContent === 'Play')[0].dispatch('click');
+    await flush();
+    assert.deepEqual(requested, ['pub-story']);
+    assert.equal(audios.length, 1);
+    v.button('Saved scene').dispatch('click');
+    assert.ok(audios[0].calls.includes('pause'), 'switching view stops the story');
+    assert.equal(audios[0].attributes.src, undefined);
+
+    v.button('Mina’s recollection').dispatch('click');
+    v.find((node) => node.tag === 'button' && node.textContent === 'Play')[0].dispatch('click');
+    await flush();
+    allowed = false;
+    mock.timers.tick(HEARTBEAT_MS);
+    await flush();
+    assert.equal(v.states.at(-1), 'unavailable');
+    assert.ok(audios[1].calls.includes('pause'), 'a failed heartbeat silences the story');
+    assert.deepEqual([...revoked].sort(), [...created].sort(), 'every local copy was released');
+    v.view.dispose();
   });
 });

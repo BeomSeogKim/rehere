@@ -76,8 +76,9 @@ renderer, texture and shared wording. Hidden pages pause immediately; resuming
 requires fresh authorization. Late requests cannot reopen a stopped view.
 Already delivered bytes or recordings made outside the app cannot be recalled.
 
-This unit supports spatial views and permitted written recollections. Recorded
-stories, captions and hosted operation are not yet connected. Owners can narrow
+Spatial views, permitted writing and explicitly selected [recorded stories with
+captions](STORIES.md) can be shared. A story stays with its exact saved view;
+private edits do not rebind it. Hosted operation is not connected. Owners can narrow
 original-source grants or stop their use through [source controls](SOURCE-USES.md);
 current restrictions override every affected frozen snapshot. One server process
 owns the data directory; no multi-server or power-loss guarantee is claimed.

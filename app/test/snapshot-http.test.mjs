@@ -145,7 +145,8 @@ describe('visitor snapshot content', () => {
       const { token, views } = await issued(owner, scene);
       const guest = visitor(app.base, token);
       const manifest = await guest.json('/api/visit');
-      assert.deepEqual(Object.keys(manifest).sort(), ['camera', 'createdAt', 'id', 'startViewId', 'synthetic', 'title', 'views']);
+      assert.deepEqual(Object.keys(manifest).sort(), ['camera', 'createdAt', 'id', 'startViewId', 'stories', 'synthetic', 'title', 'views']);
+      assert.deepEqual(manifest.stories, []);
       assert.deepEqual(manifest.camera, camera);
       assert.equal(manifest.views[0].id, views[0].id);
       const leaked = strings(manifest).join('\n');

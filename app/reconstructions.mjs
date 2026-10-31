@@ -153,7 +153,7 @@ const SOURCE_REDACTED_PROPOSAL = 'This proposal used a photo that is no longer a
 // the manifest contract plus whether the photo's current uses or withdrawn or
 // ungranted contributions block use. `source` is the photo's current uses.
 export function publicManifest(manifest, source = { place: true, model: true }) {
-  const { edits, proposals, collaboration, shares, ...rest } = manifest;
+  const { edits, proposals, collaboration, shares, stories, ...rest } = manifest;
   const ready = manifest.status === 'ready';
   const sourceBlocked = ready && !source.place;
   const contributionBlocked = usageBlocked(manifest);
@@ -250,6 +250,9 @@ export class ReconstructionStore {
     // The one policy instance every route and the share store read through.
     this.sourcePolicies = new SourcePolicies({ dataDir, drafts });
     this.activeProposal = null;
+    // The one story decode in progress, set and cleared by the story store:
+    // { draftId, sourceIds, controller, done }.
+    this.activeStory = null;
     this.rootDir = path.join(dataDir, 'reconstructions');
     this.stagingDir = path.join(dataDir, 'reconstruction-staging');
     this.queue = Promise.resolve();
@@ -274,6 +277,8 @@ export class ReconstructionStore {
       for (const draftId of await listDirs(this.rootDir)) {
         for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
           const file = path.join(this.jobDir(draftId, jobId), 'manifest.json');
+          // Story playback files are staged per job; anything left there was never published.
+          await rm(path.join(this.jobDir(draftId, jobId), 'story-staging'), { recursive: true, force: true });
           const manifest = await readJson(file).catch(() => null);
           if (!manifest) continue;
           const now = new Date().toISOString();
@@ -872,18 +877,27 @@ export class ReconstructionStore {
 
   // Local current uses of a source: scenes built from it, live shared
   // snapshots of those scenes, and model work still running for them.
+  // Counts saved uses of a photo or recording: a scene built from the photo,
+  // its stories, and stories that use the recording. Each snapshot counts once.
   async sourceImpacts(draftId, sourceId) {
-    const impacts = { scenes: 0, snapshots: 0, processing: 0 };
+    const impacts = { scenes: 0, stories: 0, snapshots: 0, processing: 0 };
     if (!UUID_PATTERN.test(draftId)) return impacts;
     const now = Date.now();
     for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
       const manifest = await this.readManifest(draftId, jobId).catch(() => null);
-      if (manifest?.sourceId !== sourceId) continue;
-      if (manifest.status === 'ready') impacts.scenes += 1;
-      if (manifest.status === 'queued' || manifest.status === 'processing') impacts.processing += 1;
-      impacts.processing += (manifest.proposals ?? []).filter((item) => ACTIVE_PROPOSAL.has(item.status)).length;
-      impacts.snapshots += (manifest.shares?.snapshots ?? []).filter((item) => !item.revokedAt && Date.parse(item.expiresAt) > now).length;
+      if (!manifest) continue;
+      const photo = manifest.sourceId === sourceId;
+      const storyIds = (manifest.stories?.items ?? [])
+        .filter((story) => story.status === 'ready' && (photo || story.context.voice.sourceId === sourceId)).map((story) => story.id);
+      if (!photo && storyIds.length === 0) continue;
+      if (photo && manifest.status === 'ready') impacts.scenes += 1;
+      if (photo && (manifest.status === 'queued' || manifest.status === 'processing')) impacts.processing += 1;
+      if (photo) impacts.processing += (manifest.proposals ?? []).filter((item) => ACTIVE_PROPOSAL.has(item.status)).length;
+      impacts.stories += storyIds.length;
+      impacts.snapshots += (manifest.shares?.snapshots ?? []).filter((item) => !item.revokedAt && Date.parse(item.expiresAt) > now
+        && (photo || (item.frozen.stories ?? []).some((pinned) => storyIds.includes(pinned.storyId)))).length;
     }
+    if (this.activeStory?.draftId === draftId && this.activeStory.sourceIds.includes(sourceId)) impacts.processing += 1;
     return impacts;
   }
 
@@ -905,16 +919,18 @@ export class ReconstructionStore {
       let status = 'not-running';
       // Also on an exact replay: running work that the saved policy no longer
       // allows is asked to stop again, and the answer reflects that attempt.
-      if (!allows(policy, 'model')) {
-        const running = [this.active, this.activeProposal].filter((item) => item?.draftId === draftId && item.sourceId === sourceId);
-        if (running.length > 0) {
-          status = 'requested';
-          for (const item of running) {
-            try {
-              item.controller.abort();
-            } catch {
-              status = 'unconfirmed';
-            }
+      // Model work needs the model use; a story decode is local and needs only
+      // the place use, so a model- or share-only reduction leaves it running.
+      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, 'place']];
+      const running = work.filter(([item, purpose]) => item?.draftId === draftId
+        && (item.sourceIds ?? [item.sourceId]).includes(sourceId) && !allows(policy, purpose)).map(([item]) => item);
+      if (running.length > 0) {
+        status = 'requested';
+        for (const item of running) {
+          try {
+            item.controller.abort();
+          } catch {
+            status = 'unconfirmed';
           }
         }
       }
@@ -930,7 +946,8 @@ export class ReconstructionStore {
     this.closed = true;
     this.active?.controller.abort();
     this.activeProposal?.controller.abort();
+    this.activeStory?.controller.abort();
     await this.serialize(() => {});
-    await Promise.all([this.active?.done, this.activeProposal?.done]);
+    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done]);
   }
 }
