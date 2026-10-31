@@ -1,3 +1,4 @@
+import { mountAccess } from './access-ui.js';
 import { latestOnly } from './latest.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import {
@@ -22,6 +23,8 @@ const UNCONFIRMED = 'Rehere could not confirm whether this was saved. Your photo
 
 const $ = (id) => document.getElementById(id);
 const els = {
+  access: $('access'),
+  ownerApp: $('owner-app'),
   compose: $('compose'),
   form: $('draft-form'),
   addPhotos: $('add-photos'),
@@ -63,6 +66,11 @@ let spaceGeneration = 0;
 let saving = false;
 let previewBlob = null;
 let ticker = null;
+// Private content loads only while an owner session is active. Each sign-out
+// bumps the generation so responses started before it are dropped.
+let ownerActive = false;
+let sessionGeneration = 0;
+const stillOwner = (generation) => ownerActive && generation === sessionGeneration;
 
 const recorder = createRecorder({
   mediaDevices: navigator.mediaDevices,
@@ -229,8 +237,10 @@ async function save(includeVoice) {
   saving = true;
   setMessage('');
   renderActions();
+  const generation = sessionGeneration;
   try {
     const { voice, failed } = await collectVoice(includeVoice);
+    if (!stillOwner(generation)) return;
     if (failed) {
       setMessage('The recording could not be finished. Your photos and writing are still here. Discard the recording to save without it.');
       return;
@@ -271,6 +281,7 @@ async function save(includeVoice) {
     } catch {
       response = null;
     }
+    if (!stillOwner(generation)) return;
     if (response && !response.ok && typeof result?.error === 'string') {
       setMessage(`${result.error} ${KEPT}`);
       return;
@@ -290,16 +301,19 @@ async function save(includeVoice) {
 }
 
 async function loadSaved() {
+  const generation = sessionGeneration;
   let drafts;
   try {
     const response = await fetch('/api/drafts');
     if (!response.ok) throw new Error();
     drafts = await response.json();
   } catch {
+    if (!stillOwner(generation)) return;
     els.savedEmpty.hidden = false;
     els.savedEmpty.textContent = 'Saved memories could not be loaded. Reload the page to try again.';
     return;
   }
+  if (!stillOwner(generation)) return;
   els.savedEmpty.hidden = drafts.length > 0;
   els.savedEmpty.textContent = 'Nothing has been saved yet.';
   els.savedList.replaceChildren(
@@ -407,6 +421,7 @@ function closeSpace() {
 }
 
 function route() {
+  if (!ownerActive) return;
   const match = /^#\/memories\/([0-9a-f-]{36})$/.exec(location.hash);
   viewRequests.invalidate();
   closeSpace();
@@ -439,9 +454,58 @@ els.form.addEventListener('submit', (event) => {
 els.saveWithoutVoice.addEventListener('click', () => save(false));
 window.addEventListener('hashchange', route);
 
+function clearViewer() {
+  els.viewerDate.textContent = '';
+  els.viewerMessage.textContent = '';
+  els.viewerPhotos.replaceChildren();
+  els.viewerText.textContent = '';
+  els.viewerTextSource.replaceChildren();
+  els.viewerVoiceSource.replaceChildren();
+  els.viewerVoice.hidden = true;
+  els.viewerVoice.removeAttribute('src');
+}
+
+function startOwner() {
+  ownerActive = true;
+  els.ownerApp.hidden = false;
+  route();
+  loadSaved();
+}
+
+// Removes everything private from the page and stops capture, synchronously,
+// before any sign-out request is sent.
+function stopOwner() {
+  ownerActive = false;
+  sessionGeneration += 1;
+  viewRequests.invalidate();
+  closeSpace();
+  resetForm();
+  setMessage('');
+  clearViewer();
+  els.savedList.replaceChildren();
+  els.savedEmpty.hidden = false;
+  els.savedEmpty.textContent = 'Nothing has been saved yet.';
+  els.ownerApp.hidden = true;
+  if (location.hash) history.replaceState(null, '', location.pathname);
+}
+
+const access = mountAccess(els.access, { onOwner: startOwner, onSignedOut: stopOwner });
+
+// Any private request answered 401 means the session expired or was replaced,
+// including requests made by the scene and proposal modules.
+const PUBLIC_API = /^\/api\/(session(\/|$)|invitations\/redeem$)/;
+const baseFetch = window.fetch.bind(window);
+window.fetch = async (input, options) => {
+  // A 401 for a request sent in an earlier session must not end a newer one.
+  const sentIn = sessionGeneration;
+  const response = await baseFetch(input, options);
+  const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+  if (response.status === 401 && sentIn === sessionGeneration && path.startsWith('/api/') && !PUBLIC_API.test(path)) access.sessionEnded();
+  return response;
+};
+
 renderTextSource();
 renderVoiceSource();
 recorder.subscribe(renderVoice);
 renderVoice();
-route();
-loadSaved();
+access.start();

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AccessStore, isToken } from './access.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest, parseProposalRequest, parseUndoRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
@@ -25,6 +26,7 @@ const STATIC_FILES = new Map([
   ['/space.js', ['space.js', 'text/javascript; charset=utf-8']],
   ['/photo-scene.js', ['photo-scene.js', 'text/javascript; charset=utf-8']],
   ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
+  ['/access-ui.js', ['access-ui.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // Pinned local Three.js files. OrbitControls imports the bare specifier
@@ -56,6 +58,60 @@ const PROPOSAL_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/propos
 const PROPOSAL_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals\/([^/]+)\/(cancel|apply)$/;
 const HISTORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/history$/;
 const UNDO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/undo$/;
+const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
+const ATTEMPT_LIMIT = 10;
+const ATTEMPT_WINDOW_MS = 10 * 60_000;
+const ATTEMPT_ADDRESSES = 1000;
+const UNAUTHORIZED = 'Sign in to continue.';
+const FORBIDDEN = 'This action is not allowed.';
+
+// Counts rejected credential attempts per socket address in a sliding window.
+// Attempts still being checked hold a slot, so concurrent guesses cannot all
+// pass admission before their failures are recorded. Forwarded-IP headers are
+// ignored, so on loopback every local client shares one bucket; the limit
+// slows guessing but never locks an account permanently.
+function attemptLimiter(now = Date.now) {
+  const entries = new Map();
+  const entry = (address) => {
+    const current = entries.get(address) ?? { failures: [], pending: 0 };
+    current.failures = current.failures.filter((time) => now() - time < ATTEMPT_WINDOW_MS);
+    entries.delete(address);
+    entries.set(address, current);
+    if (entries.size > ATTEMPT_ADDRESSES) entries.delete(entries.keys().next().value);
+    return current;
+  };
+  return {
+    admit(address) {
+      const current = entry(address);
+      if (current.failures.length + current.pending >= ATTEMPT_LIMIT) return false;
+      current.pending += 1;
+      return true;
+    },
+    release(address, failed) {
+      const current = entry(address);
+      current.pending = Math.max(0, current.pending - 1);
+      if (failed) current.failures.push(now());
+    },
+  };
+}
+
+function strictBody(body, keys) {
+  const valid = body !== null && typeof body === 'object' && !Array.isArray(body)
+    && Object.keys(body).length === keys.length && keys.every((key) => Object.hasOwn(body, key));
+  if (!valid) throw new RequestError(400, 'The request could not be read.');
+  return body;
+}
+
+function cookieValue(header, name) {
+  for (const part of (header ?? '').split(';')) {
+    const index = part.indexOf('=');
+    if (index > 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return null;
+}
 
 function sendJson(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
@@ -211,8 +267,10 @@ export function createAppServer({
   reconstructionTimeoutMs,
   proposalModel = null,
   prepareModelImage = pythonModelImage(),
+  accessStore = new AccessStore({ dataDir }),
 } = {}) {
   const store = new DraftStore(dataDir);
+  const attempts = attemptLimiter();
   const reconstructions = new ReconstructionStore({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage,
   });
@@ -235,6 +293,101 @@ export function createAppServer({
         return;
       }
     }
+
+    // The cookie name carries the port: browsers share cookies across ports
+    // of one host, so another local instance must not replace this session.
+    const cookieName = `rehere_session_${port}`;
+    const cookie = (token, maxAge) => ({ 'set-cookie': `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}` });
+    const sessionToken = () => {
+      const token = cookieValue(req.headers.cookie, cookieName);
+      return isToken(token, 'session') ? token : null;
+    };
+    const principal = async () => {
+      const token = sessionToken();
+      return token ? accessStore.session(token) : null;
+    };
+    const requireOwner = async () => {
+      const current = await principal();
+      if (!current) throw new RequestError(401, UNAUTHORIZED);
+      if (current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
+      return current;
+    };
+    // Rejected attempts count toward the limit whatever the reason.
+    const attempt = async (task) => {
+      const address = req.socket.remoteAddress ?? '';
+      if (!attempts.admit(address)) throw new RequestError(429, 'Too many attempts. Try again later.');
+      let failed = false;
+      try {
+        return await task();
+      } catch (error) {
+        failed = error instanceof RequestError && error.status < 500;
+        throw error;
+      } finally {
+        attempts.release(address, failed);
+      }
+    };
+
+    if (pathname === '/api/session' && reading) {
+      const { initialized } = await accessStore.state();
+      sendJson(res, 200, { initialized, principal: await principal() });
+      return;
+    }
+    if (pathname === '/api/session/login' && req.method === 'POST') {
+      const { accessKey } = strictBody(await readJsonBody(req), ['accessKey']);
+      const login = await attempt(() => accessStore.login(accessKey));
+      sendJson(res, 200, { principal: login.principal }, cookie(login.sessionToken, SESSION_MAX_AGE_SECONDS));
+      return;
+    }
+    if (pathname === '/api/session/logout' && req.method === 'POST') {
+      strictBody(await readJsonBody(req), []);
+      const token = sessionToken();
+      if (token) await accessStore.logout(token);
+      sendJson(res, 200, { ok: true }, cookie('', 0));
+      return;
+    }
+    if (pathname === '/api/session/recover' && req.method === 'POST') {
+      // The browser cookie is cleared whatever the outcome; a failed attempt
+      // leaves every server-side session as it was.
+      let recovered;
+      try {
+        const body = strictBody(await readJsonBody(req), ['recoveryKey', 'newAccessKey', 'newRecoveryKey']);
+        recovered = await attempt(() => accessStore.recover(body));
+      } catch (error) {
+        if (!(error instanceof RequestError)) throw error;
+        sendJson(res, error.status, { error: error.message }, { ...cookie('', 0), connection: 'close' });
+        return;
+      }
+      sendJson(res, 200, { principal: recovered }, cookie('', 0));
+      return;
+    }
+    if (pathname === '/api/invitations/redeem' && req.method === 'POST') {
+      const body = strictBody(await readJsonBody(req), ['token', 'requestId', 'displayName', 'accessKey', 'recoveryKey']);
+      sendJson(res, 200, { principal: await attempt(() => accessStore.redeemInvitation(body)) });
+      return;
+    }
+    if (pathname === '/api/invitations' && reading) {
+      const owner = await requireOwner();
+      sendJson(res, 200, await accessStore.invitations(owner.id));
+      return;
+    }
+    if (pathname === '/api/invitations' && req.method === 'POST') {
+      const owner = await requireOwner();
+      const body = strictBody(await readJsonBody(req), ['requestId', 'draftId', 'expiresInHours', 'token']);
+      if (typeof body.draftId !== 'string' || !UUID.test(body.draftId)) throw new RequestError(400, 'The request could not be read.');
+      if (!(await store.get(body.draftId))) throw new RequestError(404, 'This memory could not be found.');
+      sendJson(res, 201, await accessStore.createInvitation(owner.id, body));
+      return;
+    }
+    const revokeMatch = REVOKE_PATH.exec(pathname);
+    if (revokeMatch && req.method === 'POST') {
+      const owner = await requireOwner();
+      strictBody(await readJsonBody(req), []);
+      sendJson(res, 200, await accessStore.revokeInvitation(owner.id, revokeMatch[1]));
+      return;
+    }
+    // Every other API route serves private content: the owner session is
+    // checked before any path, ID, range or body is examined.
+    if (pathname.startsWith('/api/')) await requireOwner();
 
     const sizeMatch = SOURCE_SIZE_PATH.exec(pathname);
     if (sizeMatch && reading) {

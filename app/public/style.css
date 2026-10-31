@@ -275,3 +275,24 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
 .memory-history li { margin: 8px 0; }
 .memory-history li > span { display: block; overflow-wrap: anywhere; }
 .memory-history button { margin-top: 4px; }
+
+.access-area:empty { display: none; }
+.access h1 { margin-top: 0; }
+.access input[type="password"], .access input[type="text"] {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.access-command { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); padding: 12px; border-radius: 8px; }
+.access-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 12px; margin-top: 16px; color: var(--muted); }
+.access-links { justify-content: flex-start; }
+.access-keys { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.access-key { display: grid; gap: 2px; margin: 8px 0; }
+.access-key span { font-weight: 600; }
+.access-key code { overflow-wrap: anywhere; user-select: all; }
+.access-download { display: inline-block; margin: 8px 0; color: var(--accent); font-weight: 600; }

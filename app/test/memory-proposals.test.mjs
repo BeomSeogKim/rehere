@@ -7,7 +7,7 @@ import { after, describe, it } from 'node:test';
 import { DraftStore } from '../drafts.mjs';
 import { anchorYaw, validatePlan } from '../memory-proposals.mjs';
 import { ReconstructionStore } from '../reconstructions.mjs';
-import { createAppServer } from '../server.mjs';
+import { ownerFetch as fetch, startOwnerServer } from './auth-helper.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -117,10 +117,8 @@ async function waitUntil(read, done) {
 async function setup({ model = fakeModel(), prepareModelImage = async () => THUMBNAIL, permission = grants(), dataDir } = {}) {
   dataDir ??= await mkdtemp(path.join(os.tmpdir(), 'rehere-memory-'));
   tempDirs.push(dataDir);
-  const server = createAppServer({ dataDir, reconstructionRunner: runner, proposalModel: model, prepareModelImage });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const ctx = { server, base, dataDir, model, close: () => new Promise((resolve) => server.close(resolve)) };
+  const { server, base, close } = await startOwnerServer({ dataDir, reconstructionRunner: runner, proposalModel: model, prepareModelImage });
+  const ctx = { server, base, dataDir, model, close };
   if (permission === null) return ctx;
   const form = new FormData();
   form.append('photos', new Blob([PHOTO]), 'photo');

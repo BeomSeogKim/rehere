@@ -35,12 +35,15 @@ move or rotation before saving it. Unseen areas stay empty. This is a local
 model reconstruction from one photograph, not a complete room or calibrated
 geometry.
 
-Not included: transcription, multi-view alignment, sharing, accounts, and
-recovery of unsaved input.
+Not included: transcription, multi-view alignment, sharing, hosted account
+integration, and recovery of unsaved input.
 
 ## Getting started
 
 Requires Node.js 26 or later. Three.js is pinned for the spatial viewer.
+Set up the local workspace owner and retain its private access card using
+[the access guide](ACCESS.md) before signing in. No web visitor can create or
+claim the owner account.
 
 ```sh
 cd app
@@ -49,8 +52,10 @@ npm start   # http://127.0.0.1:4317/ (set PORT to change it)
 npm test
 ```
 
-The server listens on the loopback interface only. Saved memories are written
-to `app/data/`, which is ignored by Git. Delete that folder to remove them.
+The server listens on the loopback interface only. Saved memories and workspace
+authority are written to `app/data/`, which is ignored by Git. Deleting that
+folder removes both, including any access card kept inside it. Keep a separate
+secure copy of the current card.
 
 Photo reconstruction additionally requires the isolated Python environment
 and locally cached model weights described in [the worker guide](spatial/README.md).
@@ -151,7 +156,7 @@ is claimed.
 | `POST /api/drafts/<id>/reconstructions/<job>/edit` | Save `requestId`, `baseVersion`, `offset` and `yaw` |
 
 These controls coordinate one local server process. They do not implement
-multi-process locking, authentication, sharing, power-loss durability or the
+multi-process locking, visitor sharing, power-loss durability or the
 full spatial editing contract.
 
 ## Memory-driven proposals
@@ -239,8 +244,10 @@ The five-minute recording length is enforced in the browser only. File content
 is checked by signature, not decoded.
 
 Requests are refused unless the `Host` header names `127.0.0.1` or `localhost`
-on the server's port, and saves are refused when `Origin` names another site.
+on the server's port, and POST requests are refused when `Origin` names another site.
 Responses carry a restrictive Content Security Policy and `nosniff`.
+All private content routes require the workspace owner session, including
+original files, derivatives, history, HEAD and byte-range requests.
 
 ## Development
 

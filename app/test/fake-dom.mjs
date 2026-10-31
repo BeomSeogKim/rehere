@@ -29,6 +29,23 @@ export class FakeElement {
   setAttribute(name, value) {
     this.attributes[name] = String(value);
   }
+  removeAttribute(name) {
+    delete this.attributes[name];
+    if (name in this) this[name] = '';
+  }
+  get classList() {
+    const names = new Set((this.className ?? '').split(' ').filter(Boolean));
+    const write = () => (this.className = [...names].join(' '));
+    return {
+      contains: (name) => names.has(name),
+      toggle: (name, force = !names.has(name)) => {
+        if (force) names.add(name);
+        else names.delete(name);
+        write();
+        return force;
+      },
+    };
+  }
   addEventListener(type, listener) {
     (this.listeners[type] ??= []).push(listener);
   }

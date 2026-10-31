@@ -17,8 +17,9 @@ local depth estimation and SAM2 segmentation. People can inspect model
 proposals, explore the visible surfaces, preview foreground changes and save
 versioned transforms. A separately enabled Meta planner connects written
 memories to bounded changes with explicit approval and preserved version
-history. Unseen areas remain empty. Sharing, accounts and multi-view alignment
-are not connected yet.
+history. Unseen areas remain empty. Local owner sessions, scoped contributor
+credentials and recovery protect private content. Contributions, visitor sharing
+and multi-view alignment are not connected yet.
 
 The production deployment stack is not selected.
 
@@ -39,10 +40,14 @@ For the local app, install Node.js 26 or later, then run:
 cd app
 npm ci --ignore-scripts --no-audit --no-fund
 npm test
+node access-cli.mjs init --credentials-file data/owner-card.json \
+  --name "Workspace owner"
 npm start
 ```
 
-Open `http://127.0.0.1:4317/`. See the [app guide](app/README.md) for storage,
+Retain the private card and explicitly sign in at `http://127.0.0.1:4317/`.
+See the [access guide](app/ACCESS.md) for setup and recovery, and the
+[app guide](app/README.md) for storage,
 supported input, limits, recording behavior and the additional local Python
 model setup needed for reconstruction. Node.js 26 or later is required.
 

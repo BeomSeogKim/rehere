@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pythonRunner } from '../reconstructions.mjs';
-import { createAppServer } from '../server.mjs';
+import { ownerFetch as fetch, startOwnerServer } from './auth-helper.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -84,12 +84,8 @@ function fakeRunner(behaviour = async (call) => { await writeOutputs(call); retu
   return runner;
 }
 
-async function start(options) {
-  const server = createAppServer(options);
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  return { server, base, close: () => new Promise((resolve) => server.close(resolve)) };
-}
+// Content routes require the owner session; requests go through that client.
+const start = startOwnerServer;
 
 const grants = (place, model) => ({
   provider: 'Synthetic',
@@ -338,11 +334,14 @@ describe('reconstruction idempotency and concurrency', () => {
     const app = await start({ dataDir, reconstructionRunner: runner });
     try {
       const draft = await saveDraft(app.base);
-      const body = buildBody(draft);
-      const [a, b] = await Promise.all([build(app.base, draft, body), build(app.base, draft, buildBody(draft))]);
-      assert.deepEqual([a.status, b.status], [202, 409]);
-      assert.match((await b.json()).error, /Try again when it finishes/);
-      const job = await a.json();
+      // Each request is session-checked first, so either may reach the store first.
+      const bodies = [buildBody(draft), buildBody(draft)];
+      const responses = await Promise.all(bodies.map((item) => build(app.base, draft, item)));
+      assert.deepEqual(responses.map((response) => response.status).sort(), [202, 409]);
+      const winner = responses.findIndex((response) => response.status === 202);
+      const body = bodies[winner];
+      assert.match((await responses[1 - winner].json()).error, /Try again when it finishes/);
+      const job = await responses[winner].json();
       const replay = await build(app.base, draft, body);
       assert.equal(replay.status, 202, 'a replay is answered even while busy');
       assert.equal((await replay.json()).id, job.id);

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { LIMITS } from '../drafts.mjs';
-import { createAppServer } from '../server.mjs';
+import { ownerCookie, ownerFetch as fetch, startOwnerServer } from './auth-helper.mjs';
 import { canUseSource } from '../sources.mjs';
 
 // Synthetic bytes with real container signatures; no personal media is used.
@@ -24,12 +24,8 @@ async function tempDir() {
 }
 after(() => Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true }))));
 
-async function start(options) {
-  const server = createAppServer(options);
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  return { server, base, close: () => new Promise((resolve) => server.close(resolve)) };
-}
+// Content routes require the owner session; requests go through that client.
+const start = startOwnerServer;
 
 function form({ text, photos = [], voice, metadata } = {}) {
   const body = new FormData();
@@ -64,7 +60,7 @@ const bytes = async (response) => Buffer.from(await response.arrayBuffer());
 function rawRequest(base, { method = 'GET', path: target = '/', headers = {}, chunks = [] } = {}) {
   const url = new URL(base);
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: url.hostname, port: url.port, method, path: target, headers }, (res) => {
+    const req = http.request({ host: url.hostname, port: url.port, method, path: target, headers: { cookie: ownerCookie(base), ...headers } }, (res) => {
       const parts = [];
       res.on('data', (part) => parts.push(part));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(parts).toString() }));
