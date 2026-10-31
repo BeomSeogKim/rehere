@@ -9,6 +9,7 @@ abstractions, dependencies, or placeholder configuration without a concrete need
 ## Always apply
 
 - Keep all repository content, filenames, comments, commits, and PRs in English.
+- Communicate with other agents in English.
 - Do not add AI signatures or attribution to files, comments, commits, or PRs.
 - Include only product code, public technical documentation, and public or
   synthetic examples. Never copy private conversations, personal notes, session
@@ -18,6 +19,9 @@ abstractions, dependencies, or placeholder configuration without a concrete need
 - Read the README and run `git status --short` before editing. Preserve existing
   work and stage only your own paths. Keep changes limited to the task.
 - Do not add an application stack, model, or dependency without a task needing it.
+- Use Meta credits for bounded work. Check credit and usage before and between
+  batches, bound costs and retries, and stop if credit status or likely cost is
+  unknown. Alerts and local budgets are not provider-enforced spending caps.
 - Do not commit until explicitly asked.
   Pushes, PR creation, merges, remote setup, and publication also need instruction.
 
