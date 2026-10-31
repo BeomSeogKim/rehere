@@ -840,3 +840,67 @@ describe('page scrolling and exploring the scene', () => {
     view.space.dispose();
   });
 });
+
+describe('see the photographed side', () => {
+  const DEG = Math.PI / 180;
+  const close = (a, b) => a.every((value, i) => Math.abs(value - b[i]) < 1e-9);
+  const cameraNow = () => ({ position: globalThis.viewerControls.object.position.toArray(), target: globalThis.viewerControls.target.toArray() });
+
+  it('carries the photo’s vantage round with the object, within the share camera limits', async () => {
+    const { photographedSideCamera, cameraWithinLimits, CAMERA_LIMITS } = await import('../public/scene-viewer.js');
+    const { SHARE_LIMITS } = await import('../shares.mjs');
+    assert.equal(CAMERA_LIMITS.coordinate, SHARE_LIMITS.cameraCoordinate);
+    assert.deepEqual([CAMERA_LIMITS.minDistance, CAMERA_LIMITS.maxDistance], SHARE_LIMITS.cameraDistance);
+
+    const pivot = [0.5, 0, -3];
+    const straight = photographedSideCamera(pivot, { offset: [0, 0, 0], yaw: 0 });
+    assert.ok(close(straight.position, [0, 0, 0]) && close(straight.target, pivot), 'unturned: the original camera, looking at the object');
+    const turned = photographedSideCamera(pivot, { offset: [0, 0, 0], yaw: 150 * DEG });
+    const rel = turned.position.map((value, i) => value - pivot[i]);
+    assert.ok(close(rel, [-0.5 * Math.cos(150 * DEG) + 3 * Math.sin(150 * DEG), 0, 0.5 * Math.sin(150 * DEG) + 3 * Math.cos(150 * DEG)]));
+    assert.ok(rel[2] < 0, 'at 150° the photographed side faces away from the photo, so the camera is behind the object');
+    assert.ok(Math.abs(Math.hypot(...rel) - Math.hypot(...pivot)) < 1e-9, 'the distance is unchanged');
+    const moved = photographedSideCamera(pivot, { offset: [0.2, 0.1, 0], yaw: 0 });
+    assert.ok(close(moved.target, [0.7, 0.1, -3]) && close(moved.position, [0.2, 0.1, 0]));
+    assert.equal(photographedSideCamera([0, 0, -9], { offset: [0, 0, 0], yaw: 0 }), null, 'too far: unavailable, not clamped');
+
+    const at = (distance, coordinate = 0) => cameraWithinLimits({ position: [coordinate, 0, distance], target: [coordinate, 0, 0] });
+    assert.deepEqual([at(0.5), at(8), at(0.4999), at(8.0001)], [true, true, false, false]);
+    assert.deepEqual([at(1, 50), at(1, 50.01)], [true, false]);
+    assert.equal(cameraWithinLimits({ position: [NaN, 0, 1], target: [0, 0, 0] }), false);
+  });
+
+  it('moves only the camera, to the side of the object as drawn, and nothing moves it back on its own', async () => {
+    const { photographedSideCamera } = await import('../public/scene-viewer.js');
+    const view = await openScene();
+    const turn = view.axis('Turn (degrees)');
+    turn.value = '150';
+    turn.dispatch('input');
+    const before = view.editStatus();
+    view.button('See photographed side').dispatch('click');
+    const now = cameraNow();
+    const expected = photographedSideCamera(now.target, { offset: [0, 0, 0], yaw: 150 * DEG });
+    assert.ok(close(now.position, expected.position), 'the drawn 150° preview decides the vantage');
+    assert.match(view.find((node) => node.role === 'status' && /^Camera moved to inspect the photographed side/.test(node.textContent))[0].textContent, /Sides the photo did not capture stay empty\.$/);
+    assert.equal(view.editStatus(), before, 'the preview is unchanged and unsaved');
+    assert.equal(posts.length, 0, 'nothing is sent');
+
+    view.button('Revert to saved').dispatch('click');
+    const viewport = view.find((node) => node.className === 'space-viewport')[0];
+    Object.assign(viewport, { clientWidth: 800, clientHeight: 400 });
+    globalThis.viewerResize();
+    assert.deepEqual(cameraNow(), now, 'reverting and resizing leave the camera where it is');
+
+    view.button('Original viewpoint').dispatch('click');
+    assert.deepEqual(cameraNow().position, [0, 0, 0]);
+    assert.equal(view.find((node) => node.role === 'status' && /Camera moved/.test(node.textContent)).length, 0, 'the receipt clears');
+    view.space.dispose();
+  });
+
+  it('is unavailable without a 3D view', async () => {
+    globalThis.viewerFail = 'webgl';
+    const view = await openScene();
+    assert.equal(view.button('See photographed side').disabled, true);
+    view.space.dispose();
+  });
+});

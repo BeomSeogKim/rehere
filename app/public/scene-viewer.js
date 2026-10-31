@@ -11,6 +11,30 @@ import * as photoScene from './photo-scene.js';
 // Camera limits the viewer itself enforces; a saved camera must stay within them.
 export const CAMERA_LIMITS = Object.freeze({ coordinate: 50, minDistance: 0.5, maxDistance: 8 });
 
+// The same rule a saved share camera must meet (parseCamera on the server):
+// finite coordinates within the limit, and a position-to-target distance the
+// controls allow. A camera that fails is not used, rather than clamped.
+export function cameraWithinLimits({ position, target }) {
+  const vector = (value) => Array.isArray(value) && value.length === 3 && value.every((item) => Number.isFinite(item) && Math.abs(item) <= CAMERA_LIMITS.coordinate);
+  if (!vector(position) || !vector(target)) return false;
+  const distance = Math.hypot(...position.map((value, index) => value - target[index]));
+  return distance >= CAMERA_LIMITS.minDistance && distance <= CAMERA_LIMITS.maxDistance;
+}
+
+// The photo's own vantage carried round with one object: the original camera
+// (at the origin) as seen from the object's unmoved centre, turned by the
+// object's yaw about the vertical axis and moved with its offset. The camera
+// looks at the object's centre, so the framing differs from the photo; it is
+// not the photo's projection. Null when that vantage is outside the limits.
+export function photographedSideCamera(pivot, { offset, yaw }) {
+  const centre = pivot.map((value, axis) => value + offset[axis]);
+  const [x, y, z] = pivot.map((value) => -value);
+  const cos = Math.cos(yaw);
+  const sin = Math.sin(yaw);
+  const camera = { position: [centre[0] + x * cos + z * sin, centre[1] + y, centre[2] - x * sin + z * cos], target: centre };
+  return cameraWithinLimits(camera) ? camera : null;
+}
+
 // Renders the photo as a WebGL scene. Throws when the browser cannot create a
 // WebGL context or the texture cannot load, so the caller can say so instead
 // of showing a blank or untextured scene as if it had worked.
@@ -206,6 +230,19 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
         const point = new THREE.Vector3(pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]).project(camera);
         return { id, x: ((point.x + 1) / 2) * width, y: ((1 - point.y) / 2) * height, visible: point.z > -1 && point.z < 1 && Math.abs(point.x) <= 1 && Math.abs(point.y) <= 1 };
       });
+    },
+    // Moves the camera to the photographed side of one object as drawn with
+    // `transform`; changes nothing else. False when there is no such object or
+    // the vantage is outside the limits, and the camera stays where it was.
+    viewPhotographedSide(transform, targetId = null) {
+      const pivot = twoObjects ? objects.objects.find((object) => object.id === targetId)?.pivot : objects.pivot;
+      const view = pivot && transform ? photographedSideCamera(pivot, transform) : null;
+      if (!view) return false;
+      camera.position.set(...view.position);
+      controls.target.set(...view.target);
+      controls.update();
+      draw();
+      return true;
     },
     setCamera({ position, target }) {
       camera.position.set(...position);

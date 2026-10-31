@@ -384,4 +384,114 @@ describe('two-object scene', () => {
     ui.button('A: Counter').dispatch('click');
     assert.equal(ui.button('A: Counter').attributes['aria-pressed'], 'true', 'editing resumes after the reload');
   });
+
+  describe('see the photographed side', () => {
+    // A surface the real two-object builder accepts, so a 3D view exists:
+    // object A on the left (columns 2-6), B on the right (columns 13-17).
+    const GRID = 20;
+    const drawable = {
+      schema_version: 2,
+      width: GRID,
+      height: GRID,
+      depth: Array(GRID * GRID).fill(3),
+      regions: Array.from({ length: GRID * GRID }, (_, i) => {
+        const x = i % GRID;
+        const y = Math.floor(i / GRID);
+        return y >= 6 && y <= 13 ? (x >= 2 && x <= 6 ? 1 : x >= 13 && x <= 17 ? 2 : 0) : 0;
+      }),
+      objects: [
+        { id: 'object-1', label: 'Counter', box_xyxy: [0, 435, 226, 790] },
+        { id: 'object-2', label: 'Flour stack', box_xyxy: [490, 450, 982, 781] },
+      ],
+      assumptions: { near: 1, far: 4, horizontal_fov_degrees: 55, max_triangle_depth_span: 0.35 },
+      source: { image_size: [1000, 800] },
+    };
+    const DEG = Math.PI / 180;
+    const close = (a, b) => a.every((value, i) => Math.abs(value - b[i]) < 1e-9);
+    const cameraNow = () => ({ position: globalThis.viewerCamera.camera.position.toArray(), target: globalThis.viewerCamera.controls.target.toArray() });
+
+    it('inspects the selected object as drawn, keeps the camera through Show saved, and changes nothing', async () => {
+      const { photographedSideCamera } = await import('../public/scene-viewer.js');
+      routes[`GET ${JOB_URL}/assets/surface.json`] = () => Promise.resolve(json(200, drawable));
+      const ui = await mount();
+      await openScene(ui);
+      assert.equal(ui.button('See photographed side (choose an object first)').disabled, true);
+      ui.button('B: Flour stack').dispatch('click');
+      const turn = ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === 'Turn (degrees)')[0];
+      turn.value = '150';
+      turn.dispatch('input');
+      const strip = () => ui.find((node) => node.className === 'relation-strip')[0].textContent;
+      const stripBefore = strip();
+      ui.button('See photographed side of B: Flour stack').dispatch('click');
+      const now = cameraNow();
+      assert.ok(now.target[0] > 0, 'it looks at B, the right-hand object');
+      assert.ok(close(now.position, photographedSideCamera(now.target, { offset: [0, 0, 0], yaw: 150 * DEG }).position), 'from B’s drawn 150° preview');
+      assert.match(ui.text(), /Camera moved to inspect the photographed side of B: Flour stack, as it was drawn when you pressed the button\./);
+      assert.equal(strip(), stripBefore, 'comparisons use the original camera, unchanged');
+      assert.match(ui.text(), /Preview only: B: Flour stack moved/);
+      assert.equal(requests.filter((r) => r.method === 'POST').length, 0, 'nothing is saved');
+
+      ui.button('Show saved arrangement').dispatch('click');
+      assert.deepEqual(cameraNow(), now, 'showing the saved arrangement does not move the camera');
+      ui.button('See photographed side of B: Flour stack').dispatch('click');
+      assert.ok(close(cameraNow().position, photographedSideCamera(now.target, { offset: [0, 0, 0], yaw: 0 }).position), 'pressed again, it uses the drawn saved state');
+      ui.button('Original viewpoint').dispatch('click');
+      assert.doesNotMatch(ui.text(), /Camera moved/);
+    });
+
+    it('is never offered before both outlines are confirmed, and stays disabled without a 3D view', async () => {
+      routes[`GET ${JOB_URL}/assets/surface.json`] = () => Promise.resolve(json(200, drawable));
+      routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, job({ objectsConfirmed: false })));
+      const unconfirmed = await mount();
+      await openScene(unconfirmed);
+      const offered = unconfirmed.find((node) => node.tag === 'button' && /^See photographed side/.test(node.textContent));
+      assert.equal(offered.length, 1);
+      assert.equal(offered[0].hidden, true, 'hidden before confirmation');
+      assert.equal(offered[0].disabled, true, 'and never enabled');
+      const camera = cameraNow();
+      offered[0].dispatch('click');
+      assert.deepEqual(cameraNow(), camera, 'pressing it does nothing');
+      assert.doesNotMatch(unconfirmed.text(), /Camera moved/);
+
+      routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, job()));
+      routes[`GET ${JOB_URL}/assets/surface.json`] = () => Promise.resolve(json(200, surface));
+      const fallback = await mount();
+      await openScene(fallback);
+      assert.match(fallback.text(), /could not be shown/, 'no 3D view');
+      fallback.button('B: Flour stack').dispatch('click');
+      assert.equal(fallback.button('See photographed side of B: Flour stack').disabled, true);
+    });
+
+    it('inspects the object a panel preview is about, even when another object is selected', async () => {
+      routes[`GET ${JOB_URL}/assets/surface.json`] = () => Promise.resolve(json(200, drawable));
+      const proposal = {
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        requestId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+        baseVersion: 1,
+        targetId: 'object-2',
+        statement: { id: 'f0f0f0f0-f0f0-4f0f-8f0f-f0f0f0f0f0f0', kind: 'human_memory', text: 'The flour turned round.', sha256: 'a'.repeat(64), modelConsent: true },
+        createdAt: '2026-11-01T00:00:00.000Z',
+        updatedAt: '2026-11-01T00:00:00.000Z',
+        status: 'ready',
+        result: { action: 'rotate', targetId: 'object-2', sourceId: PHOTO, baseVersion: 1, delta: null, yawDelta: 150 * DEG, anchor: null, question: null, reason: 'It turned.', transform: { offset: [0, 0, 0], yaw: 150 * DEG } },
+        question: null,
+        error: null,
+        model: 'muse-spark-1.3',
+        usage: null,
+        responseId: null,
+        appliedVersion: null,
+      };
+      routes[`GET ${JOB_URL}/proposals`] = () => Promise.resolve(json(200, [proposal]));
+      const ui = await mount();
+      await openScene(ui);
+      ui.button('A: Counter').dispatch('click');
+      assert.ok(ui.button('See photographed side of A: Counter'));
+      ui.button('Preview on the scene').dispatch('click');
+      assert.equal(ui.button('A: Counter').attributes['aria-pressed'], 'true', 'A stays selected');
+      ui.button('See photographed side of B: Flour stack').dispatch('click');
+      assert.ok(cameraNow().target[0] > 0, 'the camera inspects B, the object the preview is about');
+      ui.button('Stop preview').dispatch('click');
+      assert.ok(ui.button('See photographed side of A: Counter'), 'with the preview gone it names the selected object again');
+    });
+  });
 });

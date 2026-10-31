@@ -27,6 +27,16 @@ function sceneWorkspace(stage, inspector) {
   return el('div', { className: 'scene-workspace' }, [el('div', { className: 'scene-stage' }, stage), el('div', { className: 'scene-inspector' }, inspector)]);
 }
 
+// One explicit camera action per scene: look at an object's photographed
+// side as it is drawn at the moment of the press. Nothing moves the camera
+// there on its own, and nothing about the scene changes.
+const SIDE_MOVED = (name) => `Camera moved to inspect the photographed side of ${name}, as it was drawn when you pressed the button. Sides the photo did not capture stay empty.`;
+const SIDE_OUTSIDE = 'That photographed side is outside the scene’s camera limits, so the camera did not move.';
+function photographedSideControls() {
+  // Disabled until a scene enables it for a drawn object.
+  return { button: el('button', { type: 'button', className: 'secondary', textContent: 'See photographed side', disabled: true }), status: el('p', { className: 'hint', role: 'status' }) };
+}
+
 const SCENE_NOTE = 'A partial scene from one photo. Only surfaces visible in the photo exist: dark gaps, hidden areas and the backs of objects are unknown and left empty. Depth is a relative model estimate, not a measurement.';
 
 function el(tag, { onclick, ...props } = {}, children = []) {
@@ -395,6 +405,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const viewport = el('div', { className: 'space-viewport' });
     const viewMessage = el('p', { className: 'form-message', role: 'alert' });
     const original = el('button', { type: 'button', className: 'secondary', textContent: 'Original viewpoint' });
+    const photoSide = photographedSideControls();
     const side = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect from the side' });
     const explore = createExploreToggle();
     const [x1, y1, x2, y2] = job.box;
@@ -480,6 +491,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       for (const control of controls) control.range.disabled = control.number.disabled = reloading || locked;
       reload.hidden = !(session.uncertain || conflict);
       reload.disabled = busy;
+      photoSide.button.disabled = !viewer;
       memoryEdit?.sync();
       collaborationPanel?.sync();
     };
@@ -609,7 +621,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     panel.replaceChildren(
       heading,
       sceneWorkspace(
-        [el('div', { className: 'actions space-camera' }, [explore.button, original, side]), explore.status, viewport, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })],
+        [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, viewport, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })],
         [
           el('fieldset', { className: 'space-edit' }, [
             el('legend', { textContent: 'Move the selected object' }),
@@ -735,8 +747,19 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
     viewer = created;
     explore.attach(viewer);
-    original.addEventListener('click', () => viewer?.originalView());
-    side.addEventListener('click', () => viewer?.sideView());
+    original.addEventListener('click', () => {
+      viewer?.originalView();
+      photoSide.status.textContent = '';
+    });
+    side.addEventListener('click', () => {
+      viewer?.sideView();
+      photoSide.status.textContent = '';
+    });
+    // The transform drawn now: a panel's preview, else the manual preview.
+    photoSide.button.addEventListener('click', () => {
+      if (!viewer) return;
+      photoSide.status.textContent = viewer.viewPhotographedSide(proposalPreview ?? session.preview) ? SIDE_MOVED('the object') : SIDE_OUTSIDE;
+    });
     showEdit();
   }
 
@@ -913,6 +936,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     badges.setAttribute('aria-hidden', 'true');
     const viewMessage = el('p', { className: 'form-message', role: 'alert' });
     const original = el('button', { type: 'button', className: 'secondary', textContent: 'Original viewpoint' });
+    const photoSide = photographedSideControls();
     const side = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect from the side' });
     let shown = job.edit;
     const drawBadges = () => {
@@ -956,16 +980,24 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       }
       viewer = created;
       explore.attach(viewer);
-      original.addEventListener('click', () => viewer?.originalView());
-      side.addEventListener('click', () => viewer?.sideView());
+      original.addEventListener('click', () => {
+        viewer?.originalView();
+        photoSide.status.textContent = '';
+      });
+      side.addEventListener('click', () => {
+        viewer?.sideView();
+        photoSide.status.textContent = '';
+      });
       viewer?.applyArrangement(shown);
       return true;
     }
 
     const explore = createExploreToggle();
-    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side]), explore.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })];
+    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })];
 
     if (!job.objectsConfirmed) {
+      // No object can be chosen before the outlines are confirmed.
+      photoSide.button.hidden = true;
       let confirmId = null;
       const message = el('p', { className: 'form-message', role: 'alert' });
       const confirm = el('button', { type: 'button', textContent: 'The outlines match A and B' });
@@ -1024,6 +1056,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     // changes and switching objects pause, and the viewer shows that preview.
     const lockedBy = new Set();
     let proposalPreview = null;
+    // The one object a panel's preview is about, when it is about one; the
+    // camera action then inspects that object, whatever is selected.
+    let previewTarget = null;
+    const cameraTarget = () => (proposalPreview ? previewTarget ?? selected : selected);
     // The manual field being typed in, and every number field whose own text
     // is not a valid value (field -> message). Neither is rewritten from the
     // preview, and any invalid field blocks saving, until it is fixed or an
@@ -1159,6 +1195,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       // Loading the saved version settles an unknown rule outcome, so only a
       // pending request or another holder blocks it.
       reload.disabled = saving || reloading || locked || ruleSaving;
+      const sideTarget = cameraTarget();
+      photoSide.button.textContent = sideTarget ? `See photographed side of ${nameOf(sideTarget)}` : 'See photographed side (choose an object first)';
+      photoSide.button.disabled = !viewer || !sideTarget;
       toggle.textContent = showingSaved ? 'Show your preview' : 'Show saved arrangement';
       toggle.disabled = !dirty && !showingSaved;
       pick.forEach((button, i) => button.setAttribute('aria-pressed', String(objects[i].id === selected)));
@@ -1258,6 +1297,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     toggle.addEventListener('click', () => {
       showingSaved = !showingSaved;
       showEdit();
+    });
+    // The object and transform drawn now, from what is shown, not the session.
+    photoSide.button.addEventListener('click', () => {
+      const id = cameraTarget();
+      if (!viewer || !id) return;
+      photoSide.status.textContent = viewer.viewPhotographedSide(objectState(shown, id), id) ? SIDE_MOVED(nameOf(id)) : SIDE_OUTSIDE;
     });
     revert.addEventListener('click', () => {
       typing = null;
@@ -1491,6 +1536,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         targets,
         showTransform(transform, point = null, targetId = null) {
           proposalPreview = transform ? asArrangement({ targetId, ...transform }) : null;
+          previewTarget = transform ? targetId : null;
           showEdit();
           return viewer ? viewer.showGuide(transform, point, targetId) : null;
         },
@@ -1505,6 +1551,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         targets,
         showTransform(transform) {
           proposalPreview = asArrangement(transform);
+          previewTarget = transform?.targetId ?? null;
           showEdit();
           viewer?.showGuide(null, null);
           return Boolean(viewer && transform);
