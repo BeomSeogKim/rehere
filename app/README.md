@@ -65,6 +65,10 @@ Saved visitor snapshots can include selected arrangements and permitted written
 recollections. Preview the actual visitor screen before issuing a local link;
 later private changes stay private, while current withdrawal overrides a frozen
 copy. See the [sharing guide](SHARING.md) for access, revocation and limits.
+In a 3D visit or preview, compare the permitted photo copy with the selected
+reconstruction from the same original viewpoint, then return to your previous
+camera. Labels keep source pixels, chosen positions and inferred surfaces
+distinct; comparison stops story playback and never edits a saved arrangement.
 
 ## Getting started
 

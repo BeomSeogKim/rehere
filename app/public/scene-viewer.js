@@ -144,13 +144,30 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     controls.update();
     draw();
   };
+  // Normally the canvas fills the viewport. In photo framing it is the
+  // largest rectangle of the photo's own aspect that fits, centred, so a
+  // photograph shown with contain-fit in the same viewport lines up with it
+  // pixel for pixel; the projection uses exactly that aspect.
+  const sourceAspect = imageWidth / imageHeight;
+  let framing = false;
+  let frame = null;
   const resize = () => {
     const width = viewport.clientWidth;
     const height = viewport.clientHeight;
     if (!width || !height) return;
-    camera.aspect = width / height;
+    if (framing) {
+      const fitWidth = Math.min(width, height * sourceAspect);
+      const fitHeight = fitWidth / sourceAspect;
+      frame = { left: (width - fitWidth) / 2, top: (height - fitHeight) / 2, width: fitWidth, height: fitHeight };
+      camera.aspect = sourceAspect;
+    } else {
+      frame = { left: 0, top: 0, width, height };
+      camera.aspect = width / height;
+    }
     camera.updateProjectionMatrix();
-    renderer.setSize(width, height);
+    renderer.setSize(frame.width, frame.height);
+    canvas.style.marginLeft = framing ? `${frame.left}px` : '';
+    canvas.style.marginTop = framing ? `${frame.top}px` : '';
     draw();
   };
   const observer = new ResizeObserver(resize);
@@ -179,6 +196,13 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   return {
     setInteractive: explore,
     isInteractive: () => interactive,
+    // Photo framing on or off. Changes only the canvas size, its centring
+    // offsets and the projection aspect; never the camera, controls, geometry,
+    // transforms, texture or field of view.
+    setPhotoFraming(on) {
+      framing = Boolean(on);
+      resize();
+    },
     originalView: () => look([0, 0, 0]),
     showGuide(transform, point, targetId = null) {
       clearGuide();
@@ -222,13 +246,12 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     // pixels, for text labels drawn over the canvas. Two-object surfaces only.
     projectCentres() {
       if (!twoObjects) return [];
-      const width = viewport.clientWidth;
-      const height = viewport.clientHeight;
+      const { left, top, width, height } = framing && frame ? frame : { left: 0, top: 0, width: viewport.clientWidth, height: viewport.clientHeight };
       return objects.objects.map(({ id, pivot }) => {
         const transform = arrangement?.objects.find((object) => object.id === id);
         const offset = transform?.offset ?? [0, 0, 0];
         const point = new THREE.Vector3(pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]).project(camera);
-        return { id, x: ((point.x + 1) / 2) * width, y: ((1 - point.y) / 2) * height, visible: point.z > -1 && point.z < 1 && Math.abs(point.x) <= 1 && Math.abs(point.y) <= 1 };
+        return { id, x: left + ((point.x + 1) / 2) * width, y: top + ((1 - point.y) / 2) * height, visible: point.z > -1 && point.z < 1 && Math.abs(point.x) <= 1 && Math.abs(point.y) <= 1 };
       });
     },
     // Moves the camera to the photographed side of one object as drawn with

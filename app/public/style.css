@@ -392,3 +392,10 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
     .scene-workspace:not(.scene-inspector .scene-workspace) > .scene-stage .space-viewport { height: min(calc(100vh - 260px), 760px); }
   }
 }
+
+/* Visitor comparison with the photograph: the photo is fitted to the same box
+   as the 3D view, which the viewer letterboxes to the photo's shape, so the
+   two line up. Only one is visible at a time. */
+.visit-compare-frame { position: relative; }
+.visit-compare-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #161b20; border-radius: var(--radius); }
+.visit-compare-frame.is-photo canvas { visibility: hidden; }

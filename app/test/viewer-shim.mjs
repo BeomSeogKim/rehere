@@ -13,10 +13,15 @@ export class WebGLRenderer {
   constructor() {
     if (globalThis.viewerFail === 'webgl') throw new Error('no context');
     this.domElement = document.createElement('canvas');
+    // Size and pixel ratio are kept on the instance, never in viewerLog, so
+    // exact log assertions elsewhere are unaffected.
+    this.size = null;
+    this.pixelRatio = null;
+    globalThis.viewerRenderer = this;
     log('renderer');
   }
-  setPixelRatio() {}
-  setSize() {}
+  setPixelRatio(ratio) { this.pixelRatio = ratio; }
+  setSize(width, height) { this.size = [width, height]; }
   render() {}
   dispose() { log('renderer.dispose'); }
   forceContextLoss() {}
@@ -60,6 +65,9 @@ export function installViewerShim() {
   };
   globalThis.window ??= globalThis;
 }
+
+// The last renderer's CSS size and pixel ratio, as the viewer last set them.
+export const rendererState = () => ({ size: globalThis.viewerRenderer.size, pixelRatio: globalThis.viewerRenderer.pixelRatio });
 
 // The camera the viewer currently uses, as plain vectors.
 export const currentCamera = () => ({

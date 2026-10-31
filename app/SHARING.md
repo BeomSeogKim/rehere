@@ -54,6 +54,20 @@ page over the scene. Switching saved arrangements keeps the camera; selecting
 an object shows its evidence and related stories without moving the camera.
 Opening evidence or resizing the layout preserves the view and player state.
 
+Choose **Compare with the photograph** to switch between **Photo** and
+**This reconstruction** from the photo's original viewpoint. Both fit the
+same image shape without stretching or cropping. The photo is the permitted,
+metadata-free copy already used by the scene, not a private original download.
+The reconstruction keeps the selected arrangement, model-estimated surfaces
+and empty areas. This is not a historical before-and-after comparison.
+
+Changing arrangements while comparing updates their attribution and positions;
+it does not change the reference photograph or establish a different date.
+**Leave the comparison** returns to the camera and exploration mode you were
+using. Stories stop on entry and require a new Play after leaving; they do not
+play behind the photograph. The comparison is unavailable in the 2D fallback.
+Failed access checks and hidden-page pauses clear both representations.
+
 Photo attribution, synthetic labeling when applicable, and the limits of the
 inferred surfaces stay beside the scene. The 2D fallback disables exploration
 and remains a separate way to read the permitted material.

@@ -233,14 +233,18 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         el('div', { className: 'anchor-frame' }, [el('img', { src: textureUrl, alt: `The photo used for “${manifest.title}”, with the box for ${nameOf(object.id)}` }), box]),
       );
     };
+    // While comparing with the photograph, stories stay listed but have no
+    // player: nothing plays or downloads until the comparison is left.
+    let comparing = false;
     const renderStories = (viewId) => {
       disposePlayers();
       const viewStories = (manifest.stories ?? []).filter((story) => story.viewId === viewId && (!objectId || story.target?.id === objectId));
       storyBox.replaceChildren(
         ...(viewStories.length ? [el('h3', { textContent: 'Recorded stories for this view' })] : []),
+        ...(viewStories.length && comparing ? [el('p', { className: 'hint', textContent: 'Stories can be played after you leave the comparison with the photograph.' })] : []),
         ...viewStories.map((story) => {
-          const player = createStoryPlayer({ story, fetchAudio: (signal) => source.storyAudio(story.id, signal) });
-          players.push(player);
+          const player = comparing ? null : createStoryPlayer({ story, fetchAudio: (signal) => source.storyAudio(story.id, signal) });
+          if (player) players.push(player);
           return el('div', { className: 'visit-story' }, [
             el('p', { className: 'space-choice-label', textContent: story.title }),
             ...(objects && story.target ? [el('p', { className: 'hint', textContent: `About ${nameOf(story.target.id)}` })] : []),
@@ -248,7 +252,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
               className: 'hint',
               textContent: `Recording by ${story.providerLabel || 'an unnamed provider'}. Captions written by ${story.captionAuthorLabel || 'the owner'}; they are not checked by Rehere. Nothing plays until you press Play.`,
             }),
-            player.element,
+            ...(player ? [player.element] : []),
           ]);
         }),
       );
@@ -322,6 +326,126 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     }
     const back = el('button', { type: 'button', className: 'secondary', textContent: 'Back to the starting view' });
     const explore = createExploreToggle();
+    // Comparison with the photograph: the same photo pixels this scene was
+    // built from (the texture already loaded for it) and the selected saved
+    // arrangement, both from the photograph's own viewpoint and fitted to the
+    // photo's shape. Nothing is generated, blended or animated.
+    const compareButton = el('button', { type: 'button', className: 'secondary', textContent: 'Compare with the photograph', hidden: true });
+    const showPhoto = el('button', { type: 'button', className: 'secondary', textContent: 'Photo' });
+    const showScene = el('button', { type: 'button', className: 'secondary', textContent: 'This reconstruction' });
+    const leaveCompare = el('button', { type: 'button', className: 'secondary', textContent: 'Leave the comparison' });
+    const compareStatus = el('p', { className: 'hint', role: 'status' });
+    const compareBar = el('div', { className: 'visit-compare', hidden: true }, [
+      el('div', { className: 'actions' }, [showPhoto, showScene, leaveCompare]),
+      el('p', {
+        className: 'hint',
+        textContent:
+          'Photo is the copy used for this scene. Both views use the photo’s viewpoint. Switching saved arrangements changes only the reconstruction; it does not establish when the place changed.',
+      }),
+      compareStatus,
+    ]);
+    const photoImage = el('img', { className: 'visit-compare-photo', alt: `The photograph used for “${manifest.title}”`, hidden: true });
+    const stageFrame = el('div', { className: 'visit-compare-frame' }, [viewport, photoImage]);
+    let saved = null;
+    let photoLoad = 0;
+    let photoReady = false;
+    let photoTimer = null;
+    // Drops a Photo load still in progress: its late completion is ignored,
+    // and the next Photo choice starts a fresh load.
+    const cancelPhotoLoad = () => {
+      if (photoReady) return;
+      photoLoad += 1;
+      clearTimeout(photoTimer);
+      photoTimer = null;
+      photoImage.onload = null;
+      photoImage.onerror = null;
+      photoImage.removeAttribute('src');
+      if (compareStatus.textContent === 'Loading the photograph…') compareStatus.textContent = '';
+    };
+    const PHOTO_LOAD_MS = 10_000;
+    const setPressed = (photo) => {
+      showPhoto.setAttribute('aria-pressed', String(photo));
+      showScene.setAttribute('aria-pressed', String(!photo));
+      photoImage.hidden = !photo;
+      stageFrame.classList?.toggle('is-photo', photo);
+    };
+    // Photo is shown only after the image has actually loaded; a load that
+    // finishes after leaving, closing or a newer load is ignored.
+    const choosePhoto = () => {
+      if (!comparing || !viewer) return;
+      if (photoReady) {
+        setPressed(true);
+        return;
+      }
+      const load = ++photoLoad;
+      compareStatus.textContent = 'Loading the photograph…';
+      const settled = (ok) => {
+        if (load !== photoLoad || mine !== generation || !comparing) return;
+        photoLoad += 1;
+        clearTimeout(photoTimer);
+        photoTimer = null;
+        if (ok) {
+          photoReady = true;
+          compareStatus.textContent = '';
+          setPressed(true);
+        } else {
+          photoImage.removeAttribute('src');
+          compareStatus.textContent = 'The photograph could not be shown here. The reconstruction stays as it was.';
+          setPressed(false);
+        }
+      };
+      photoImage.onload = () => settled(true);
+      photoImage.onerror = () => settled(false);
+      clearTimeout(photoTimer);
+      photoTimer = setTimeout(() => settled(false), PHOTO_LOAD_MS);
+      photoImage.src = textureUrl;
+    };
+    const enterCompare = () => {
+      if (comparing || !viewer) return;
+      saved = { camera: viewer.getCamera(), interactive: viewer.isInteractive() };
+      comparing = true;
+      viewer.setInteractive(false);
+      explore.attach(null);
+      back.disabled = true;
+      viewer.setPhotoFraming(true);
+      viewer.originalView();
+      compareButton.hidden = true;
+      compareBar.hidden = false;
+      compareStatus.textContent = '';
+      setPressed(false);
+      // Stopping comparison never brings audio back on its own.
+      renderStories(currentId);
+    };
+    const exitCompare = () => {
+      if (!comparing) return;
+      comparing = false;
+      cancelPhotoLoad();
+      photoLoad += 1;
+      photoReady = false;
+      photoImage.onload = null;
+      photoImage.onerror = null;
+      photoImage.removeAttribute('src');
+      setPressed(false);
+      photoImage.hidden = true;
+      compareBar.hidden = true;
+      compareButton.hidden = false;
+      viewer?.setPhotoFraming(false);
+      viewer?.setCamera(saved.camera);
+      if (saved.interactive) viewer?.setInteractive(true);
+      explore.attach(viewer);
+      back.disabled = false;
+      saved = null;
+      renderStories(currentId);
+    };
+    compareButton.addEventListener('click', enterCompare);
+    showPhoto.addEventListener('click', choosePhoto);
+    showScene.addEventListener('click', () => {
+      if (!comparing) return;
+      // Choosing the reconstruction wins over a photo still loading.
+      cancelPhotoLoad();
+      setPressed(false);
+    });
+    leaveCompare.addEventListener('click', exitCompare);
     if (objects) {
       const pickObject = (id) => {
         objectId = id;
@@ -351,9 +475,10 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       el('div', { className: 'scene-workspace' }, [
         el('div', { className: 'scene-stage' }, [
           el('p', { className: 'hint', textContent: manifest.synthetic ? 'Synthetic test material, shared by the owner.' : 'Shared by the owner.' }),
-          el('div', { className: 'actions space-camera' }, [explore.button, back]),
+          el('div', { className: 'actions space-camera' }, [explore.button, back, compareButton]),
           explore.status,
-          viewport,
+          compareBar,
+          stageFrame,
           message,
           credit,
           el('p', { className: 'hint', textContent: SCENE_NOTE }),
@@ -395,6 +520,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     explore.attach(viewer);
     viewer.setCamera(manifest.camera);
     back.addEventListener('click', () => viewer?.setCamera(manifest.camera));
+    // Offered only with a working 3D view; the 2D fallback has none.
+    compareButton.hidden = false;
     message.textContent = 'Switching views keeps the same camera so they can be compared.';
     showView(currentId);
     setState('3d');
