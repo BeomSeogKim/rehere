@@ -104,10 +104,10 @@ export function client(base, cookie = null) {
 const PUBLIC_GRANTS = { provider: 'Synthetic', origin: { kind: 'public', reference: '' }, permissions: { place: true, model: true, share: false }, dates: { capturedOn: null, fileCreatedAt: null, fileModifiedAt: null, estimatedPeriod: '' } };
 
 // Saves a synthetic memory through the owner session and waits for its ready scene.
-export async function readyScene(owner) {
+export async function readyScene(owner, permissions = {}) {
   const form = new FormData();
   form.append('photos', new Blob([SYNTHETIC_PHOTO]), 'photo');
-  form.append('metadata', JSON.stringify({ photos: [PUBLIC_GRANTS] }));
+  form.append('metadata', JSON.stringify({ photos: [{ ...PUBLIC_GRANTS, permissions: { ...PUBLIC_GRANTS.permissions, ...permissions } }] }));
   const draft = await (await owner.request('/api/drafts', { method: 'POST', body: form })).json();
   const job = await (await owner.post(`/api/drafts/${draft.id}/reconstructions`, { requestId: randomUUID(), sourceId: draft.photos[0].sourceId, box: BOX })).json();
   const scene = `/api/drafts/${draft.id}/reconstructions/${job.id}`;

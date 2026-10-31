@@ -567,3 +567,21 @@ describe('recollections and blocked scenes', () => {
     assert.equal(posts.filter((post) => post.body?.decision).length, 0, 'nothing was saved without the explicit action');
   });
 });
+
+describe('sharing from a ready scene', () => {
+  it('captures the camera from the real viewer into the preview request', async () => {
+    const view = await openScene();
+    const panel = view.find((node) => node.className === 'memory-edit share-owner')[0];
+    const inPanel = (text) => panel.findAll((node) => node.tag === 'button' && node.textContent === text)[0];
+    panel.findAll((node) => node.tag === 'input' && node.type === 'text')[0].value = 'Shop';
+    inPanel('Use the current camera view').dispatch('click');
+    assert.match(panel.textContent, /Camera view captured/);
+    inPanel('Preview what visitors will see').dispatch('click');
+    await settle();
+    const preview = posts.find((post) => post.body?.camera);
+    assert.deepEqual(preview.body.camera, { position: [0, 0, 0], target: [0, 0, -3] }, 'the viewer’s actual starting camera');
+    assert.equal(preview.body.views[0].kind, 'version');
+    assert.equal(preview.body.views[0].version, 1);
+    view.space.dispose();
+  });
+});

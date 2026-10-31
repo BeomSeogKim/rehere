@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AccessStore, isToken } from './access.mjs';
 import { CollaborationStore } from './collaboration.mjs';
+import { ShareStore, UNAVAILABLE as VISIT_UNAVAILABLE, isVisitToken } from './shares.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest, parseProposalRequest, parseUndoRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
@@ -32,6 +33,9 @@ const STATIC_FILES = new Map([
   ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
   ['/access-ui.js', ['access-ui.js', 'text/javascript; charset=utf-8']],
   ['/collaboration.js', ['collaboration.js', 'text/javascript; charset=utf-8']],
+  ['/visits.js', ['visits.js', 'text/javascript; charset=utf-8']],
+  ['/scene-viewer.js', ['scene-viewer.js', 'text/javascript; charset=utf-8']],
+  ['/shares.js', ['shares.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // Pinned local Three.js files. OrbitControls imports the bare specifier
@@ -68,6 +72,20 @@ const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/
 const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw)$/;
 const ERA_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/era$/;
 const NOT_FOUND = 'This scene could not be found.';
+const SHARES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares$/;
+const PREVIEWS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews$/;
+const PREVIEW_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews\/([^/]+)$/;
+const PREVIEW_ASSET_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews\/([^/]+)\/assets\/([^/]+)\/([^/]+)$/;
+const SHARE_REVOKE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/([^/]+)\/revoke$/;
+const VISIT_ASSET_PATH = /^\/api\/visit\/assets\/([^/]+)\/([^/]+)$/;
+const SHARE_ASSETS = new Set(['surface.json', 'texture.jpg']);
+// Accepts exactly one Authorization header holding a canonical visit token.
+function visitToken(req) {
+  const values = req.headersDistinct?.authorization;
+  if (!Array.isArray(values) || values.length !== 1 || !values[0].startsWith('Bearer ')) return null;
+  const token = values[0].slice('Bearer '.length);
+  return isVisitToken(token) ? token : null;
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
@@ -238,26 +256,32 @@ function parseRange(header, size) {
 
 // Safari plays recorded audio only when byte ranges are supported.
 function sendAsset(req, res, asset) {
+  const size = asset.body ? asset.body.length : asset.size;
   const headers = {
     ...SECURITY_HEADERS,
     'content-type': asset.type,
     'cache-control': 'no-store',
     'accept-ranges': 'bytes',
   };
-  const range = req.headers.range ? parseRange(req.headers.range, asset.size) : null;
+  const range = req.headers.range ? parseRange(req.headers.range, size) : null;
   if (range === 'invalid') {
-    res.writeHead(416, { ...headers, 'content-range': `bytes */${asset.size}` });
+    res.writeHead(416, { ...headers, 'content-range': `bytes */${size}` });
     res.end();
     return;
   }
-  const { start, end } = range ?? { start: 0, end: asset.size - 1 };
+  const { start, end } = range ?? { start: 0, end: size - 1 };
   res.writeHead(range ? 206 : 200, {
     ...headers,
     'content-length': end - start + 1,
-    ...(range && { 'content-range': `bytes ${start}-${end}/${asset.size}` }),
+    ...(range && { 'content-range': `bytes ${start}-${end}/${size}` }),
   });
   if (req.method === 'HEAD') {
     res.end();
+    return;
+  }
+  // A generated payload (such as a sanitized surface) is served from memory.
+  if (asset.body) {
+    res.end(asset.body.subarray(start, end + 1));
     return;
   }
   createReadStream(asset.file, { start, end })
@@ -284,6 +308,36 @@ export function createAppServer({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage,
   });
   const collaboration = new CollaborationStore({ reconstructions });
+  const shares = new ShareStore({ reconstructions });
+
+  // Visitor routes authenticate only with a Bearer visit token; cookies and
+  // query strings are never read. Every refusal looks the same, and errors are
+  // logged by name only so a token cannot reach the log.
+  async function handleVisit(req, res, pathname) {
+    const unavailable = () => sendJson(res, 404, { error: VISIT_UNAVAILABLE });
+    const assetMatch = VISIT_ASSET_PATH.exec(pathname);
+    const token = visitToken(req);
+    const reading = req.method === 'GET' || req.method === 'HEAD';
+    if (!reading || !token || (pathname !== '/api/visit' && !(assetMatch && UUID.test(assetMatch[1]) && SHARE_ASSETS.has(assetMatch[2])))) {
+      unavailable();
+      return;
+    }
+    try {
+      if (assetMatch) sendAsset(req, res, await shares.visitAsset(token, assetMatch[1], assetMatch[2]));
+      else sendJson(res, 200, await shares.visit(token));
+    } catch (error) {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      if (error instanceof RequestError) {
+        unavailable();
+        return;
+      }
+      console.error(`visit failed: ${error?.name ?? 'error'}`);
+      sendJson(res, 500, { error: 'Something went wrong. Please try again.' });
+    }
+  }
 
   async function handle(req, res) {
     const { port } = server.address();
@@ -302,6 +356,10 @@ export function createAppServer({
         sendJson(res, 403, { error: 'This request is not allowed.' });
         return;
       }
+    }
+    if (pathname === '/api/visit' || pathname.startsWith('/api/visit/')) {
+      await handleVisit(req, res, pathname);
+      return;
     }
 
     // The cookie name carries the port: browsers share cookies across ports
@@ -451,6 +509,49 @@ export function createAppServer({
     // Every other API route serves private content: the owner session is
     // checked before any path, ID, range or body is examined.
     if (pathname.startsWith('/api/')) await requireOwner();
+
+    const previewsMatch = PREVIEWS_PATH.exec(pathname);
+    const previewMatch = PREVIEW_PATH.exec(pathname);
+    const previewAssetMatch = PREVIEW_ASSET_PATH.exec(pathname);
+    const sharesMatch = SHARES_PATH.exec(pathname);
+    const revokeShareMatch = SHARE_REVOKE_PATH.exec(pathname);
+    const shareMatch = previewsMatch ?? previewMatch ?? previewAssetMatch ?? sharesMatch ?? revokeShareMatch;
+    if (shareMatch) {
+      // The owner gate above already ran; IDs are checked before any lookup.
+      const owner = await requireOwner();
+      const [, draftId, jobId, third, fourth, fifth] = shareMatch;
+      if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
+      if ((previewMatch || previewAssetMatch || revokeShareMatch) && !UUID.test(third)) throw new RequestError(404, 'This share could not be found.');
+      if (previewsMatch && req.method === 'POST') {
+        const body = strictBody(await readJsonBody(req), ['requestId', 'title', 'views', 'startViewId', 'camera', 'contributionIds', 'synthetic']);
+        sendJson(res, 201, await shares.createPreview(draftId, jobId, owner, body));
+        return;
+      }
+      if (previewMatch && reading) {
+        sendJson(res, 200, await shares.getPreview(draftId, jobId, owner, third));
+        return;
+      }
+      if (previewAssetMatch && reading) {
+        if (!UUID.test(fourth) || !SHARE_ASSETS.has(fifth)) throw new RequestError(404, 'Not found.');
+        sendAsset(req, res, await shares.previewAsset(draftId, jobId, owner, third, fourth, fifth));
+        return;
+      }
+      if (sharesMatch && req.method === 'POST') {
+        const body = strictBody(await readJsonBody(req), ['requestId', 'previewId', 'previewDigest', 'token', 'consent']);
+        sendJson(res, 201, await shares.issue(draftId, jobId, owner, body));
+        return;
+      }
+      if (sharesMatch && reading) {
+        sendJson(res, 200, await shares.list(draftId, jobId, owner));
+        return;
+      }
+      if (revokeShareMatch && req.method === 'POST') {
+        const body = strictBody(await readJsonBody(req), ['requestId']);
+        sendJson(res, 200, await shares.revoke(draftId, jobId, owner, third, body));
+        return;
+      }
+      throw new RequestError(405, 'Method not allowed.');
+    }
 
     const sizeMatch = SOURCE_SIZE_PATH.exec(pathname);
     if (sizeMatch && reading) {

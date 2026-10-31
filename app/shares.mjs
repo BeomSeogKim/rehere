@@ -1,0 +1,517 @@
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
+import { versionDependencies } from './collaboration.mjs';
+import { RequestError } from './drafts.mjs';
+import { canUseSource } from './sources.mjs';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CONTROL = /[\u0000-\u001f\u007f]/;
+const TOKEN = /^rhv_[A-Za-z0-9_-]{43}$/;
+const MINUTE = 60_000;
+
+export const SHARE_LIMITS = Object.freeze({
+  title: 120, views: 8, quotes: 20, cameraCoordinate: 50, cameraDistance: [0.5, 8],
+  previewMs: 15 * MINUTE, snapshotMs: 7 * 24 * 60 * MINUTE, snapshotsPerScene: 50,
+});
+// Only these derived files are ever served to a preview or a visitor.
+export const SHARED_ASSETS = Object.freeze({ 'surface.json': 'application/json', 'texture.jpg': 'image/jpeg' });
+const QUOTABLE = new Set(['submitted', 'adopted', 'alternative']);
+
+export const UNAVAILABLE = 'This shared place is not available.';
+const REASONS = {
+  source: [403, 'The photo is not marked as public material with permission to build and share the place.'],
+  grant: [403, 'A contribution used by a selected view or quote was not shared with permission to build and share the place.'],
+  withdrawn: [409, 'A contribution used by a selected view or quote was withdrawn.'],
+  era: [409, 'The time assertion for a selected alternative changed. Make a new preview.'],
+  changed: [409, 'The saved scene changed after this preview. Make a new preview.'],
+  asset: [409, 'The scene files no longer match this preview. Make a new preview.'],
+};
+
+const fail = (status, message) => new RequestError(status, message);
+const unavailable = () => fail(404, UNAVAILABLE);
+const UNREADABLE = 'The request could not be read.';
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+const finite = (value) => typeof value === 'number' && Number.isFinite(value);
+const isId = (value) => typeof value === 'string' && UUID.test(value);
+const plain = (value, max) => typeof value === 'string' && value.length <= max && !CONTROL.test(value);
+
+function exactKeys(value, keys) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+export function isVisitToken(value) {
+  if (typeof value !== 'string' || !TOKEN.test(value)) return false;
+  const body = value.slice(4);
+  return Buffer.from(body, 'base64url').toString('base64url') === body;
+}
+
+const verifier = (token) => sha256(token);
+const sameVerifier = (a, b) => typeof a === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+
+function parseCamera(camera) {
+  if (!exactKeys(camera, ['position', 'target'])) return null;
+  const vector = (value) => Array.isArray(value) && value.length === 3 && value.every((item) => finite(item) && Math.abs(item) <= SHARE_LIMITS.cameraCoordinate);
+  if (!vector(camera.position) || !vector(camera.target)) return null;
+  const distance = Math.hypot(...camera.position.map((value, index) => value - camera.target[index]));
+  const [min, max] = SHARE_LIMITS.cameraDistance;
+  return distance >= min && distance <= max ? { position: [...camera.position], target: [...camera.target] } : null;
+}
+
+function parseViews(views) {
+  if (!Array.isArray(views) || views.length < 1 || views.length > SHARE_LIMITS.views) return null;
+  const parsed = [];
+  for (const view of views) {
+    if (!exactKeys(view, ['id', 'kind', 'version', 'variantId']) || !isId(view.id)) return null;
+    if (view.kind === 'version' && !(Number.isInteger(view.version) && view.version >= 1 && view.variantId === null)) return null;
+    if (view.kind === 'variant' && !(view.version === null && isId(view.variantId))) return null;
+    if (view.kind !== 'version' && view.kind !== 'variant') return null;
+    parsed.push({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId });
+  }
+  const unique = (values) => new Set(values).size === values.length;
+  const targets = parsed.map((view) => (view.kind === 'version' ? `v${view.version}` : view.variantId));
+  return unique(parsed.map((view) => view.id)) && unique(targets) ? parsed : null;
+}
+
+function parsePreview(body) {
+  if (!exactKeys(body, ['requestId', 'title', 'views', 'startViewId', 'camera', 'contributionIds', 'synthetic'])) throw fail(400, UNREADABLE);
+  const views = parseViews(body.views);
+  const camera = parseCamera(body.camera);
+  const quotes = body.contributionIds;
+  const valid = isId(body.requestId) && plain(body.title, SHARE_LIMITS.title) && body.title.trim() !== '' && views && camera
+    && views.some((view) => view.id === body.startViewId) && typeof body.synthetic === 'boolean'
+    && Array.isArray(quotes) && quotes.length <= SHARE_LIMITS.quotes && quotes.every(isId) && new Set(quotes).size === quotes.length;
+  if (!valid) throw fail(400, UNREADABLE);
+  return { requestId: body.requestId, title: body.title, views, startViewId: body.startViewId, camera, contributionIds: [...quotes], synthetic: body.synthetic };
+}
+
+function parseIssue(body) {
+  if (!exactKeys(body, ['requestId', 'previewId', 'previewDigest', 'token', 'consent'])) throw fail(400, UNREADABLE);
+  const { requestId, previewId, previewDigest, token, consent } = body;
+  if (!isId(requestId) || !isId(previewId) || typeof previewDigest !== 'string' || !/^[0-9a-f]{64}$/.test(previewDigest) || !isVisitToken(token)) {
+    throw fail(400, UNREADABLE);
+  }
+  if (consent !== true) throw fail(400, 'Confirm that visitors may see the selected reconstruction and your time assertions.');
+  return { requestId, previewId, previewDigest, token };
+}
+
+function parseRevoke(body) {
+  if (!exactKeys(body, ['requestId']) || !isId(body.requestId)) throw fail(400, UNREADABLE);
+  return { requestId: body.requestId };
+}
+
+// Renderer input only: grid, depth, mask, camera assumptions and image size.
+// Source IDs, checksums, file names and texture records are never served.
+export function visitorSurface(surface) {
+  const { width, height, depth, foreground, assumptions, source } = surface;
+  return {
+    width, height, depth, foreground,
+    assumptions: {
+      horizontal_fov_degrees: assumptions.horizontal_fov_degrees, near: assumptions.near, far: assumptions.far,
+      max_triangle_depth_span: assumptions.max_triangle_depth_span,
+    },
+    source: { image_size: [...source.image_size] },
+  };
+}
+
+const sharesOf = (manifest) => manifest.shares ?? { previews: [], snapshots: [], receipts: [] };
+const contributionsOf = (manifest) => manifest.collaboration?.contributions ?? [];
+const variantsOf = (manifest) => manifest.collaboration?.variants ?? [];
+
+// Visitor-facing content excludes the snapshot ID and time, so the digest
+// binds exactly what the owner previewed.
+const contentDigest = (publicView) => {
+  const { id, createdAt, ...content } = publicView;
+  return sha256(JSON.stringify(content));
+};
+
+const UNKNOWN_ERA = Object.freeze({ kind: 'unknown', label: '', start: null, end: null, statement: '', assertedByLabel: null, relation: null, relativeToViewId: null });
+
+// Frozen, owner-approved snapshots of one ready reconstruction. Previews,
+// snapshots and receipts live in that reconstruction's manifest, so issuing
+// and a contribution withdrawal share its mutex and atomic manifest write.
+export class ShareStore {
+  constructor({ reconstructions, now = Date.now }) {
+    this.reconstructions = reconstructions;
+    this.now = now;
+  }
+
+  #owner(principal) {
+    if (!principal || !isId(principal.id)) throw fail(401, 'Sign in to continue.');
+    if (principal.role !== 'owner') throw fail(403, 'This action is not allowed.');
+  }
+
+  async #scene(draftId, jobId) {
+    const manifest = await this.reconstructions.readManifest(draftId, jobId);
+    if (!manifest) throw fail(404, 'This scene could not be found.');
+    return manifest;
+  }
+
+  // Source grants are read from the draft every time; no copy is trusted.
+  async #sourceIssue(manifest) {
+    if (manifest.status !== 'ready') return 'changed';
+    const draft = await this.reconstructions.drafts.get(manifest.draftId);
+    const source = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === manifest.sourceId) : null;
+    if (!source || source.sha256 !== manifest.sourceSha256 || source.origin?.kind !== 'public') return 'source';
+    if (!canUseSource(draft, manifest.sourceId, 'place') || !canUseSource(draft, manifest.sourceId, 'share')) return 'source';
+    return null;
+  }
+
+  // Every dependency and quote needs a live record with place and share grants.
+  #contributionIssue(manifest, ids) {
+    const contributions = contributionsOf(manifest);
+    for (const id of ids) {
+      const contribution = contributions.find((item) => item.id === id);
+      if (!contribution || contribution.withdrawnAt !== null) return 'withdrawn';
+      if (contribution.permissions.place !== true || contribution.permissions.share !== true) return 'grant';
+    }
+    return null;
+  }
+
+  // Null when the frozen selection may still be shown. `current` also requires
+  // version views to be the saved version, as at preview and issue time.
+  async #liveIssue(manifest, frozen, { current }) {
+    const source = await this.#sourceIssue(manifest);
+    if (source) return source;
+    if (manifest.sourceSha256 !== frozen.sourceSha256) return 'source';
+    if (await this.#assetIssue(manifest, frozen.assets)) return 'asset';
+    const contributions = contributionsOf(manifest);
+    for (const quote of frozen.quotes) {
+      const contribution = contributions.find((item) => item.id === quote.contributionId);
+      if (!contribution || contribution.withdrawnAt !== null || contribution.textSha256 !== quote.textSha256) return 'withdrawn';
+    }
+    const ids = [...frozen.views.flatMap((view) => view.dependencies), ...frozen.quotes.map((quote) => quote.contributionId)];
+    const grants = this.#contributionIssue(manifest, ids);
+    if (grants) return grants;
+    for (const view of frozen.views) {
+      if (view.kind === 'version' && current && view.version !== manifest.edit.version) return 'changed';
+      if (view.kind === 'variant') {
+        const variant = variantsOf(manifest).find((item) => item.id === view.variantId);
+        if (!variant) return 'withdrawn';
+        if (variant.eraRevision !== view.eraRevision) return 'era';
+      }
+    }
+    return null;
+  }
+
+  // Each shared file must still match both the manifest record and the frozen
+  // checksum byte for byte; a same-size replacement is not the frozen file.
+  async #assetIssue(manifest, bindings) {
+    for (const [name, binding] of Object.entries(bindings)) {
+      const entry = manifest.derivedAssets.find((item) => item.name === name);
+      if (!entry || entry.sha256 !== binding.sha256 || entry.size !== binding.size) return 'asset';
+      const bytes = await readFile(path.join(this.reconstructions.jobDir(manifest.draftId, manifest.id), 'assets', name)).catch(() => null);
+      if (!bytes || bytes.length !== binding.size || sha256(bytes) !== binding.sha256) return 'asset';
+    }
+    return null;
+  }
+
+  #throwReason(reason) {
+    const [status, message] = REASONS[reason];
+    throw fail(status, message);
+  }
+
+  async #build(manifest, request) {
+    const reason = await this.#sourceIssue(manifest);
+    if (reason) this.#throwReason(reason);
+    const draft = await this.reconstructions.drafts.get(manifest.draftId);
+    const source = draft.sources.find((item) => item.id === manifest.sourceId);
+    const variants = variantsOf(manifest);
+    let alternatives = 0;
+    const selected = request.views.map((view) => {
+      if (view.kind === 'version') {
+        if (view.version !== manifest.edit.version) throw fail(409, 'Only the current saved version can be shared. Reload and select it again.');
+        return { view, edit: manifest.edit, dependencies: versionDependencies(manifest, view.version), era: null, eraRevision: null, label: 'Saved scene' };
+      }
+      const variant = variants.find((item) => item.id === view.variantId);
+      if (!variant) throw fail(404, 'This version of the scene could not be found.');
+      const label = variant.kind === 'baseline' ? 'Saved reconstruction' : `Alternative arrangement ${(alternatives += 1)}`;
+      return { view, edit: variant.edit, dependencies: [...variant.contributionIds], era: variant.eraAssertions.at(-1) ?? null, eraRevision: variant.eraRevision, label };
+    });
+    const dependencyReason = this.#contributionIssue(manifest, selected.flatMap((item) => item.dependencies));
+    if (dependencyReason) this.#throwReason(dependencyReason);
+
+    const contributions = contributionsOf(manifest);
+    const quotes = request.contributionIds.map((id) => {
+      const contribution = contributions.find((item) => item.id === id);
+      if (!contribution) throw fail(404, 'This contribution could not be found.');
+      if (contribution.withdrawnAt !== null) this.#throwReason('withdrawn');
+      if (!QUOTABLE.has(contribution.status)) throw fail(409, 'Only submitted, adopted or alternative recollections can be quoted.');
+      if (contribution.permissions.place !== true || contribution.permissions.share !== true) this.#throwReason('grant');
+      return contribution;
+    });
+
+    const views = selected.map(({ view, edit, dependencies, era, label }) => {
+      let publicEra = { ...UNKNOWN_ERA };
+      if (era) {
+        let relativeToViewId = null;
+        if (era.relativeToVariantId !== null) {
+          const target = selected.find((item) => item.view.variantId === era.relativeToVariantId);
+          // A relation to an unselected version would disclose it, so both must be shared.
+          if (!target) throw fail(400, 'A selected alternative has a time relation to a version that is not selected. Select that version too.');
+          relativeToViewId = target.view.id;
+        }
+        publicEra = {
+          kind: era.kind, label: era.label, start: era.start, end: era.end, statement: era.statement,
+          assertedByLabel: era.kind === 'unknown' ? null : 'Place owner', relation: era.relation, relativeToViewId,
+        };
+      }
+      // Every supporting recollection is acknowledged without its wording; only
+      // the explicitly selected quotes add text.
+      const support = dependencies.map((id) => contributions.find((item) => item.id === id))
+        .map((item) => ({ kind: 'human_recollection', providerLabel: item.provider.displayName, status: 'owner-selected' }));
+      const supporting = quotes.filter((item) => dependencies.includes(item.id));
+      const unattached = quotes.filter((item) => !selected.some((other) => other.dependencies.includes(item.id)));
+      return {
+        id: view.id,
+        label,
+        edit: { offset: [...edit.offset], yaw: edit.yaw },
+        era: publicEra,
+        evidence: {
+          photo: { providerLabel: source.provider || null, attributedCaptureDate: source.dates?.capturedOn ?? null },
+          geometry: 'model estimate',
+          support,
+          recollections: [...supporting, ...unattached].map((item) => ({ providerLabel: item.provider.displayName, text: item.text, periodClaim: item.periodClaim })),
+        },
+      };
+    });
+    const publicView = {
+      id: null, title: request.title, createdAt: null, synthetic: request.synthetic, startViewId: request.startViewId,
+      camera: { position: [...request.camera.position], target: [...request.camera.target] }, views,
+    };
+    const assets = {};
+    for (const name of Object.keys(SHARED_ASSETS)) {
+      const entry = manifest.derivedAssets.find((item) => item.name === name);
+      if (!entry) this.#throwReason('asset');
+      assets[name] = { sha256: entry.sha256, size: entry.size };
+    }
+    if (await this.#assetIssue(manifest, assets)) this.#throwReason('asset');
+    const frozen = {
+      sourceSha256: manifest.sourceSha256,
+      assets,
+      views: selected.map(({ view, dependencies, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision })),
+      quotes: quotes.map((item) => ({ contributionId: item.id, textSha256: item.textSha256 })),
+    };
+    return { publicView, frozen };
+  }
+
+  // Returns the fixed binding for an allowlisted asset after checking it still
+  // matches the frozen checksum. Never a source path or a sibling file.
+  async #asset(manifest, frozen, viewId, name) {
+    if (!frozen.views.some((view) => view.id === viewId) || !Object.hasOwn(SHARED_ASSETS, name)) return null;
+    const file = path.join(this.reconstructions.jobDir(manifest.draftId, manifest.id), 'assets', name);
+    const binding = frozen.assets[name];
+    if (name === 'surface.json') {
+      const bytes = await readFile(file);
+      if (sha256(bytes) !== binding.sha256) return null;
+      return { name, type: SHARED_ASSETS[name], body: Buffer.from(JSON.stringify(visitorSurface(JSON.parse(bytes.toString('utf8'))))) };
+    }
+    // The caller verified these bytes against the frozen checksum in this mutex slot.
+    const info = await stat(file);
+    if (!info.isFile() || info.size !== binding.size) return null;
+    return { name, type: SHARED_ASSETS[name], file, size: info.size };
+  }
+
+  #previewResult(preview) {
+    return { id: preview.id, digest: preview.digest, expiresAt: preview.expiresAt, publicView: structuredClone(preview.publicView) };
+  }
+
+  async createPreview(draftId, jobId, principal, body) {
+    this.#owner(principal);
+    const request = parsePreview(body);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const shares = sharesOf(manifest);
+      const { requestId, ...values } = request;
+      const requestDigest = sha256(JSON.stringify(values));
+      const existing = shares.previews.find((item) => item.requestId === requestId);
+      if (existing) {
+        if (existing.requestDigest !== requestDigest) throw fail(409, 'This request was already used with different values.');
+        // A replay gets the same validity checks as a read; stored words are never returned for a stale preview.
+        await this.#checkPreview(manifest, existing);
+        return this.#previewResult(existing);
+      }
+      const { publicView, frozen } = await this.#build(manifest, request);
+      const now = this.now();
+      const preview = {
+        id: randomUUID(), requestId, requestDigest, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + SHARE_LIMITS.previewMs).toISOString(),
+        createdBy: principal.id, frozen, publicView: { ...publicView, id: null }, digest: contentDigest(publicView), snapshotId: null,
+      };
+      // Expired previews that were never issued are dropped; issued ones stay for audit.
+      const previews = shares.previews.filter((item) => item.snapshotId !== null || Date.parse(item.expiresAt) > now);
+      await this.reconstructions.update(manifest, { shares: { ...shares, previews: [...previews, preview] } });
+      return this.#previewResult(preview);
+    });
+  }
+
+  // Callers already hold the manifest mutex.
+  async #checkPreview(manifest, preview) {
+    if (this.now() >= Date.parse(preview.expiresAt)) throw fail(409, 'This preview expired. Make a new preview.');
+    const reason = await this.#liveIssue(manifest, preview.frozen, { current: true });
+    if (reason) this.#throwReason(reason);
+  }
+
+  // Checks run under the manifest mutex, and `use` builds the response in the
+  // same slot, so no withdrawal can land between the check and the binding.
+  async #livePreview(draftId, jobId, principal, previewId, use) {
+    this.#owner(principal);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const preview = sharesOf(manifest).previews.find((item) => item.id === previewId);
+      if (!preview) throw fail(404, 'This preview could not be found.');
+      await this.#checkPreview(manifest, preview);
+      return use(manifest, preview);
+    });
+  }
+
+  getPreview(draftId, jobId, principal, previewId) {
+    return this.#livePreview(draftId, jobId, principal, previewId, (manifest, preview) => this.#previewResult(preview));
+  }
+
+  previewAsset(draftId, jobId, principal, previewId, viewId, name) {
+    return this.#livePreview(draftId, jobId, principal, previewId, async (manifest, preview) => {
+      const asset = await this.#asset(manifest, preview.frozen, viewId, name);
+      if (!asset) throw fail(404, 'Not found.');
+      return asset;
+    });
+  }
+
+  // Linear scan over recorded jobs; fine for one local workspace.
+  async #findSnapshot(digest) {
+    for (const draftId of await this.reconstructions.draftIds()) {
+      for (const job of await this.reconstructions.list(draftId)) {
+        const manifest = await this.reconstructions.readManifest(draftId, job.id);
+        let found = null;
+        for (const snapshot of sharesOf(manifest ?? {}).snapshots) if (sameVerifier(snapshot.tokenVerifier, digest) && !found) found = snapshot;
+        if (found) return { manifest, snapshot: found };
+      }
+    }
+    return null;
+  }
+
+  #receipt(snapshot) {
+    return { id: snapshot.id, createdAt: snapshot.createdAt, expiresAt: snapshot.expiresAt, status: snapshot.revokedAt ? 'revoked' : 'active', previewId: snapshot.previewId, digest: snapshot.digest };
+  }
+
+  async issue(draftId, jobId, principal, body) {
+    this.#owner(principal);
+    const request = parseIssue(body);
+    await this.reconstructions.recover();
+    const tokenVerifier = verifier(request.token);
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const shares = sharesOf(manifest);
+      const existing = shares.snapshots.find((item) => item.requestId === request.requestId);
+      if (existing) {
+        if (existing.previewId !== request.previewId || existing.digest !== request.previewDigest || !sameVerifier(existing.tokenVerifier, tokenVerifier)) {
+          throw fail(409, 'This request was already used with different values.');
+        }
+        return this.#receipt(existing);
+      }
+      if (await this.#findSnapshot(tokenVerifier)) throw fail(409, 'This link key was already used. Prepare a new one.');
+      const preview = shares.previews.find((item) => item.id === request.previewId);
+      if (!preview) throw fail(404, 'This preview could not be found.');
+      if (preview.snapshotId !== null) throw fail(409, 'This preview was already issued. Make a new preview for another link.');
+      if (preview.digest !== request.previewDigest) throw fail(409, 'The preview changed. Review it again before issuing.');
+      const now = this.now();
+      if (now >= Date.parse(preview.expiresAt)) throw fail(409, 'This preview expired. Make a new preview.');
+      if (shares.snapshots.length >= SHARE_LIMITS.snapshotsPerScene) throw fail(409, 'This scene has reached the number of shared snapshots it can keep.');
+      const reason = await this.#liveIssue(manifest, preview.frozen, { current: true });
+      if (reason) this.#throwReason(reason);
+      const createdAt = new Date(now).toISOString();
+      const snapshot = {
+        id: randomUUID(), requestId: request.requestId, previewId: preview.id, digest: preview.digest, tokenVerifier,
+        createdAt, expiresAt: new Date(now + SHARE_LIMITS.snapshotMs).toISOString(), revokedAt: null, createdBy: principal.id,
+        frozen: preview.frozen,
+      };
+      snapshot.publicView = { ...preview.publicView, id: snapshot.id, createdAt };
+      await this.reconstructions.update(manifest, {
+        shares: {
+          ...shares,
+          previews: shares.previews.map((item) => (item.id === preview.id ? { ...item, snapshotId: snapshot.id } : item)),
+          snapshots: [...shares.snapshots, snapshot],
+        },
+      });
+      return this.#receipt(snapshot);
+    });
+  }
+
+  async #status(manifest, snapshot) {
+    if (snapshot.revokedAt) return { status: 'revoked', reason: 'Revoked by the owner.' };
+    if (this.now() >= Date.parse(snapshot.expiresAt)) return { status: 'expired', reason: 'The link reached its expiry time.' };
+    const reason = await this.#liveIssue(manifest, snapshot.frozen, { current: false });
+    return reason ? { status: 'suspended', reason: REASONS[reason][1] } : { status: 'active', reason: null };
+  }
+
+  // Owner metadata only: no token verifier, frozen content or link.
+  async #metadata(manifest, snapshot) {
+    return {
+      id: snapshot.id, title: snapshot.publicView.title, createdAt: snapshot.createdAt, expiresAt: snapshot.expiresAt,
+      ...(await this.#status(manifest, snapshot)),
+      views: snapshot.publicView.views.map((view) => ({ id: view.id, label: view.label })),
+    };
+  }
+
+  async list(draftId, jobId, principal) {
+    this.#owner(principal);
+    await this.reconstructions.recover();
+    const manifest = await this.#scene(draftId, jobId);
+    const result = [];
+    for (const snapshot of [...sharesOf(manifest).snapshots].reverse()) result.push(await this.#metadata(manifest, snapshot));
+    return result;
+  }
+
+  async revoke(draftId, jobId, principal, snapshotId, body) {
+    this.#owner(principal);
+    const request = parseRevoke(body);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const shares = sharesOf(manifest);
+      const receipt = shares.receipts.find((item) => item.requestId === request.requestId);
+      if (receipt && (receipt.action !== 'revoke' || receipt.snapshotId !== snapshotId)) throw fail(409, 'This request was already used with different values.');
+      const snapshot = shares.snapshots.find((item) => item.id === snapshotId);
+      if (!snapshot) throw fail(404, 'This shared snapshot could not be found.');
+      // Revocation is one-way; a later request on a revoked snapshot changes nothing.
+      if (receipt || snapshot.revokedAt) return this.#metadata(manifest, snapshot);
+      const revoked = { ...snapshot, revokedAt: new Date(this.now()).toISOString() };
+      await this.reconstructions.update(manifest, {
+        shares: {
+          ...shares,
+          snapshots: shares.snapshots.map((item) => (item.id === snapshotId ? revoked : item)),
+          receipts: [...shares.receipts, { requestId: request.requestId, action: 'revoke', snapshotId }],
+        },
+      });
+      return this.#metadata(manifest, revoked);
+    });
+  }
+
+  // Every visitor failure is the same generic error; reasons stay with the owner.
+  async #visitable(token, use) {
+    if (!isVisitToken(token)) throw unavailable();
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const found = await this.#findSnapshot(verifier(token));
+      if (!found) throw unavailable();
+      const { status } = await this.#status(found.manifest, found.snapshot);
+      if (status !== 'active') throw unavailable();
+      return use(found.manifest, found.snapshot);
+    });
+  }
+
+  visit(token) {
+    return this.#visitable(token, (manifest, snapshot) => structuredClone(snapshot.publicView));
+  }
+
+  // Admission only: a stream already handed to a visitor cannot be recalled.
+  visitAsset(token, viewId, name) {
+    return this.#visitable(token, async (manifest, snapshot) => {
+      const asset = await this.#asset(manifest, snapshot.frozen, viewId, name).catch(() => null);
+      if (!asset) throw unavailable();
+      return asset;
+    });
+  }
+}

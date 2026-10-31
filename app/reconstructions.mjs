@@ -144,10 +144,10 @@ function sameValues(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-// Internal request and collaboration records stay on disk; clients see the
-// manifest contract plus whether withdrawn or ungranted contributions block use.
+// Internal request, collaboration and share records stay on disk; clients see
+// the manifest contract plus whether withdrawn or ungranted contributions block use.
 export function publicManifest(manifest) {
-  const { edits, proposals, collaboration, ...rest } = manifest;
+  const { edits, proposals, collaboration, shares, ...rest } = manifest;
   return { ...rest, usageBlocked: usageBlocked(manifest), modelBlocked: modelBlocked(manifest) };
 }
 

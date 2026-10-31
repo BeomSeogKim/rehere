@@ -316,3 +316,9 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
 .collab-review:empty, .collab-compare:empty { display: none; }
 .collab-review { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .collab-invitations { margin: 16px 0; }
+
+.visit-area { margin-top: 24px; }
+.visit-details { margin-top: 12px; overflow-wrap: anywhere; }
+.share-panel { margin: 16px 0; }
+.share-preview:empty { display: none; }
+.share-preview { margin-top: 12px; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius); }

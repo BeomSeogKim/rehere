@@ -25,6 +25,7 @@ const UNCONFIRMED = 'Rehere could not confirm whether this was saved. Your photo
 const $ = (id) => document.getElementById(id);
 const els = {
   access: $('access'),
+  visit: $('visit'),
   ownerApp: $('owner-app'),
   compose: $('compose'),
   form: $('draft-form'),
@@ -70,6 +71,8 @@ let ticker = null;
 // Private content loads only while an owner session is active. Each sign-out
 // bumps the generation so responses started before it are dropped.
 let ownerActive = false;
+// True while a visit link is shown instead of the app.
+let visiting = false;
 let sessionGeneration = 0;
 const stillOwner = (generation) => ownerActive && generation === sessionGeneration;
 
@@ -467,6 +470,8 @@ function clearViewer() {
 }
 
 function startOwner() {
+  // A session answer that arrives while a visit is open never starts the app.
+  if (visiting) return;
   ownerActive = true;
   els.ownerApp.hidden = false;
   route();
@@ -487,14 +492,17 @@ function stopOwner() {
   els.savedEmpty.hidden = false;
   els.savedEmpty.textContent = 'Nothing has been saved yet.';
   els.ownerApp.hidden = true;
-  if (location.hash) history.replaceState(null, '', location.pathname);
+  // Only a private memory route is cleared; a visit fragment stays for the visit.
+  if (/^#\/memories\//.test(location.hash)) history.replaceState(null, '', location.pathname);
 }
 
 const access = mountAccess(els.access, { onOwner: startOwner, onSignedOut: stopOwner, renderContributor: (node) => mountContributor(node) });
 
 // Any private request answered 401 means the session expired or was replaced,
 // including requests made by the scene and proposal modules.
-const PUBLIC_API = /^\/api\/(session(\/|$)|invitations\/redeem$)/;
+// Visitor reads use only a visit token; their failures never end an owner's
+// session in another part of the page.
+const PUBLIC_API = /^\/api\/(session(\/|$)|invitations\/redeem$|visit(\/|$))/;
 const baseFetch = window.fetch.bind(window);
 window.fetch = async (input, options) => {
   // A 401 for a request sent in an earlier session must not end a newer one.
@@ -505,8 +513,52 @@ window.fetch = async (input, options) => {
   return response;
 };
 
+// A visit link is recognised before anything private loads: no session check,
+// no sign-in and no owner request. The token stays in the fragment, which is
+// never sent to the server, and in memory.
+const VISIT = /^#\/visit\/(rhv_[A-Za-z0-9_-]{43})$/;
+let visitor = null;
+let visitModule = null;
+// Every entry to or exit from a visit takes a new number; after the module
+// import only the latest call may mount, so A -> B -> A mounts once.
+let routeGeneration = 0;
+
+async function routeVisit() {
+  const mine = ++routeGeneration;
+  const match = VISIT.exec(location.hash);
+  if (!match) {
+    if (!visiting) return false;
+    // Leaving a visit removes it completely before the normal app starts.
+    visiting = false;
+    visitor?.dispose();
+    visitor = null;
+    els.visit.hidden = true;
+    els.access.hidden = false;
+    access.start();
+    return false;
+  }
+  visiting = true;
+  // Drops any pending session or sign-in answer and any contributor screen, so
+  // nothing private starts or stays while the visit is shown.
+  access.suspend();
+  if (ownerActive) stopOwner();
+  visitor?.dispose();
+  visitor = null;
+  els.access.hidden = true;
+  els.ownerApp.hidden = true;
+  els.visit.hidden = false;
+  const token = match[1];
+  visitModule ??= await import('./visits.js');
+  if (mine !== routeGeneration) return true;
+  visitor = visitModule.mountVisitor(els.visit, visitModule.visitSource(token));
+  return true;
+}
+
+window.addEventListener('hashchange', routeVisit);
+
 renderTextSource();
 renderVoiceSource();
 recorder.subscribe(renderVoice);
 renderVoice();
-access.start();
+if (!VISIT.test(location.hash)) access.start();
+else routeVisit();

@@ -561,6 +561,16 @@ export function mountAccess(container, { onOwner, onSignedOut, renderContributor
 
   return {
     start,
+    // For a visit link: drops every pending answer of this screen and any
+    // contributor view, so nothing here starts while the visit is shown.
+    suspend() {
+      generation += 1;
+      contributorView?.dispose();
+      contributorView = null;
+      principal = null;
+      unsavedKeys = false;
+      container.replaceChildren();
+    },
     // For a 401 from a private request: the session expired or was replaced.
     sessionEnded() {
       if (!principal) return;

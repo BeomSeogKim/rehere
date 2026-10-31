@@ -20,8 +20,10 @@ memories to bounded changes with explicit approval and preserved version
 history. Unseen areas remain empty. Local owner sessions, scoped contributor
 credentials and recovery protect private content. Written contributions stay
 attributed through owner review, immutable alternatives and explicit time
-assertions; withdrawal blocks dependent uses. Visitor sharing, photo or voice
-contributions and multi-view alignment are not connected yet.
+assertions; withdrawal blocks dependent uses. Saved visitor snapshots preserve
+selected arrangements and permitted writing behind revocable local links.
+Recorded visitor stories, photo or voice contributions, multi-view alignment
+and hosted operation are not connected yet.
 
 The production deployment stack is not selected.
 

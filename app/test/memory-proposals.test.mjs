@@ -716,8 +716,10 @@ describe('proposal restart', () => {
   it('records a successful answer that arrives after shutdown as interrupted, keeping its usage', async () => {
     const gate = deferred();
     const app = await setup({ model: fakeModel([async (call) => { await gate.promise; return { ok: true, plan: plan({ sourceId: call.sourceId }) }; }]) });
-    const queued = await (await app.propose()).json();
-    await app.settle(queued.id, ['processing']);
+    await app.propose();
+    // Processing starts before image preparation and the dispatch check, so
+    // wait until the provider call has actually been made.
+    await waitUntil(async () => app.model.calls.length, (count) => count === 1);
     const closing = app.close();
     gate.resolve();
     await closing;
@@ -725,6 +727,7 @@ describe('proposal restart', () => {
     assert.equal(stored.status, 'interrupted');
     assert.equal(stored.result, null);
     assert.equal(stored.usage.inputTokens, 900);
+    assert.equal(app.model.calls[0].signal.aborted, true);
   });
 
   it('reopens a scene saved before proposals existed unchanged', async () => {

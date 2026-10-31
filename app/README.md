@@ -41,7 +41,13 @@ explicit time assertion. Withdrawal blocks dependent spatial uses. See the
 [collaboration guide](COLLABORATION.md) for grants, review and restoration.
 
 Not included: transcription, multi-view alignment, photo or voice contributions,
-visitor sharing, hosted account integration, and recovery of unsaved input.
+recorded visitor stories and captions, hosted account integration, and recovery
+of unsaved input.
+
+Saved visitor snapshots can include selected arrangements and permitted written
+recollections. Preview the actual visitor screen before issuing a local link;
+later private changes stay private, while current withdrawal overrides a frozen
+copy. See the [sharing guide](SHARING.md) for access, revocation and limits.
 
 ## Getting started
 
