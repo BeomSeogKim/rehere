@@ -1,0 +1,61 @@
+{
+  "fixture": "synthetic-room-v1",
+  "synthetic": true,
+  "notice": "Synthetic diagram for testing natural-language relation changes. It is not a photograph, a memory, product evidence, or a historical record. The FRONT marking and arrow are a diagram convention only.",
+  "image_size": [1024, 768],
+  "coordinates": "Pixels of the image rendered 1:1 from the SVG viewBox (1024x768), origin top-left, boxes as [x1, y1, x2, y2]. Normalized u = x / 1024, v = y / 768.",
+  "object": {
+    "id": "selected-foreground",
+    "label": "counter",
+    "box_xyxy": [392, 480, 632, 650],
+    "visible_front": "faces the camera (+z) before any edit, marked FRONT by diagram convention"
+  },
+  "regions": {
+    "window": {"box_xyxy": [100, 228, 230, 413], "side": "left wall"},
+    "door": {"box_xyxy": [800, 241, 920, 666], "side": "right wall"}
+  },
+  "cases": [
+    {
+      "id": "face-window",
+      "text": "The front of the counter faced the window.",
+      "expect": {
+        "action": "face_anchor",
+        "targetId": "selected-foreground",
+        "anchor_region": "window",
+        "yaw_sign": -1,
+        "state_change": "only after explicit Apply with frontConfirmed true"
+      }
+    },
+    {
+      "id": "face-door",
+      "text": "The front of the counter faced the door.",
+      "expect": {
+        "action": "face_anchor",
+        "targetId": "selected-foreground",
+        "anchor_region": "door",
+        "yaw_sign": 1,
+        "state_change": "only after explicit Apply with frontConfirmed true"
+      }
+    },
+    {
+      "id": "absent-landmark",
+      "text": "The front of the counter faced the fireplace.",
+      "expect": {"action": "clarify", "reason": "no fireplace is depicted", "state_change": false}
+    },
+    {
+      "id": "ambiguous-front",
+      "text": "One side of the counter faced the window.",
+      "expect": {"action": "clarify", "reason": "the statement does not say which side is the front", "state_change": false}
+    }
+  ],
+  "checks": {
+    "anchor_region": "The proposed anchor point (u, v) times the image size lies inside the named region box and outside the object box.",
+    "yaw_sign": "Sign of the derived yaw; atan2(anchorX - centreX, anchorZ - centreZ) has the sign of the horizontal offset, so the left-wall window gives a negative and the right-wall door a positive yaw for this centred counter."
+  },
+  "limitations": [
+    "A diagram cannot establish emotional value, memory accuracy, or user benefit.",
+    "Flat synthetic shading does not measure photo reconstruction quality; model depth on a drawing may differ from depth on photographs.",
+    "Printed WINDOW, DOOR and FRONT labels make landmark identification easier than in a real photograph.",
+    "One fixed drawing and four statements do not establish model reliability."
+  ]
+}

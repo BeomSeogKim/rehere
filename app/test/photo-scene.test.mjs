@@ -8,8 +8,10 @@ import {
   createEditSession,
   createSceneObjects,
   editProblem,
+  facingGuide,
   jobStatusText,
   surfaceMeshes,
+  surfacePoint,
 } from '../public/photo-scene.js';
 
 const SOURCE_ID = '3f2b6c1e-8d4a-4b7e-9c2f-1a2b3c4d5e6f';
@@ -245,5 +247,41 @@ describe('unconfirmed edit save', () => {
     session.markUncertain();
     session.confirm({ version: 3, offset: [1, 0, 0], yaw: 0 });
     assert.equal(session.uncertain, false);
+  });
+});
+
+describe('facing guide', () => {
+  it('places a photo point where the surface mesh puts that grid vertex', () => {
+    const surface = syntheticSurface();
+    const { background } = surfaceMeshes(surface);
+    const point = surfacePoint(surface, [0, 0.5]);
+    const found = [];
+    for (let i = 0; i < background.positions.length; i += 3) {
+      if (Math.abs(background.positions[i] - point[0]) < 1e-12 && Math.abs(background.positions[i + 1] - point[1]) < 1e-12) found.push(background.positions[i + 2]);
+    }
+    assert.deepEqual(found, [point[2]]);
+  });
+
+  it('says whether the photographed side points at the target', () => {
+    const centre = [0, 0, -3];
+    const target = [1, 0.5, -2];
+    const yaw = Math.atan2(target[0] - centre[0], target[2] - centre[2]);
+    assert.deepEqual(facingGuide(centre, yaw, target), { direction: [Math.sin(yaw), 0, Math.cos(yaw)], level: [1, 0, -2], readable: true, aligned: true });
+    assert.equal(facingGuide(centre, yaw + 0.5, target).aligned, false);
+  });
+
+  it('compares the turn with the level point of a higher target, the line that is drawn', () => {
+    const guide = facingGuide([0, 0, -3], Math.PI / 2, [1, 1, -3]);
+    assert.deepEqual(guide.level, [1, 0, -3]);
+    assert.equal(guide.aligned, true);
+    // The level line from the centre is exactly the arrow's direction.
+    const levelDirection = guide.level.map((value, axis) => value - [0, 0, -3][axis]);
+    assert.ok(Math.abs(levelDirection[0] - guide.direction[0]) < 1e-12 && levelDirection[1] === 0 && Math.abs(levelDirection[2] - guide.direction[2]) < 1e-12);
+  });
+
+  it('reports a target too close to the centre as not readable', () => {
+    const guide = facingGuide([0, 0, -3], 0, [0.01, 1, -3.01]);
+    assert.equal(guide.readable, false);
+    assert.equal(guide.aligned, false);
   });
 });

@@ -15,8 +15,10 @@ It preserves original checksums, source attribution, independent use permissions
 and unknown dates. Permitted photos can become partial depth scenes through
 local depth estimation and SAM2 segmentation. People can inspect model
 proposals, explore the visible surfaces, preview foreground changes and save
-versioned transforms. Unseen areas remain empty. Sharing, accounts, multi-view
-alignment and natural-language spatial editing are not connected yet.
+versioned transforms. A separately enabled Meta planner connects written
+memories to bounded changes with explicit approval and preserved version
+history. Unseen areas remain empty. Sharing, accounts and multi-view alignment
+are not connected yet.
 
 The production deployment stack is not selected.
 

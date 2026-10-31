@@ -728,7 +728,13 @@ describe('reconstruction publication', () => {
   }
 
   it('does not publish ready when the server closes during promotion', async () => {
-    const { manifest, published } = await pausedPromotion((app) => app.close());
+    // close() now waits for the paused promotion to settle, so it is awaited
+    // only after the promotion is resumed.
+    let closing;
+    const { manifest, published } = await pausedPromotion((app) => {
+      closing = app.close();
+    });
+    await closing;
     assert.equal(manifest.status, 'interrupted');
     assert.deepEqual(manifest.derivedAssets, []);
     assert.deepEqual(published, ['manifest.json']);

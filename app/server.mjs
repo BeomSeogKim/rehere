@@ -4,7 +4,9 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
-import { ReconstructionStore, parseBuildRequest, parseEditRequest, pythonRunner } from './reconstructions.mjs';
+import { parseApplyRequest, parseCancelRequest, parseProposalRequest, parseUndoRequest } from './memory-proposals.mjs';
+import { metaModelFromEnv } from './meta-model.mjs';
+import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, parseEditRequest, pythonModelImage, pythonRunner } from './reconstructions.mjs';
 
 const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 const DEFAULT_DATA_DIR = fileURLToPath(new URL('./data/', import.meta.url));
@@ -22,6 +24,7 @@ const STATIC_FILES = new Map([
   ['/source-details.js', ['source-details.js', 'text/javascript; charset=utf-8']],
   ['/space.js', ['space.js', 'text/javascript; charset=utf-8']],
   ['/photo-scene.js', ['photo-scene.js', 'text/javascript; charset=utf-8']],
+  ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // Pinned local Three.js files. OrbitControls imports the bare specifier
@@ -48,6 +51,11 @@ const JOBS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions$/;
 const JOB_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)$/;
 const JOB_EDIT_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/edit$/;
 const JOB_ASSET_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/assets\/([^/]+)$/;
+const PROPOSALS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals$/;
+const PROPOSAL_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals\/([^/]+)$/;
+const PROPOSAL_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals\/([^/]+)\/(cancel|apply)$/;
+const HISTORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/history$/;
+const UNDO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/undo$/;
 
 function sendJson(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
@@ -192,16 +200,22 @@ function sendAsset(req, res, asset) {
     .pipe(res);
 }
 
-// reconstructionRunner and reconstructionTimeoutMs are for tests and local
-// wiring only; no request can choose the runner or its arguments.
+// reconstructionRunner, reconstructionTimeoutMs, proposalModel and
+// prepareModelImage are for tests and local wiring only; no request can choose
+// the runner, the model, its endpoint, key or limits. Without a proposalModel
+// memory-based proposals are refused rather than simulated.
 export function createAppServer({
   dataDir = DEFAULT_DATA_DIR,
   limits = LIMITS,
   reconstructionRunner = pythonRunner(),
   reconstructionTimeoutMs,
+  proposalModel = null,
+  prepareModelImage = pythonModelImage(),
 } = {}) {
   const store = new DraftStore(dataDir);
-  const reconstructions = new ReconstructionStore({ dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs });
+  const reconstructions = new ReconstructionStore({
+    dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage,
+  });
 
   async function handle(req, res) {
     const { port } = server.address();
@@ -248,6 +262,47 @@ export function createAppServer({
     if (editMatch && req.method === 'POST') {
       const request = parseEditRequest(await readJsonBody(req));
       sendJson(res, 200, await reconstructions.edit(editMatch[1], editMatch[2], request));
+      return;
+    }
+    const proposalsMatch = PROPOSALS_PATH.exec(pathname);
+    if (proposalsMatch && req.method === 'POST') {
+      const request = parseProposalRequest(await readJsonBody(req));
+      sendJson(res, 202, await reconstructions.createProposal(proposalsMatch[1], proposalsMatch[2], request));
+      return;
+    }
+    if (proposalsMatch && reading) {
+      sendJson(res, 200, await reconstructions.proposals(proposalsMatch[1], proposalsMatch[2]));
+      return;
+    }
+    const proposalMatch = PROPOSAL_PATH.exec(pathname) ?? PROPOSAL_ACTION_PATH.exec(pathname);
+    if (proposalMatch && !UUID_PATTERN.test(proposalMatch[3])) {
+      sendJson(res, 404, { error: 'This proposal could not be found.' });
+      return;
+    }
+    const [, draftId, jobId, proposalId, action] = proposalMatch ?? [];
+    if (proposalMatch && !action && reading) {
+      sendJson(res, 200, await reconstructions.proposal(draftId, jobId, proposalId));
+      return;
+    }
+    if (action === 'cancel' && req.method === 'POST') {
+      parseCancelRequest(await readJsonBody(req));
+      sendJson(res, 200, await reconstructions.cancelProposal(draftId, jobId, proposalId));
+      return;
+    }
+    if (action === 'apply' && req.method === 'POST') {
+      const request = parseApplyRequest(await readJsonBody(req));
+      sendJson(res, 200, await reconstructions.applyProposal(draftId, jobId, proposalId, request));
+      return;
+    }
+    const historyMatch = HISTORY_PATH.exec(pathname);
+    if (historyMatch && reading) {
+      sendJson(res, 200, await reconstructions.history(historyMatch[1], historyMatch[2]));
+      return;
+    }
+    const undoMatch = UNDO_PATH.exec(pathname);
+    if (undoMatch && req.method === 'POST') {
+      const request = parseUndoRequest(await readJsonBody(req));
+      sendJson(res, 200, await reconstructions.undo(undoMatch[1], undoMatch[2], request));
       return;
     }
     const jobAssetMatch = JOB_ASSET_PATH.exec(pathname);
@@ -318,15 +373,15 @@ export function createAppServer({
   // Closing the server also stops an active model process.
   const closeServer = server.close.bind(server);
   server.close = (callback) => {
-    reconstructions.close();
-    return closeServer(callback);
+    const stopping = reconstructions.close();
+    return closeServer((error) => stopping.then(() => callback?.(error), () => callback?.(error)));
   };
   return server;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT ?? DEFAULT_PORT);
-  createAppServer().listen(port, '127.0.0.1', () => {
+  createAppServer({ proposalModel: metaModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'model-budget.json') }) }).listen(port, '127.0.0.1', () => {
     console.log(`Rehere is running at http://127.0.0.1:${port}/`);
   });
 }

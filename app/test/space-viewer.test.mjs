@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { FakeElement } from './fake-dom.mjs';
+import { surfaceMeshes, surfacePoint } from '../public/photo-scene.js';
 
 // Node has no WebGL, so the renderer, texture loader and controls are replaced
 // with recording stand-ins. Geometry and material are the real Three.js classes
@@ -38,6 +39,19 @@ export class BufferGeometry extends T.BufferGeometry {
 }
 export class MeshBasicMaterial extends T.MeshBasicMaterial {
   dispose() { log('material.dispose'); super.dispose(); }
+}
+export class ArrowHelper extends T.ArrowHelper {
+  constructor(direction, origin, ...rest) {
+    super(direction, origin, ...rest);
+    log('arrow ' + [...direction.toArray(), ...origin.toArray()].map((value) => value.toFixed(3)).join(' '));
+  }
+  dispose() { log('arrow.dispose'); super.dispose(); }
+}
+export class Line extends T.Line {
+  constructor(geometry, material) {
+    super(geometry, material);
+    log('line ' + Array.from(geometry.attributes.position.array, (value) => value.toFixed(3)).join(' '));
+  }
 }`;
 const controlsShim = `
 import { Vector3 } from '${three}';
@@ -100,6 +114,8 @@ let job;
 let surfaceBody;
 let posts;
 let heldGets;
+let proposals;
+let history;
 
 before(async () => {
   globalThis.document = { createElement: (tag) => new FakeElement(tag) };
@@ -114,6 +130,8 @@ before(async () => {
     }
     if (url.endsWith('/surface.json')) return json(200, surfaceBody);
     if (url.endsWith('/reconstructions')) return json(200, [job]);
+    if (url.endsWith('/proposals')) return json(200, proposals);
+    if (url.endsWith('/history')) return json(200, history);
     if (heldGets) {
       let respond;
       const promise = new Promise((resolve) => (respond = resolve));
@@ -134,6 +152,8 @@ beforeEach(() => {
   globalThis.viewerFail = null;
   posts = [];
   heldGets = null;
+  proposals = [];
+  history = [{ version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial' }];
   surfaceBody = surface();
   job = {
     id: JOB_ID,
@@ -150,7 +170,7 @@ beforeEach(() => {
 async function openScene() {
   const container = new FakeElement('section');
   const draft = { id: DRAFT_ID, photos: [{ name: 'photo-1.jpg', sourceId: SOURCE_ID }] };
-  const granted = { kind: 'photo', permissions: { place: true, model: true, share: false } };
+  const granted = { kind: 'photo', origin: { kind: 'public', reference: '' }, permissions: { place: true, model: true, share: false } };
   const space = mountSpace(container, { draft, sourceFor: () => granted });
   await settle();
   const find = (predicate) => container.findAll(predicate);
@@ -161,7 +181,7 @@ async function openScene() {
   const viewMessage = () => find((node) => node.className === 'form-message')[0].textContent;
   const axis = (label) => find((node) => node.tag === 'input' && node.attributes['aria-label'] === label)[0];
   const canvases = () => find((node) => node.tag === 'canvas');
-  return { space, button, editStatus, viewMessage, axis, canvases };
+  return { space, button, editStatus, viewMessage, axis, canvases, find };
 }
 
 const count = (entry) => globalThis.viewerLog.filter((item) => item === entry).length;
@@ -320,6 +340,149 @@ describe('unconfirmed edit save', () => {
     await settle();
     assert.equal(view.editStatus(), 'Saved, version 2.');
     assert.equal(view.button('Load saved version').hidden, true);
+    view.space.dispose();
+  });
+});
+
+describe('memory proposals inside the scene', () => {
+  const ready = () => ({
+    id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    requestId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    baseVersion: 1,
+    statement: { id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', kind: 'human_memory', text: 'It was further left.', sha256: 'a'.repeat(64), modelConsent: true },
+    createdAt: '2026-10-31T00:00:00.000Z',
+    updatedAt: '2026-10-31T00:00:00.000Z',
+    status: 'ready',
+    result: { action: 'translate', targetId: 'selected-foreground', sourceId: SOURCE_ID, baseVersion: 1, delta: [-0.5, 0, 0], yawDelta: null, anchor: null, question: null, reason: 'Moved left as remembered.', transform: { offset: [-0.5, 0, 0], yaw: 0 } },
+    question: null,
+    error: null,
+    model: 'muse-spark-1.3',
+    usage: null,
+    responseId: null,
+    appliedVersion: null,
+  });
+
+  it('pauses manual editing while a proposal is previewed and adopts the server-confirmed version', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    const x = view.axis('Left / right');
+    view.button('Preview on the scene').dispatch('click');
+    assert.match(view.editStatus(), /Manual changes are paused/);
+    assert.equal(x.disabled, true);
+    assert.equal(view.button('Reset object position').disabled, true);
+    assert.equal(x.value, '0', 'the manual preview is not changed by the proposal preview');
+
+    view.button('Apply and save this proposal').dispatch('click');
+    assert.deepEqual(posts[0].body, { requestId: posts[0].body.requestId, baseVersion: 1, frontConfirmed: false });
+    assert.match(view.editStatus(), /paused/, 'not saved before the response');
+    const edit = { version: 2, offset: [-0.5, 0, 0], yaw: 0 };
+    proposals = [{ ...ready(), status: 'applied', appliedVersion: 2 }];
+    history = [...history, { ...edit, kind: 'proposal', proposalId: proposals[0].id }];
+    posts[0].respond(json(200, { edit, proposal: proposals[0] }));
+    await settle();
+    assert.equal(view.editStatus(), 'Saved, version 2.');
+    assert.equal(x.disabled, false);
+    assert.equal(x.value, '-0.5');
+    view.space.dispose();
+  });
+
+  it('turns an unconfirmed apply into the manual editor’s reload-required state', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    view.button('Preview on the scene').dispatch('click');
+    view.button('Apply and save this proposal').dispatch('click');
+    posts[0].respond({ status: 0, ok: false, json: async () => null });
+    await settle();
+    assert.match(view.editStatus(), /could not confirm whether your last change was saved/);
+    assert.equal(view.button('Load saved version').hidden, false);
+    assert.equal(view.axis('Left / right').value, '0');
+    view.space.dispose();
+  });
+
+  it('blocks planning while a manual change is unsaved', async () => {
+    const view = await openScene();
+    const x = view.axis('Left / right');
+    x.value = '0.4';
+    x.dispatch('input');
+    const text = view.find((node) => node.tag === 'textarea')[0];
+    text.value = 'It was by the door.';
+    text.dispatch('input');
+    const consent = view.find((node) => node.tag === 'input' && node.type === 'checkbox')[0];
+    consent.checked = true;
+    consent.dispatch('change');
+    assert.equal(view.button('Plan a change').disabled, true);
+    view.button('Revert to saved').dispatch('click');
+    assert.equal(view.button('Plan a change').disabled, false);
+    view.space.dispose();
+  });
+});
+
+describe('face-anchor preview in the scene', () => {
+  // The top-left corner sits above the object's centre, so the target has height.
+  const anchorPoint = [0, 0];
+  const faceProposal = (yawShift = 0) => {
+    const pivot = surfaceMeshes(surface()).foreground.pivot;
+    const target = surfacePoint(surface(), anchorPoint);
+    const yaw = Math.atan2(target[0] - pivot[0], target[2] - pivot[2]) + yawShift;
+    return {
+      id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      requestId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      baseVersion: 1,
+      statement: { id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', kind: 'human_memory', text: 'It faced the left wall.', sha256: 'a'.repeat(64), modelConsent: true },
+      createdAt: '2026-10-31T00:00:00.000Z',
+      updatedAt: '2026-10-31T00:00:00.000Z',
+      status: 'ready',
+      result: { action: 'face_anchor', targetId: 'selected-foreground', sourceId: SOURCE_ID, baseVersion: 1, delta: null, yawDelta: null, anchor: { label: 'left wall', point: anchorPoint }, question: null, reason: 'Turned toward the wall.', transform: { offset: [0, 0, 0], yaw } },
+      question: null,
+      error: null,
+      model: 'muse-spark-1.3',
+      usage: null,
+      responseId: null,
+      appliedVersion: null,
+    };
+  };
+
+  it('draws the photographed side and the target line, and offers confirmation only when they agree', async () => {
+    proposals = [faceProposal()];
+    const view = await openScene();
+    view.button('Preview on the scene').dispatch('click');
+    assert.match(view.find((node) => node.className === 'memory-review')[0].textContent, /yellow arrow points along the level blue line/);
+    const { yaw } = proposals[0].result.transform;
+    const pivot = surfaceMeshes(surface()).foreground.pivot;
+    const arrows = globalThis.viewerLog.filter((entry) => entry.startsWith('arrow '));
+    assert.deepEqual(arrows, [`arrow ${[Math.sin(yaw), 0, Math.cos(yaw), ...pivot].map((value) => value.toFixed(3)).join(' ')}`]);
+    const target = surfacePoint(surface(), anchorPoint);
+    assert.ok(target[1] - pivot[1] > 0.5, 'the target is well above the object');
+    const level = [target[0], pivot[1], target[2]];
+    const fixed = (points) => points.flat().map((value) => value.toFixed(3)).join(' ');
+    assert.deepEqual(
+      globalThis.viewerLog.filter((entry) => entry.startsWith('line ')),
+      [`line ${fixed([pivot, level])}`, `line ${fixed([level, target])}`],
+    );
+    view.button('Stop preview').dispatch('click');
+    assert.equal(count('arrow.dispose'), 1);
+    assert.doesNotMatch(view.find((node) => node.className === 'memory-review')[0].textContent, /I checked the scene/);
+    view.button('Preview on the scene').dispatch('click');
+    view.space.dispose();
+    assert.equal(count('arrow.dispose'), 2, 'closing the scene releases a guide that is still shown');
+  });
+
+  it('refuses a face-anchor turn that does not point at its target', async () => {
+    proposals = [faceProposal(0.4)];
+    const view = await openScene();
+    view.button('Preview on the scene').dispatch('click');
+    assert.match(view.find((node) => node.className === 'memory-review')[0].textContent, /does not point at the marked point/);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    view.space.dispose();
+  });
+
+  it('cannot confirm a face-anchor turn without WebGL', async () => {
+    globalThis.viewerFail = 'webgl';
+    proposals = [faceProposal()];
+    const view = await openScene();
+    view.button('Preview on the scene').dispatch('click');
+    assert.match(view.find((node) => node.className === 'memory-review')[0].textContent, /3D preview is not available/);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
     view.space.dispose();
   });
 });

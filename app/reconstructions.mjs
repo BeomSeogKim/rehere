@@ -4,6 +4,9 @@ import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RequestError } from './drafts.mjs';
+import {
+  ACTIVE_PROPOSAL, PROPOSAL_MESSAGES, editHistory, newProposal, pythonImagePreparer, staleProposals, validatePlan,
+} from './memory-proposals.mjs';
 import { canUseSource, sha256 } from './sources.mjs';
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -33,14 +36,23 @@ const MESSAGES = {
 };
 
 const ENV_ALLOWLIST = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'HF_HOME', 'HF_HUB_CACHE'];
+const defaultPython = () => process.env.PHOTO_PYTHON || path.join(SPATIAL_DIR, '.venv/bin/python');
 
-// Spawns the offline worker with server-chosen arguments only. Tokens and
-// other credentials in the server environment are not passed to the child.
-export function pythonRunner({ python = process.env.PHOTO_PYTHON || path.join(SPATIAL_DIR, '.venv/bin/python') } = {}) {
+// Tokens and other credentials in the server environment are not passed to
+// Python children.
+function workerEnv() {
+  const env = { HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', HF_HUB_DISABLE_TELEMETRY: '1', PYTHONDONTWRITEBYTECODE: '1' };
+  for (const key of ENV_ALLOWLIST) if (process.env[key] !== undefined) env[key] = process.env[key];
+  return env;
+}
+
+export const pythonModelImage = ({ python = defaultPython() } = {}) => pythonImagePreparer({ python, spatialDir: SPATIAL_DIR, env: workerEnv });
+
+// Spawns the offline worker with server-chosen arguments only.
+export function pythonRunner({ python = defaultPython() } = {}) {
   return ({ imagePath, outputDir, sourceId, box, signal }) =>
     new Promise((resolve) => {
-      const env = { HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', HF_HUB_DISABLE_TELEMETRY: '1', PYTHONDONTWRITEBYTECODE: '1' };
-      for (const key of ENV_ALLOWLIST) if (process.env[key] !== undefined) env[key] = process.env[key];
+      const env = workerEnv();
       const args = [path.join(SPATIAL_DIR, 'reconstruct.py'), '--image', imagePath, '--output', outputDir, '--source-id', sourceId, '--box', ...box.map(String)];
       const child = spawn(python, args, { cwd: SPATIAL_DIR, env, shell: false, stdio: ['ignore', 'ignore', 'pipe'], signal, killSignal: 'SIGKILL' });
       let stderr = '';
@@ -131,7 +143,7 @@ function sameValues(a, b) {
 
 // Internal request records stay on disk; clients see the manifest contract only.
 export function publicManifest(manifest) {
-  const { edits, ...rest } = manifest;
+  const { edits, proposals, ...rest } = manifest;
   return rest;
 }
 
@@ -211,10 +223,13 @@ const JPEG = [0xff, 0xd8, 0xff];
 const startsWith = (bytes, signature) => signature.every((value, index) => bytes[index] === value);
 
 export class ReconstructionStore {
-  constructor({ dataDir, drafts, runner, timeoutMs = RECONSTRUCTION_TIMEOUT_MS }) {
+  constructor({ dataDir, drafts, runner, timeoutMs = RECONSTRUCTION_TIMEOUT_MS, proposalModel = null, prepareImage = pythonModelImage() }) {
     this.drafts = drafts;
     this.runner = runner;
     this.timeoutMs = timeoutMs;
+    this.proposalModel = proposalModel;
+    this.prepareImage = prepareImage;
+    this.activeProposal = null;
     this.rootDir = path.join(dataDir, 'reconstructions');
     this.stagingDir = path.join(dataDir, 'reconstruction-staging');
     this.queue = Promise.resolve();
@@ -240,9 +255,17 @@ export class ReconstructionStore {
         for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
           const file = path.join(this.jobDir(draftId, jobId), 'manifest.json');
           const manifest = await readJson(file).catch(() => null);
-          if (manifest && (manifest.status === 'queued' || manifest.status === 'processing')) {
-            await writeJsonAtomic(file, { ...manifest, status: 'interrupted', error: MESSAGES.interrupted, updatedAt: new Date().toISOString() });
+          if (!manifest) continue;
+          const now = new Date().toISOString();
+          const unfinished = (manifest.proposals ?? []).some((item) => ACTIVE_PROPOSAL.has(item.status));
+          const changes = {};
+          if (manifest.status === 'queued' || manifest.status === 'processing') Object.assign(changes, { status: 'interrupted', error: MESSAGES.interrupted });
+          // Saved geometry is untouched; any usage of a sent request stays in the budget ledger.
+          if (unfinished) {
+            changes.proposals = manifest.proposals.map((item) =>
+              ACTIVE_PROPOSAL.has(item.status) ? { ...item, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted, updatedAt: now } : item);
           }
+          if (Object.keys(changes).length > 0) await writeJsonAtomic(file, { ...manifest, ...changes, updatedAt: now });
         }
       }
       await rm(this.stagingDir, { recursive: true, force: true });
@@ -482,7 +505,7 @@ export class ReconstructionStore {
       if (!manifest) throw new RequestError(404, 'This scene could not be found.');
       const previous = manifest.edits.find((item) => item.requestId === request.requestId);
       if (previous) {
-        if (previous.baseVersion !== request.baseVersion || !sameValues(previous.offset, request.offset) || previous.yaw !== request.yaw) {
+        if ((previous.kind ?? 'manual') !== 'manual' || previous.baseVersion !== request.baseVersion || !sameValues(previous.offset, request.offset) || previous.yaw !== request.yaw) {
           throw new RequestError(409, 'This edit request was already used with different values.');
         }
         return { version: previous.version, offset: previous.offset, yaw: previous.yaw };
@@ -493,15 +516,226 @@ export class ReconstructionStore {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before applying this edit.');
       }
       const edit = { version: manifest.edit.version + 1, offset: request.offset, yaw: request.yaw };
-      await this.update(manifest, { edit, edits: [...manifest.edits, { requestId: request.requestId, baseVersion: request.baseVersion, ...edit }] });
+      await this.saveVersion(manifest, edit, { requestId: request.requestId, baseVersion: request.baseVersion, ...edit });
+      return edit;
+    });
+  }
+
+  // One manifest write holds the new transform, its request receipt and every
+  // proposal status change, so no partial apply can be observed or persisted.
+  saveVersion(manifest, edit, receipt, proposals = manifest.proposals ?? []) {
+    const changes = { edit, edits: [...manifest.edits, receipt] };
+    if (manifest.proposals || proposals.length > 0) changes.proposals = staleProposals(proposals, edit.version, new Date().toISOString());
+    return this.update(manifest, changes);
+  }
+
+  async editableScene(draftId, jobId) {
+    const manifest = await this.readManifest(draftId, jobId);
+    if (!manifest) throw new RequestError(404, 'This scene could not be found.');
+    return manifest;
+  }
+
+  async proposals(draftId, jobId) {
+    await this.recover();
+    const manifest = await this.editableScene(draftId, jobId);
+    return [...(manifest.proposals ?? [])].reverse();
+  }
+
+  async proposal(draftId, jobId, proposalId) {
+    const found = (await this.proposals(draftId, jobId)).find((item) => item.id === proposalId);
+    if (!found) throw new RequestError(404, 'This proposal could not be found.');
+    return found;
+  }
+
+  async history(draftId, jobId) {
+    await this.recover();
+    return editHistory(await this.editableScene(draftId, jobId));
+  }
+
+  async createProposal(draftId, jobId, request) {
+    await this.recover();
+    const accepted = await this.serialize(async () => {
+      const manifest = await this.editableScene(draftId, jobId);
+      const proposals = manifest.proposals ?? [];
+      const existing = proposals.find((item) => item.requestId === request.requestId);
+      if (existing) {
+        if (existing.baseVersion !== request.baseVersion || existing.statement.text !== request.text) {
+          throw new RequestError(409, 'This proposal request was already used with a different message or version.');
+        }
+        return { proposal: existing, start: false };
+      }
+      if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
+      const { source, imagePath, size } = await this.verifiedOriginal(draftId, manifest.sourceId);
+      if (source.origin?.kind !== 'public') {
+        throw new RequestError(403, 'During development, only photos marked as public material can be sent to the hosted model.');
+      }
+      if (request.baseVersion !== manifest.edit.version) {
+        throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before asking for a proposal.');
+      }
+      if (!this.proposalModel) throw new RequestError(503, 'Memory-based editing with the hosted model is not set up on this computer.');
+      if (this.closed) throw new RequestError(503, 'The app is shutting down. Try again later.');
+      if (this.activeProposal) throw new RequestError(409, 'Another proposal is being prepared right now. Try again when it finishes.');
+      const now = new Date().toISOString();
+      const proposal = newProposal({ id: randomUUID(), statementId: randomUUID(), now, ...request });
+      const stored = await this.update(manifest, { proposals: [...proposals, proposal] });
+      // close() may have started while the record was being written; never start a call after it.
+      if (this.closed) {
+        const interrupted = { ...proposal, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
+        await this.update(stored, { proposals: [...proposals, interrupted] });
+        return { proposal: interrupted, start: false };
+      }
+      this.activeProposal = { id: proposal.id, controller: new AbortController(), done: null };
+      const [x1, y1, x2, y2] = manifest.box;
+      const selection = [x1 / size.width, y1 / size.height, x2 / size.width, y2 / size.height];
+      return { proposal, start: true, imagePath, selection, box: manifest.box, sourceId: manifest.sourceId, saved: manifest.edit };
+    });
+    if (accepted.start) this.activeProposal.done = this.runProposal(draftId, jobId, accepted);
+    return accepted.proposal;
+  }
+
+  // Applies `change(proposal, manifest)` under the caller's mutex slot and
+  // returns the stored proposal; null changes leave the manifest untouched.
+  async changeProposal(draftId, jobId, proposalId, change) {
+    const manifest = await this.editableScene(draftId, jobId);
+    const proposals = manifest.proposals ?? [];
+    const current = proposals.find((item) => item.id === proposalId);
+    if (!current) throw new RequestError(404, 'This proposal could not be found.');
+    const changes = change(current, manifest);
+    if (!changes) return current;
+    const next = { ...current, ...changes, updatedAt: new Date().toISOString() };
+    await this.update(manifest, { proposals: proposals.map((item) => (item.id === proposalId ? next : item)) });
+    return next;
+  }
+
+  // The model runs outside the manifest mutex. Its result is committed only if
+  // the proposal is still processing and the saved version is unchanged.
+  async runProposal(draftId, jobId, { proposal, imagePath, selection, box, sourceId, saved }) {
+    const { controller } = this.activeProposal;
+    const { signal } = controller;
+    const finish = (changes) => this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current) => (current.status === 'processing' ? changes : null)));
+    try {
+      const started = await this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current) => (current.status === 'queued' ? { status: 'processing' } : null)));
+      if (started.status !== 'processing') return;
+      const surface = JSON.parse(await readFile(path.join(this.jobDir(draftId, jobId), 'assets', 'surface.json'), 'utf8'));
+      let image;
+      try {
+        image = await this.prepareImage({ imagePath, box, signal });
+      } catch (error) {
+        console.error(`proposal ${proposal.id} image preparation failed: ${String(error?.message ?? 'error').slice(0, 300)}`);
+        await finish(signal.aborted ? { status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted } : { status: 'failed', error: PROPOSAL_MESSAGES.image });
+        return;
+      }
+      const outcome = await this.proposalModel({ text: proposal.statement.text, image, selection, sourceId, baseVersion: proposal.baseVersion, saved, signal });
+      await this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
+        const record = { model: outcome?.model ?? null, usage: outcome?.usage ?? null, responseId: outcome?.responseId ?? null };
+        // A canceled or stale proposal keeps its status; only what was spent is recorded.
+        if (current.status !== 'processing') return record;
+        // Still processing after an abort means shutdown: a late success is not offered.
+        if (signal.aborted || this.closed) return { ...record, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
+        if (manifest.edit.version !== current.baseVersion) return { ...record, status: 'stale' };
+        if (!outcome?.ok) {
+          return { ...record, status: 'failed', error: PROPOSAL_MESSAGES[outcome?.reason] ?? PROPOSAL_MESSAGES.provider };
+        }
+        const checked = validatePlan(outcome.plan, { sourceId, baseVersion: current.baseVersion, saved: manifest.edit, surface });
+        if (checked.error) {
+          console.error(`proposal ${current.id} plan rejected: ${checked.code}`);
+          return { ...record, status: 'failed', error: checked.error };
+        }
+        const { result } = checked;
+        if (result.action === 'clarify') return { ...record, status: 'clarify', result, question: result.question };
+        return { ...record, status: 'ready', result };
+      }));
+    } catch (error) {
+      console.error(`proposal ${proposal.id} failed: ${error?.code ?? error?.name ?? 'error'}`);
+      await finish({ status: 'failed', error: PROPOSAL_MESSAGES.unknown }).catch(() => {});
+    } finally {
+      this.activeProposal = null;
+    }
+  }
+
+  async cancelProposal(draftId, jobId, proposalId) {
+    await this.recover();
+    return this.serialize(async () => {
+      const proposal = await this.changeProposal(draftId, jobId, proposalId, (current) => {
+        if (current.status === 'canceled') return null;
+        if (!['queued', 'processing', 'ready', 'clarify'].includes(current.status)) {
+          throw new RequestError(409, 'This proposal has already finished and cannot be canceled.');
+        }
+        return { status: 'canceled', error: PROPOSAL_MESSAGES.canceled };
+      });
+      if (this.activeProposal?.id === proposalId) this.activeProposal.controller.abort();
+      return proposal;
+    });
+  }
+
+  async applyProposal(draftId, jobId, proposalId, request) {
+    await this.recover();
+    return this.serialize(async () => {
+      const manifest = await this.editableScene(draftId, jobId);
+      const proposals = manifest.proposals ?? [];
+      const proposal = proposals.find((item) => item.id === proposalId);
+      if (!proposal) throw new RequestError(404, 'This proposal could not be found.');
+      const previous = manifest.edits.find((item) => item.requestId === request.requestId);
+      if (previous) {
+        if (previous.kind !== 'proposal' || previous.proposalId !== proposalId || previous.baseVersion !== request.baseVersion || previous.frontConfirmed !== request.frontConfirmed) {
+          throw new RequestError(409, 'This apply request was already used with different values.');
+        }
+        return { edit: { version: previous.version, offset: previous.offset, yaw: previous.yaw }, proposal };
+      }
+      if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
+      await this.permittedPhoto(draftId, manifest.sourceId);
+      if (proposal.status === 'applied') throw new RequestError(409, 'This proposal was already applied.');
+      if (proposal.status === 'stale' || (proposal.status === 'ready' && proposal.baseVersion !== manifest.edit.version)) {
+        throw new RequestError(409, 'The scene changed after this proposal was made. Ask for a new proposal.');
+      }
+      if (proposal.status !== 'ready') throw new RequestError(409, 'Only a ready proposal can be applied.');
+      if (request.baseVersion !== manifest.edit.version) {
+        throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before applying this proposal.');
+      }
+      if (proposal.result.action === 'face_anchor' && request.frontConfirmed !== true) {
+        throw new RequestError(409, 'Confirm that the visible side of the object is its front before applying this turn.');
+      }
+      const { offset, yaw } = proposal.result.transform;
+      const edit = { version: manifest.edit.version + 1, offset: [...offset], yaw };
+      const applied = { ...proposal, status: 'applied', appliedVersion: edit.version, updatedAt: new Date().toISOString() };
+      const receipt = { requestId: request.requestId, kind: 'proposal', proposalId, frontConfirmed: request.frontConfirmed, baseVersion: request.baseVersion, ...edit };
+      await this.saveVersion(manifest, edit, receipt, proposals.map((item) => (item.id === proposalId ? applied : item)));
+      return { edit, proposal: applied };
+    });
+  }
+
+  async undo(draftId, jobId, request) {
+    await this.recover();
+    return this.serialize(async () => {
+      const manifest = await this.editableScene(draftId, jobId);
+      const previous = manifest.edits.find((item) => item.requestId === request.requestId);
+      if (previous) {
+        if (previous.kind !== 'undo' || previous.baseVersion !== request.baseVersion || previous.targetVersion !== request.targetVersion) {
+          throw new RequestError(409, 'This undo request was already used with different values.');
+        }
+        return { version: previous.version, offset: previous.offset, yaw: previous.yaw };
+      }
+      if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
+      await this.permittedPhoto(draftId, manifest.sourceId);
+      if (request.baseVersion !== manifest.edit.version) {
+        throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before undoing.');
+      }
+      const target = editHistory(manifest).find((item) => item.version === request.targetVersion);
+      if (!target || target.version >= manifest.edit.version) throw new RequestError(409, 'Only an earlier saved version can be restored.');
+      const edit = { version: manifest.edit.version + 1, offset: [...target.offset], yaw: target.yaw };
+      await this.saveVersion(manifest, edit, { requestId: request.requestId, kind: 'undo', targetVersion: target.version, baseVersion: request.baseVersion, ...edit });
       return edit;
     });
   }
 
   // Stops the active worker; its job is recorded as interrupted, never ready.
-  close() {
+  // Waits for queued manifest work, so a proposal accepted during shutdown is
+  // recorded as interrupted rather than started.
+  async close() {
     this.closed = true;
     this.active?.controller.abort();
-    return this.active?.done ?? Promise.resolve();
+    this.activeProposal?.controller.abort();
+    await this.serialize(() => {});
+    await Promise.all([this.active?.done, this.activeProposal?.done]);
   }
 }

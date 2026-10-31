@@ -127,6 +127,38 @@ export function surfaceMeshes(surface) {
   return { background, foreground: { ...object, pivot }, verticalFovDegrees: (2 * Math.atan((tangent * imageHeight) / imageWidth) * 180) / Math.PI };
 }
 
+// Places a normalized stored-pixel point (u, v) on the depth grid exactly as
+// surfaceMeshes places vertices.
+export function surfacePoint(surface, [u, v]) {
+  const { width, height, depth, assumptions } = surface;
+  const [imageWidth, imageHeight] = surface.source.image_size;
+  const tangent = Math.tan((assumptions.horizontal_fov_degrees * Math.PI) / 360);
+  const column = Math.round(u * (width - 1));
+  const row = Math.round(v * (height - 1));
+  const d = depth[row * width + column];
+  const gridU = column / (width - 1);
+  const gridV = row / (height - 1);
+  return [(gridU - 0.5) * 2 * tangent * d, ((0.5 - gridV) * 2 * tangent * d * imageHeight) / imageWidth, -d];
+}
+
+export const MIN_GUIDE_DISTANCE = 0.05;
+
+// Relates the object's photographed side (local +z turned by yaw) to a target
+// point. Yaw turns only about the vertical axis, so the comparison uses the
+// target's level point: the spot directly above or below it at the centre's
+// height. `readable` is false when that point is too close to the centre for a
+// direction to be shown; `aligned` says whether the arrow points at it.
+export function facingGuide(centre, yaw, target) {
+  const direction = [Math.sin(yaw), 0, Math.cos(yaw)];
+  const level = [target[0], centre[1], target[2]];
+  const dx = level[0] - centre[0];
+  const dz = level[2] - centre[2];
+  const distance = Math.hypot(dx, dz);
+  const readable = distance >= MIN_GUIDE_DISTANCE;
+  const aligned = readable && (dx * direction[0] + dz * direction[2]) / distance > 0.999;
+  return { direction, level, readable, aligned };
+}
+
 // Creates two independent meshes: the observed background and the movable
 // foreground. Only front faces are drawn: the photo shows one side of each
 // surface, so the reverse stays empty instead of repeating the image.
@@ -154,7 +186,7 @@ export function createSceneObjects(THREE, surface, texture = null) {
     foreground.rotation.set(0, yaw, 0);
     scene.updateMatrixWorld(true);
   };
-  return { scene, background, foreground, applyEdit, verticalFovDegrees: parts.verticalFovDegrees };
+  return { scene, background, foreground, applyEdit, pivot: parts.foreground.pivot, verticalFovDegrees: parts.verticalFovDegrees };
 }
 
 export function jobStatusText(job) {

@@ -8,9 +8,12 @@ import {
   buildBlockedReason,
   createEditSession,
   createSceneObjects,
+  facingGuide,
   editProblem,
   jobStatusText,
+  surfacePoint,
 } from './photo-scene.js';
+import { mountMemoryEdit } from './memory-edit.js';
 
 const POLL_MS = 2000;
 const UNCONFIRMED_BUILD = 'Rehere could not confirm whether the build was accepted. Pressing Build again safely repeats the same request.';
@@ -132,8 +135,54 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   observer.observe(viewport);
   look([0, 0, 0]);
 
+  // A face-anchor preview draws the photographed side as an arrow and a line to
+  // the target point, so a person can check the relation before applying.
+  let guide = null;
+  const clearGuide = () => {
+    if (!guide) return;
+    objects.scene.remove(guide.group);
+    guide.arrow.dispose();
+    for (const line of [guide.line, guide.drop]) {
+      line.geometry.dispose();
+      line.material.dispose();
+    }
+    guide.marker.geometry.dispose();
+    guide.marker.material.dispose();
+    guide = null;
+  };
+  releases.push(clearGuide);
+
   return {
     originalView: () => look([0, 0, 0]),
+    showGuide(transform, point) {
+      clearGuide();
+      if (!transform || !point) {
+        draw();
+        return null;
+      }
+      const centre = objects.pivot.map((value, axis) => value + transform.offset[axis]);
+      const target = surfacePoint(surface, point);
+      const relation = facingGuide(centre, transform.yaw, target);
+      const group = new THREE.Group();
+      const arrow = new THREE.ArrowHelper(new THREE.Vector3(...relation.direction), new THREE.Vector3(...centre), 0.6, 0xffd400, 0.15, 0.08);
+      // The level line is what the turn can face; the drop line joins it to
+      // the marked point straight above or below.
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...centre), new THREE.Vector3(...relation.level)]),
+        new THREE.LineBasicMaterial({ color: 0x3fa9ff, depthTest: false }),
+      );
+      const drop = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...relation.level), new THREE.Vector3(...target)]),
+        new THREE.LineBasicMaterial({ color: 0xbbbbbb, depthTest: false }),
+      );
+      const marker = new THREE.Mesh(new THREE.SphereGeometry(0.05, 12, 8), new THREE.MeshBasicMaterial({ color: 0x3fa9ff, depthTest: false }));
+      marker.position.set(...target);
+      group.add(arrow, line, drop, marker);
+      objects.scene.add(group);
+      guide = { group, arrow, line, drop, marker };
+      draw();
+      return relation;
+    },
     sideView: () => look([1.6, 0.25, -0.4]),
     applyEdit(edit) {
       objects.applyEdit(edit);
@@ -151,6 +200,7 @@ export function mountSpace(container, { draft, sourceFor }) {
   let pollTimer = null;
   let pollingJob = null;
   let viewer = null;
+  let memoryEdit = null;
   // Bumped whenever the panel is closed or replaced; a response for an older
   // selection or scene must not change the panel that replaced it.
   let panelGeneration = 0;
@@ -199,6 +249,8 @@ export function mountSpace(container, { draft, sourceFor }) {
 
   function closePanel() {
     panelGeneration += 1;
+    memoryEdit?.dispose();
+    memoryEdit = null;
     viewer?.dispose();
     viewer = null;
     panel.replaceChildren();
@@ -454,11 +506,16 @@ export function mountSpace(container, { draft, sourceFor }) {
     const revert = el('button', { type: 'button', className: 'secondary', textContent: 'Revert to saved' });
     const reset = el('button', { type: 'button', className: 'secondary', textContent: 'Reset object position' });
     const reload = el('button', { type: 'button', className: 'secondary', textContent: 'Load saved version', hidden: true });
+    const memorySection = el('section', { className: 'memory-edit' });
     let saving = false;
     // A save and a reload never overlap, so an older saved state read by a
     // reload cannot replace a newer one confirmed by a save.
     let reloading = false;
     let conflict = false;
+    // Set while a memory proposal is previewed or being saved; manual changes
+    // pause so the two editors never write from different states.
+    let locked = false;
+    let proposalPreview = null;
 
     const toDegrees = (radians) => Math.round((radians * 180) / Math.PI);
     const showEdit = () => {
@@ -467,10 +524,10 @@ export function mountSpace(container, { draft, sourceFor }) {
         controls[i].range.value = String(value);
         controls[i].number.value = String(value);
       });
-      viewer?.applyEdit(session.preview);
+      viewer?.applyEdit(proposalPreview ?? session.preview);
       const { version } = session.saved;
       const dirty = session.isDirty();
-      const busy = saving || reloading;
+      const busy = saving || reloading || locked;
       editStatus.textContent = saving
         ? 'Saving…'
         : reloading
@@ -479,15 +536,18 @@ export function mountSpace(container, { draft, sourceFor }) {
             ? `The saved position changed since version ${version}. Load the saved version before saving again.`
             : session.uncertain
               ? `Rehere could not confirm whether your last change was saved; the saved position may be newer than version ${version}. Load the saved version to check${dirty ? ', or apply and save again' : ''}.`
-              : dirty
-                ? `Preview only. Not saved yet; the saved position is version ${version}.`
-                : `Saved, version ${version}.`;
+              : locked
+                ? `Manual changes are paused while a memory proposal is shown or saved. The saved position is version ${version}.`
+                : dirty
+                  ? `Preview only. Not saved yet; the saved position is version ${version}.`
+                  : `Saved, version ${version}.`;
       save.disabled = busy || conflict || !dirty;
       revert.disabled = busy || !dirty;
-      reset.disabled = reloading;
-      for (const control of controls) control.range.disabled = control.number.disabled = reloading;
+      reset.disabled = reloading || locked;
+      for (const control of controls) control.range.disabled = control.number.disabled = reloading || locked;
       reload.hidden = !(session.uncertain || conflict);
       reload.disabled = busy;
+      memoryEdit?.sync();
     };
     const readControls = (source) => {
       const values = controls.map((control) => (control[source].value.trim() === '' ? NaN : Number(control[source].value)));
@@ -532,6 +592,7 @@ export function mountSpace(container, { draft, sourceFor }) {
       conflict = false;
       editMessage.textContent = 'Loaded the saved version. Your unsaved preview was replaced.';
       showEdit();
+      memoryEdit?.refresh();
     });
     save.addEventListener('click', async () => {
       if (saving || reloading || conflict) return;
@@ -545,6 +606,7 @@ export function mountSpace(container, { draft, sourceFor }) {
       if (result.ok && Number.isInteger(result.body?.version)) {
         session.confirm(result.body);
         conflict = false;
+        memoryEdit?.refresh();
       } else if (result.status === 409) {
         editMessage.textContent = `${serverError(result, 'The saved version changed.')} Your preview is kept but not saved.`;
         conflict = true;
@@ -571,8 +633,40 @@ export function mountSpace(container, { draft, sourceFor }) {
         editMessage,
         el('div', { className: 'actions' }, [reload, reset, revert, save]),
       ]),
+      memorySection,
       proposals,
     );
+    memoryEdit = mountMemoryEdit(memorySection, {
+      jobUrl: `${base}/${jobId}`,
+      textureUrl: assetUrl(jobId, 'texture.jpg'),
+      source: sourceFor(job.sourceId),
+      editor: () => ({ ...session.saved, clean: !session.isDirty() && !session.uncertain && !conflict && !saving && !reloading }),
+      // Returns the shown facing relation for a face-anchor point, or null when
+      // there is no 3D view to show it in.
+      showTransform(transform, point = null) {
+        proposalPreview = transform;
+        showEdit();
+        return viewer ? viewer.showGuide(transform, point) : null;
+      },
+      setLocked(value) {
+        locked = value;
+        showEdit();
+      },
+      saved(edit) {
+        session.replaceSaved(edit);
+        conflict = false;
+        editMessage.textContent = '';
+        showEdit();
+      },
+      unconfirmed() {
+        session.markUncertain();
+        showEdit();
+      },
+      conflict() {
+        conflict = true;
+        showEdit();
+      },
+    });
 
     let created = null;
     try {

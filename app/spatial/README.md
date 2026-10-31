@@ -98,13 +98,32 @@ The original file is not copied; the caller keeps it.
 - Transformers prints a `sam2_video` to `sam2` configuration advisory for the
   official SAM2 checkpoint; inspect the overlay.
 
+## Hosted-planning thumbnail
+
+`prepare_model_image.py` prepares the whole selected photograph for a hosted
+planner without loading depth or segmentation models:
+
+```sh
+.venv/bin/python prepare_model_image.py --image photo.jpg \
+  --box 490 450 982 781 > thumbnail.jpg
+```
+
+The box is validated against the stored pixels, but does not crop the image.
+The metadata-free RGB JPEG keeps that pixel orientation, has a long edge of at
+most 1024 pixels and is capped at 1 MiB. Small images are not enlarged. Inputs
+are limited to 20 MiB and the reconstruction decoder's image bounds. Standard
+output contains only JPEG bytes; errors use standard error and leave standard
+output empty. The helper needs Pillow, makes no network calls and does not
+receive API credentials. The caller remains responsible for permissions and
+explicit consent before transmission.
+
 ## Tests
 
 The tests cover argument, box, image, grid, depth-range, and mask checks and do
 not load models:
 
 ```sh
-.venv/bin/python -m unittest -v test_reconstruct
+.venv/bin/python -m unittest -v test_reconstruct test_prepare_model_image
 ```
 
 ## Sources

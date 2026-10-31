@@ -35,8 +35,8 @@ move or rotation before saving it. Unseen areas stay empty. This is a local
 model reconstruction from one photograph, not a complete room or calibrated
 geometry.
 
-Not included: transcription, multi-view alignment, natural-language spatial
-editing, sharing, accounts, and recovery of unsaved input.
+Not included: transcription, multi-view alignment, sharing, accounts, and
+recovery of unsaved input.
 
 ## Getting started
 
@@ -151,8 +151,72 @@ is claimed.
 | `POST /api/drafts/<id>/reconstructions/<job>/edit` | Save `requestId`, `baseVersion`, `offset` and `yaw` |
 
 These controls coordinate one local server process. They do not implement
-multi-process locking, authentication, sharing, undo history, power-loss
-durability or the full spatial editing contract.
+multi-process locking, authentication, sharing, power-loss durability or the
+full spatial editing contract.
+
+## Memory-driven proposals
+
+A ready scene can use a written memory and its source photo to ask Meta for
+one bounded change to the selected foreground. The photo needs both place
+and model permission and must be marked as public material in this development
+version. Sending the new message and a metadata-free thumbnail requires an
+explicit checkbox. Use public or synthetic material only.
+
+The hosted planner is disabled by default. An operator must supply
+`MODEL_API_KEY` securely in the server environment and explicitly set
+`REHERE_MODEL_LIVE=1` for that process. Never place credentials in browser code,
+source files or command arguments. The local Python setup also prepares a
+whole-photo JPEG thumbnail of at most 1024 pixels on its long edge and 1 MiB.
+It receives no API credentials.
+
+The adapter uses Spark Standard (`muse-spark-1.3`) through the fixed Meta
+Responses endpoint with structured output, `store: false`, no tools and no
+automatic retries. It counts the same input before generation, rejects counts
+above 20,000, then reserves counted input plus the 4096-token output ceiling.
+Default local limits are $0.05 per generation, $1 total and 20 generations.
+`REHERE_MODEL_TOTAL_USD` and `REHERE_MODEL_MAX_REQUESTS` can lower those limits.
+Reservations survive restarts in `data/model-budget.json`; unknown outcomes
+retain their reservation. Recorded costs are estimates, not billing receipts.
+These limits coordinate one process and are not provider-enforced spending
+caps. Check current account credits and usage before each live batch.
+
+The model can propose translation, rotation, a visible-surface direction toward
+a candidate photo point, or a clarification question. The server validates
+references, version, shape and coordinate bounds and computes the transform.
+Human memories, model proposals and source pixels retain separate records.
+The proposed facing direction uses an assumed camera frame and inferred depth;
+it does not recover the object's physical front or historical orientation.
+Review the target point and direction arrow before confirming the relation.
+The blue direction line stays level with the object's centre; a separate grey
+line connects it to the inferred target height. Only the upright-axis turn is
+proposed.
+Collision and fixed-relation validation are not implemented.
+
+Preview changes only the display. Apply saves the approved transform, proposal
+state and version receipt together. A changed base version requires a new
+review. Cancel prevents later output from becoming applicable. Returning to an
+earlier saved position creates a new version and preserves intervening history,
+statements and originals. Provider failure produces an explicit failed state;
+there is no prerecorded or local keyword-parser substitute for a model call.
+
+All routes below extend `/api/drafts/<id>/reconstructions/<job>`:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /proposals` | Request a plan with `requestId`, `baseVersion`, `text` and explicit `consent` |
+| `GET /proposals` | Saved statements and proposal states |
+| `GET /proposals/<proposal>` | Poll one proposal |
+| `POST /proposals/<proposal>/cancel` | Cancel using `requestId` |
+| `POST /proposals/<proposal>/apply` | Apply with `requestId`, `baseVersion` and `frontConfirmed` |
+| `GET /history` | Initial position and saved changes |
+| `POST /undo` | Restore `targetVersion` through a new version, using `requestId` and `baseVersion` |
+
+For the provider contract see the official [Responses documentation](https://dev.meta.ai/docs/protocols/responses),
+[structured output](https://dev.meta.ai/docs/structured-output),
+[image input](https://dev.meta.ai/docs/image-understanding) and
+[pricing](https://dev.meta.ai/docs/pricing-rate-limits). `store: false` controls
+response storage and is not a zero-retention guarantee. Credit-program terms
+and account privacy controls must be checked before using nonpublic material.
 
 Three.js uses the MIT license; its notice is supplied with the package and
 served at `/vendor/THREE-LICENSE`. The project license remains undecided.
@@ -188,3 +252,7 @@ persistence across restarts, limits, malformed input, path handling and storage
 failure. `public/latest.js` keeps an earlier saved-memory request from
 replacing the one opened last. A real microphone grant is not covered by
 automated tests.
+
+[The synthetic relation fixture](demo/README.md) freezes window/door and
+clarification expectations before inference. Its drawing is a technical test,
+not evidence of memory accuracy or consumer value.
