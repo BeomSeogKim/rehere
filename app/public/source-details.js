@@ -1,3 +1,6 @@
+import { proposalBlockedReason } from './memory-edit.js';
+import { buildBlockedReason } from './photo-scene.js';
+
 export const TEXT_LIMITS = Object.freeze({ provider: 120, reference: 2000, estimatedPeriod: 160 });
 
 export const ORIGIN_LABELS = Object.freeze({
@@ -179,7 +182,7 @@ function textInput(doc, details, key, onChange) {
 // Builds collapsible controls that read and write `details` in place, so the
 // state stays with the owning photo, text or recording across re-renders.
 // `state.open` remembers whether the panel was expanded.
-export function renderSourceControls(doc, { details, state, label, file = null }) {
+export function renderSourceControls(doc, { details, state, label, file = null, onChange = null, describedBy = null }) {
   const root = doc.createElement('details');
   root.className = 'source-details';
   root.open = Boolean(state.open);
@@ -191,11 +194,13 @@ export function renderSourceControls(doc, { details, state, label, file = null }
   const title = doc.createElement('span');
   title.textContent = 'Source details';
   title.setAttribute('aria-label', `Source details for ${label}`);
+  if (describedBy) summary.setAttribute('aria-describedby', describedBy);
   const status = doc.createElement('span');
   status.className = 'source-summary';
   summary.append(title, status);
   const refresh = () => {
     status.textContent = summarize(details);
+    onChange?.();
   };
   refresh();
 
@@ -255,6 +260,50 @@ export function renderSourceControls(doc, { details, state, label, file = null }
     root.append(note);
   }
   return root;
+}
+
+// What each use of a new photo needs from its own settings, in the words of
+// the checkboxes and the source type. Building and planning are decided by
+// their canonical checks; a visit link follows the server's share check
+// (public source with reconstruction and sharing; no model processing).
+const NEEDS = {
+  place: (record) => record.permissions.place === true,
+  model: (record) => record.permissions.model === true,
+  share: (record) => record.permissions.share === true,
+  public: (record) => record.origin.kind === 'public',
+};
+const NEED_LABELS = { place: 'reconstruct this place', model: 'model processing', share: 'share with others', public: 'public source' };
+export const PHOTO_USES = [
+  { name: 'Build scene', needs: ['place', 'model'], permitted: (record) => buildBlockedReason(record) === null },
+  { name: 'Memory edits', needs: ['place', 'model', 'public'], permitted: (record) => proposalBlockedReason(record) === null },
+  { name: 'Visit link', needs: ['place', 'share', 'public'], permitted: (record) => ['place', 'share', 'public'].every((need) => NEEDS[need](record)) },
+];
+
+// For each use: null when the photo's settings permit it, otherwise the
+// missing pieces by label.
+export function photoUseNeeds(details) {
+  const record = { kind: 'photo', ...toSourceInput(details) };
+  return PHOTO_USES.map((use) => ({
+    name: use.name,
+    missing: use.permitted(record) ? null : use.needs.filter((need) => !NEEDS[need](record)).map((need) => NEED_LABELS[need]),
+  }));
+}
+
+// Three short rows beside a new photo's Source details, the controls that
+// change them. They describe only this photo's settings and never write them.
+export function renderPhotoUses(doc, details, id) {
+  const list = doc.createElement('ul');
+  list.className = 'hint photo-uses';
+  list.id = id;
+  const rows = PHOTO_USES.map(() => doc.createElement('li'));
+  list.append(...rows);
+  const refresh = () => {
+    photoUseNeeds(details).forEach(({ name, missing }, i) => {
+      rows[i].textContent = missing ? `${name}: needs ${missing.join(' + ')}` : `${name}: permitted by these settings`;
+    });
+  };
+  refresh();
+  return { element: list, refresh };
 }
 
 export function renderSavedSource(doc, record) {

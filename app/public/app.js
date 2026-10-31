@@ -10,6 +10,7 @@ import {
   createVoiceSource,
   detailsProblem,
   renderSavedSource,
+  renderPhotoUses,
   renderSourceControls,
 } from './source-details.js';
 
@@ -118,7 +119,10 @@ function renderPhotos() {
         els.addPhotos.focus();
       });
       frame.append(image, remove);
-      item.append(frame, renderSourceControls(document, { ...photo, label: `photo ${index + 1}` }));
+      // The whole list is rebuilt together, so ids by position stay unique.
+      const usesId = `photo-uses-${index + 1}`;
+      const uses = renderPhotoUses(document, photo.details, usesId);
+      item.append(frame, uses.element, renderSourceControls(document, { ...photo, label: `photo ${index + 1}`, onChange: uses.refresh, describedBy: usesId }));
       return item;
     }),
   );

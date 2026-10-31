@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { proposalBlockedReason } from '../public/memory-edit.js';
+import { buildBlockedReason } from '../public/photo-scene.js';
 import { createRecorder } from '../public/recorder.js';
 import {
   buildMetadata,
@@ -8,6 +10,8 @@ import {
   describeSource,
   detailsProblem,
   isCalendarDate,
+  photoUseNeeds,
+  renderPhotoUses,
   renderSavedSource,
   renderSourceControls,
   summarize,
@@ -199,6 +203,81 @@ describe('source details controls', () => {
     assert.match(withFile.textContent, /File metadata: last modified/);
     const withoutFile = renderSourceControls(fakeDocument, { details: createSourceDetails(), state: {}, label: 'text' });
     assert.doesNotMatch(withoutFile.textContent, /File metadata/);
+  });
+});
+
+describe('photo use rows before saving', () => {
+  function photo() {
+    const details = createSourceDetails();
+    const uses = renderPhotoUses(fakeDocument, details, 'photo-uses-1');
+    const controls = renderSourceControls(fakeDocument, { details, state: {}, label: 'photo 1', onChange: uses.refresh, describedBy: 'photo-uses-1' });
+    const rows = uses.element.findAll((node) => node.tag === 'li');
+    const [place, model, share] = byType(controls, 'checkbox');
+    const tick = (box, on = true) => {
+      box.checked = on;
+      box.fire('change');
+    };
+    const origin = (kind) => {
+      const select = controls.findAll((node) => node.tag === 'select')[0];
+      select.value = kind;
+      select.fire('change');
+    };
+    return { details, uses, controls, rows, place, model, share, tick, origin, text: () => rows.map((row) => row.textContent) };
+  }
+
+  it('lists only what a new photo still needs, beside collapsed controls, and claims nothing', () => {
+    const p = photo();
+    assert.equal(p.controls.open, false);
+    assert.equal(p.uses.element.id, 'photo-uses-1');
+    assert.equal(p.controls.findAll((node) => node.tag === 'summary')[0].attributes['aria-describedby'], 'photo-uses-1');
+    assert.deepEqual(p.text(), [
+      'Build scene: needs reconstruct this place + model processing',
+      'Memory edits: needs reconstruct this place + model processing + public source',
+      'Visit link: needs reconstruct this place + share with others + public source',
+    ]);
+    assert.doesNotMatch(p.uses.element.textContent, /ready/i);
+  });
+
+  it('follows the real controls live with the same rows', () => {
+    const p = photo();
+    const before = [...p.rows];
+    p.tick(p.place);
+    p.tick(p.model);
+    p.tick(p.share);
+    assert.deepEqual(p.text(), ['Build scene: permitted by these settings', 'Memory edits: needs public source', 'Visit link: needs public source']);
+    p.origin('public');
+    p.tick(p.model, false);
+    assert.deepEqual(p.text(), ['Build scene: needs model processing', 'Memory edits: needs model processing', 'Visit link: permitted by these settings']);
+    assert.ok(p.rows.every((row, i) => row === before[i]), 'rows are updated in place');
+  });
+
+  it('agrees with the build and planning checks and the share rule for every grant and source type', () => {
+    for (let mask = 0; mask < 8; mask += 1) {
+      for (const kind of ['public', 'own', 'other', 'unknown']) {
+        const details = { ...createSourceDetails(), originKind: kind, permissions: { place: Boolean(mask & 1), model: Boolean(mask & 2), share: Boolean(mask & 4) } };
+        const record = { kind: 'photo', ...toSourceInput(details) };
+        const [build, plan, share] = photoUseNeeds(details);
+        const label = `${kind} ${JSON.stringify(details.permissions)}`;
+        assert.equal(build.missing === null, buildBlockedReason(record) === null, `build ${label}`);
+        assert.equal(plan.missing === null, proposalBlockedReason(record) === null, `plan ${label}`);
+        assert.equal(share.missing === null, kind === 'public' && details.permissions.place && details.permissions.share, `share ${label}`);
+        for (const use of [build, plan, share]) assert.ok(use.missing === null || use.missing.length > 0, `a blocked use names what it needs: ${use.name} ${label}`);
+      }
+    }
+  });
+
+  it('keeps photos apart and leaves the saved metadata exactly as set', () => {
+    const a = photo();
+    const b = photo();
+    a.tick(a.share);
+    a.origin('public');
+    assert.equal(a.text()[2], 'Visit link: needs reconstruct this place');
+    assert.equal(b.text()[2], 'Visit link: needs reconstruct this place + share with others + public source');
+    const metadata = buildMetadata({ photos: [{ details: a.details }, { details: b.details }], text: '', textDetails: createSourceDetails(), voice: null, voiceDetails: null });
+    assert.deepEqual(metadata.photos.map((entry) => [entry.origin.kind, entry.permissions]), [
+      ['public', { place: false, model: false, share: true }],
+      ['unknown', { place: false, model: false, share: false }],
+    ]);
   });
 });
 

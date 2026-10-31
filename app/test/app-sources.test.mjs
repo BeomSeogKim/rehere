@@ -128,3 +128,36 @@ describe('owner view of restricted material', () => {
     assert.equal(requests.filter((request) => request === `GET /api/drafts/${DRAFT}`).length, reads + 1, 'one re-read, no loop');
   });
 });
+
+describe('photo use consequences on the memory form', () => {
+  it('shows each new photo’s missing settings, updates only that photo, and keeps the others after a removal', () => {
+    const input = byId('photo-input');
+    input.files = [
+      new File(['a'], 'kitchen.jpg', { type: 'image/jpeg' }),
+      new File(['b'], 'shopfront.png', { type: 'image/png' }),
+    ];
+    input.dispatch('change');
+    const list = byId('photo-list');
+    const items = () => list.children;
+    const uses = (item) => item.findAll((node) => node.id?.startsWith('photo-uses-'))[0];
+    const shareLine = (item) => uses(item).findAll((node) => node.tag === 'li')[2].textContent;
+    assert.equal(items().length, 2);
+    assert.deepEqual(items().map((item) => uses(item).id), ['photo-uses-1', 'photo-uses-2']);
+    for (const item of items()) assert.match(uses(item).textContent, /^Build scene: needs reconstruct this place \+ model processing/);
+
+    const [, second] = items();
+    const box = (item, index) => item.findAll((node) => node.tag === 'input' && node.type === 'checkbox')[index];
+    box(second, 0).checked = true;
+    box(second, 0).dispatch('change');
+    box(second, 2).checked = true;
+    box(second, 2).dispatch('change');
+    assert.equal(shareLine(second), 'Visit link: needs public source');
+    assert.equal(shareLine(items()[0]), 'Visit link: needs reconstruct this place + share with others + public source');
+
+    items()[0].findAll((node) => node.tag === 'button' && node.textContent === 'Remove')[0].dispatch('click');
+    assert.equal(items().length, 1);
+    assert.equal(uses(items()[0]).id, 'photo-uses-1');
+    assert.equal(shareLine(items()[0]), 'Visit link: needs public source', 'the remaining photo keeps its own settings');
+    assert.equal(box(items()[0], 0).checked, true);
+  });
+});
