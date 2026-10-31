@@ -1,4 +1,6 @@
-# Synthetic relation fixture
+# Demonstration fixtures
+
+## Synthetic relation fixture
 
 This technical diagram tests whether a new sentence changes a proposed visual
 relation. It is not a photograph, a person's memory, or evidence of product
@@ -102,3 +104,40 @@ alignment, calibrated movement, historical accuracy or consumer value. The
 older room B swaps background landmarks without moving the counter; it cannot
 establish a counter-position correction and remains a separate discrepancy
 control.
+
+## Archival counter example
+
+Fetch a pinned official display JPEG of Walker Evans's **General store
+interior. Moundville, Alabama**, attributed to 1936 by the Library of Congress
+[Free to Use and Reuse collection](https://www.loc.gov/free-to-use/advertising-food/).
+This is an archival photograph, not a synthetic diagram or a supplied personal
+memory. Python 3 and its standard library are sufficient:
+
+```sh
+python3 fetch_archival_counter.py --output-dir /tmp/rehere-archival-counter
+```
+
+The command downloads only the fixed official image, checks its exact byte
+count and SHA-256, refuses existing output, and writes `source.jpg` and
+`fixture.json`. It does not sign in, upload, infer, grant uses or issue a link.
+The default output is `generated/archival-counter/`, ignored by Git.
+
+The 1024 by 820 image is a display derivative, not the preservation master.
+Keep its provider, public source link and catalog-attributed year with it.
+Do not turn that year or the calendar in the image into an exact capture day,
+or claim that the shop is now lost. The source provides no personal recording,
+recollection or same-place second viewpoint.
+
+For a bounded single-object example, select the visible left-edge wooden
+counter portion and leg with the manually chosen box `[12,440,240,805]`.
+Review the actual mask and depth; a structural `ready` status does not prove
+that the right object was selected. Keep failures as failures rather than
+substituting a different result. This box is an example on this exact image,
+not an automatic detector or evidence for a different-sized mirror.
+
+A manually chosen hypothetical move can demonstrate preview, save and
+**Compare with the photograph** from the same viewpoint. Preserve the original
+and derived hashes and leave newly uncovered areas empty. Label it as a
+hypothesis, not a recovered historical arrangement or a person's testimony.
+This example does not reopen or repair earlier flour-region or photo-pair
+failures. It supplies no hosted-model accuracy or consumer-value result.
