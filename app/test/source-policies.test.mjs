@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -323,16 +325,40 @@ describe('restrictions during running work', () => {
   it('starts no local worker after a restriction saved while staging, even when the abort fails', async () => {
     const calls = [];
     const ctx = await setup({ runner: async (job) => { calls.push(job); return writeOutputs(job); } });
-    const job = await ctx.reconstructions.create(ctx.draftId, { requestId: randomUUID(), sourceId: ctx.photo, box: BOX });
-    ctx.reconstructions.active.controller.abort = () => {
-      throw new Error('termination failed');
+    // Holds the build after its first grant check, while it creates its own
+    // staging folder and before the final grant check that admits the worker.
+    const stagingRoot = path.join(ctx.dataDir, 'reconstruction-staging') + path.sep;
+    const original = fs.promises.mkdir;
+    const reached = deferred();
+    const release = deferred();
+    fs.promises.mkdir = async (target, ...rest) => {
+      if (String(target).startsWith(stagingRoot)) {
+        reached.resolve();
+        await release.promise;
+      }
+      return original(target, ...rest);
     };
-    const saved = await ctx.restrict({ permissions: { place: true, model: false, share: true } });
-    assert.deepEqual(saved.cancellation, { requested: true, status: 'unconfirmed' });
-    const done = await waitUntil(() => ctx.reconstructions.get(ctx.draftId, job.id), (item) => !['queued', 'processing'].includes(item.status));
-    assert.equal(calls.length, 0);
-    assert.equal(done.status, 'failed');
-    assert.match(done.error, /no scene was published/);
+    syncBuiltinESMExports();
+    try {
+      const job = await ctx.reconstructions.create(ctx.draftId, { requestId: randomUUID(), sourceId: ctx.photo, box: BOX });
+      await reached.promise;
+      const running = ctx.reconstructions.active.done;
+      ctx.reconstructions.active.controller.abort = () => {
+        throw new Error('termination failed');
+      };
+      const saved = await ctx.restrict({ permissions: { place: true, model: false, share: true } });
+      assert.deepEqual(saved.cancellation, { requested: true, status: 'unconfirmed' });
+      release.resolve();
+      await running;
+      assert.equal(calls.length, 0);
+      const done = await ctx.reconstructions.get(ctx.draftId, job.id);
+      assert.equal(done.status, 'failed');
+      assert.match(done.error, /no scene was published/);
+    } finally {
+      release.resolve();
+      fs.promises.mkdir = original;
+      syncBuiltinESMExports();
+    }
   });
 
   it('asks running work to stop again on an exact restriction replay and reports it truthfully', async () => {
@@ -350,9 +376,12 @@ describe('restrictions during running work', () => {
     const first = await ctx.reconstructions.restrictSource(ctx.draftId, ctx.photo, ctx.owner, body);
     const replay = await ctx.reconstructions.restrictSource(ctx.draftId, ctx.photo, ctx.owner, body);
     assert.deepEqual([first.cancellation.status, replay.cancellation.status, replay.revision, attempts], ['unconfirmed', 'unconfirmed', 1, 2]);
+    // The failed status is written before cleanup releases the build slot,
+    // so wait for the run itself to finish before expecting nothing running.
+    const running = ctx.reconstructions.active.done;
     gate.resolve();
-    const done = await waitUntil(() => ctx.reconstructions.get(ctx.draftId, job.id), (item) => !['queued', 'processing'].includes(item.status));
-    assert.equal(done.status, 'failed');
+    await running;
+    assert.equal((await ctx.reconstructions.get(ctx.draftId, job.id)).status, 'failed');
     const idle = await ctx.reconstructions.restrictSource(ctx.draftId, ctx.photo, ctx.owner, body);
     assert.deepEqual(idle.cancellation, { requested: false, status: 'not-running' });
   });

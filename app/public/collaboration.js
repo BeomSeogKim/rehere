@@ -485,7 +485,10 @@ export function mountInvitations(container, { draftId }) {
 
 // The owner's panel inside a ready scene. bridge: { jobUrl, editor(),
 // showTransform(transform|null) -> boolean (true only when the 3D view drew
-// it), setLocked(boolean), saved(edit), unconfirmed(), conflict(), blocked() }.
+// it), setLocked(boolean), saved(edit), unconfirmed(), conflict(), blocked(),
+// targets? }. targets, only on two-object scenes: { selected() -> id | null,
+// nameOf(id), describe(arrangement) }; a candidate then moves the selected
+// object and carries its targetId, and editor() is that object's saved state.
 // blocked() is called once when a refresh finds the current scene blocked, so
 // the scene that depends on a withdrawn recollection stops being shown.
 export function mountCollaboration(container, bridge) {
@@ -597,12 +600,27 @@ export function mountCollaboration(container, bridge) {
     const reason = el('textarea', { rows: 2, maxLength: REASON_LIMIT });
     const conflict = select(Object.entries(CONFLICTS), 'unknown');
     const axes = ['Left / right', 'Down / up', 'Away / toward', 'Turn (degrees)'];
-    const values = [...editor.offset, Math.round((editor.yaw * 180) / Math.PI)];
+    const savedValues = (state) => [...state.offset, Math.round((state.yaw * 180) / Math.PI)].map(String);
+    const values = bridge.targets ? ['', '', '', ''] : savedValues(editor);
     const inputs = axes.map((name, i) => {
-      const input = el('input', { type: 'number', step: i === 3 ? 1 : 0.01, min: i === 3 ? -180 : -OFFSET_LIMIT, max: i === 3 ? 180 : OFFSET_LIMIT, value: String(values[i]) });
+      const input = el('input', { type: 'number', step: i === 3 ? 1 : 0.01, min: i === 3 ? -180 : -OFFSET_LIMIT, max: i === 3 ? 180 : OFFSET_LIMIT, value: values[i] });
       input.setAttribute('aria-label', `Candidate ${name}`);
       return input;
     });
+    // Two-object scenes: the fields belong to one object at a time. Each
+    // object's typed values are kept separately, and an object seen for the
+    // first time starts from its own saved position, never another's.
+    const targetDrafts = new Map();
+    let fieldsTarget = null;
+    const bindTarget = () => {
+      if (!bridge.targets) return;
+      const target = bridge.targets.selected();
+      if (target === fieldsTarget) return;
+      if (fieldsTarget) targetDrafts.set(fieldsTarget, inputs.map((input) => input.value));
+      fieldsTarget = target;
+      const next = !target ? ['', '', '', ''] : targetDrafts.get(target) ?? savedValues(bridge.editor(target));
+      inputs.forEach((input, i) => (input.value = next[i]));
+    };
     const candidateBox = el('fieldset', { className: 'space-edit', hidden: true }, [
       el('legend', { textContent: 'Candidate position, set by hand' }),
       el('p', { className: 'hint', textContent: 'Set where the object would be if this recollection is right. Rehere does not read a position from the words.' }),
@@ -612,13 +630,18 @@ export function mountCollaboration(container, bridge) {
     const save = el('button', { type: 'button', textContent: 'Save decision' });
     const note = el('p', { className: 'hint' });
 
+    const targetNote = el('p', { className: 'hint' });
     const candidate = () => {
       const numbers = inputs.map((input) => (input.value.trim() === '' ? NaN : Number(input.value)));
-      return { offset: numbers.slice(0, 3), yaw: (numbers[3] * Math.PI) / 180 };
+      const transform = { offset: numbers.slice(0, 3), yaw: (numbers[3] * Math.PI) / 180 };
+      return bridge.targets ? { targetId: fieldsTarget, ...transform } : transform;
     };
+    const noTarget = () => Boolean(bridge.targets) && (!bridge.targets.selected() || fieldsTarget !== bridge.targets.selected());
     const geometry = () => decision.value === 'adopt' || decision.value === 'alternative';
     const previewed = () => showing?.kind === 'candidate' && showing.drawn && sameJson(showing.transform, candidate());
     const refreshControls = () => {
+      bindTarget();
+      for (const input of inputs) input.disabled = noTarget();
       const editorNow = bridge.editor();
       candidateBox.hidden = !geometry();
       preview.hidden = !geometry();
@@ -626,6 +649,7 @@ export function mountCollaboration(container, bridge) {
       if (geometry()) {
         if (entry.permissions?.place !== true) reasonText = 'This recollection does not allow use to reconstruct the place, so it cannot change the scene. You can hold or decline it.';
         else if (state.blocked) reasonText = 'The current scene depends on a withdrawn recollection. Restore an unaffected saved version first.';
+        else if (noTarget()) reasonText = 'Choose the object this recollection is about first; the candidate moves only that object.';
         else if (!editorNow.clean && !showing) reasonText = 'Save or revert your manual change, or finish the memory proposal, first.';
         else if (transformProblem(candidate())) reasonText = transformProblem(candidate());
         else if (!previewed()) reasonText = showing?.kind === 'candidate' && !showing.drawn
@@ -633,7 +657,8 @@ export function mountCollaboration(container, bridge) {
           : 'Preview the candidate on the scene before saving it.';
       }
       note.textContent = reasonText;
-      preview.disabled = busy || entry.permissions?.place !== true || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
+      targetNote.textContent = bridge.targets && !noTarget() ? `The candidate moves ${bridge.targets.nameOf(bridge.targets.selected())}; the other object stays as saved.` : '';
+      preview.disabled = busy || noTarget() || entry.permissions?.place !== true || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
       save.disabled = busy || (geometry() && Boolean(reasonText));
     };
 
@@ -694,6 +719,7 @@ export function mountCollaboration(container, bridge) {
       field('Your note (optional)', reason),
       field('Possible reason for a difference', conflict, 'A label for your own review. It does not decide which account is right or set a time.'),
       candidateBox,
+      targetNote,
       note,
       el('div', { className: 'actions' }, [preview, save]),
     );
@@ -728,7 +754,7 @@ export function mountCollaboration(container, bridge) {
         );
       }
       else {
-        item.append(el('span', { className: 'hint', textContent: `${describeEra(variant.era, variantLabel)} · ${formatTransform(variant.edit)}` }));
+        item.append(el('span', { className: 'hint', textContent: `${describeEra(variant.era, variantLabel)} · ${variant.edit?.objects && bridge.targets ? bridge.targets.describe(variant.edit) : formatTransform(variant.edit)}` }));
         const isShown = showing?.kind === 'variant' && showing.id === variant.id;
         const view = el('button', { type: 'button', className: 'secondary', textContent: isShown ? 'Shown' : 'Show on the scene', disabled: isShown || busy || (!bridge.editor().clean && !showing) });
         view.addEventListener('click', () => {
@@ -872,7 +898,10 @@ export function mountCollaboration(container, bridge) {
 // Shown instead of a scene whose current version depends on a withdrawn
 // recollection. The only way forward offered is restoring a saved version that
 // does not depend on it; that saves a new version.
-export function mountBlockedScene(container, { jobUrl, currentVersion, onRestored }) {
+// On a two-object scene, describe(arrangement) and ruleText(rule) name both
+// objects, and currentRule is the blocked version's rule: a restore that
+// changes it says so on the button, and pressing it confirms that change.
+export function mountBlockedScene(container, { jobUrl, currentVersion, onRestored, describe = null, ruleText = null, currentRule = null }) {
   let disposed = false;
   const restoreAttempt = attempts();
   const message = el('p', { className: 'form-message', role: 'alert' });
@@ -897,9 +926,15 @@ export function mountBlockedScene(container, { jobUrl, currentVersion, onRestore
     if (!usable.length) message.textContent = 'No saved version without this dependency was found.';
     list.replaceChildren(
       ...usable.map((entry) => {
-        const restore = el('button', { type: 'button', className: 'secondary', textContent: `Restore version ${entry.version}` });
+        const ruleChange = Boolean(entry.objects && describe) && JSON.stringify(entry.relationship ?? null) !== JSON.stringify(currentRule ?? null);
+        const extra = entry.objects && describe ? { ruleChangeConfirmed: ruleChange } : {};
+        const restore = el('button', {
+          type: 'button',
+          className: 'secondary',
+          textContent: ruleChange ? `Restore version ${entry.version} and change the rule to “${ruleText(entry.relationship)}”` : `Restore version ${entry.version}`,
+        });
         restore.addEventListener('click', async () => {
-          const body = restoreAttempt.prepare(entry.version, { targetVersion: entry.version }, () => ({ requestId: crypto.randomUUID(), baseVersion: currentVersion, targetVersion: entry.version }));
+          const body = restoreAttempt.prepare(entry.version, { targetVersion: entry.version }, () => ({ requestId: crypto.randomUUID(), baseVersion: currentVersion, targetVersion: entry.version, ...extra }));
           restore.disabled = true;
           const outcome = await postJson(`${jobUrl}/undo`, body);
           if (disposed) return;
@@ -915,7 +950,7 @@ export function mountBlockedScene(container, { jobUrl, currentVersion, onRestore
           }
           onRestored();
         });
-        return el('li', {}, [el('span', { textContent: `Version ${entry.version}: ${formatTransform(entry)}` }), restore]);
+        return el('li', {}, [el('span', { textContent: `Version ${entry.version}: ${entry.objects && describe ? describe(entry) : formatTransform(entry)}` }), restore]);
       }),
     );
   })();

@@ -37,6 +37,9 @@ a new preview. Another link requires another preview.
 
 A link lasts up to seven days or until revoked. It preserves its selected
 transforms, source-derived assets, quotations, time assertions and camera.
+For a [two-object scene](OBJECTS.md) it keeps both objects' transforms and the
+relationship rule of each selected arrangement, plus the owner's object names
+and source boxes so visitors can tell the objects apart.
 Later private edits do not publish themselves. The visitor sees the shared
 date and a short saved-copy reference under the title.
 

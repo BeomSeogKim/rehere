@@ -1,7 +1,10 @@
 # Recorded stories
 
 Attach an imported recording to an explicitly selected saved arrangement and
-its foreground object. The recording provider stays separate from the person
+its foreground object. In a [two-object scene](OBJECTS.md) the story names one
+of the two objects; it is never moved to the other object, and visitors can
+filter stories by object. Stories on one-foreground scenes are unchanged.
+The recording provider stays separate from the person
 who supplies captions. These are attributed accounts, not verified history.
 Synthetic audio fixtures must be identified as tests; a tone is not a person's
 memory or evidence of speech intelligibility.

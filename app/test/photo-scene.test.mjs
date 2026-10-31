@@ -6,12 +6,15 @@ import {
   boxProblem,
   buildBlockedReason,
   createEditSession,
+  createObjectSceneObjects,
   createSceneObjects,
   editProblem,
   facingGuide,
   jobStatusText,
+  objectSurfaceMeshes,
   surfaceMeshes,
   surfacePoint,
+  validateSurface,
 } from '../public/photo-scene.js';
 
 const SOURCE_ID = '3f2b6c1e-8d4a-4b7e-9c2f-1a2b3c4d5e6f';
@@ -284,5 +287,147 @@ describe('facing guide', () => {
     const guide = facingGuide([0, 0, -3], 0, [0.01, 1, -3.01]);
     assert.equal(guide.readable, false);
     assert.equal(guide.aligned, false);
+  });
+});
+
+// A 10x6 grid: background at depth 4, object-1 (columns 1-3) at depth 3.5 and
+// object-2 (columns 6-8) at depth 3, both on rows 1-4.
+function twoObjectSurface({ voidCells = [] } = {}) {
+  const width = 10;
+  const height = 6;
+  const depth = [];
+  const regions = [];
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const inRows = y >= 1 && y <= 4;
+      const region = inRows && x >= 1 && x <= 3 ? 1 : inRows && x >= 6 && x <= 8 ? 2 : 0;
+      regions.push(voidCells.includes(y * width + x) ? -1 : region);
+      depth.push(region === 1 ? 3.5 : region === 2 ? 3 : 4);
+    }
+  }
+  const objects = [
+    { id: 'object-1', label: 'Display counter', box_xyxy: [0, 435, 226, 790] },
+    { id: 'object-2', label: 'Flour stack', box_xyxy: [490, 450, 982, 781] },
+  ];
+  return {
+    schema_version: 2,
+    source: { source_id: SOURCE_ID, sha256: 'b'.repeat(64), image_size: [1007, 801], selected_objects: structuredClone(objects) },
+    width, height, depth, regions, objects,
+    assumptions: { horizontal_fov_degrees: 55, near: 2, far: 5, max_triangle_depth_span: 0.35 },
+  };
+}
+
+const publicSubset = (surface) => ({
+  schema_version: 2, width: surface.width, height: surface.height, depth: surface.depth, regions: surface.regions,
+  objects: surface.objects.map(({ id, label, box_xyxy }) => ({ id, label, box_xyxy })),
+  source: { image_size: surface.source.image_size }, assumptions: surface.assumptions,
+});
+
+describe('two-object surfaces', () => {
+  it('validates the version 2 schema strictly', () => {
+    validateSurface(twoObjectSurface());
+    const broken = [
+      (surface) => { surface.schema_version = 3; },
+      (surface) => { surface.foreground = surface.regions.map(() => 0); },
+      (surface) => { surface.objects[1].id = 'object-3'; },
+      (surface) => { surface.objects.reverse(); },
+      (surface) => { surface.objects.pop(); },
+      (surface) => { surface.objects[1].label = 'DISPLAY COUNTER'; },
+      (surface) => { surface.objects[0].label = ' padded'; },
+      (surface) => { surface.objects[0].label = 'x'.repeat(81); },
+      (surface) => { surface.objects[0].box_xyxy = [0, 0, 2000, 10]; },
+      (surface) => { surface.objects[0].box_xyxy = [10, 0, 10, 10]; },
+      (surface) => { surface.regions[0] = 3; },
+      (surface) => { surface.regions[0] = 0.5; },
+      (surface) => { surface.regions.pop(); },
+      (surface) => { surface.source.selected_objects[0].box_xyxy = [1, 435, 226, 790]; },
+      (surface) => { surface.source.selected_objects[1].label = 'Other'; },
+    ];
+    for (const change of broken) {
+      const surface = twoObjectSurface();
+      change(surface);
+      assert.throws(() => validateSurface(surface), undefined, change.toString());
+    }
+  });
+
+  it('builds the background and each object from its own region', () => {
+    const { background, objects } = objectSurfaceMeshes(twoObjectSurface());
+    assert.deepEqual(objects.map(({ id, label }) => [id, label]), [['object-1', 'Display counter'], ['object-2', 'Flour stack']]);
+    assert.ok(background.indices.length > 0);
+    for (const [object, z] of [[objects[0], -3.5], [objects[1], -3]]) {
+      const depths = new Set();
+      for (let i = 2; i < object.positions.length; i += 3) depths.add(object.positions[i] + object.pivot[2]);
+      assert.deepEqual([...depths], [z]);
+      assert.equal(object.indices.length / 3, 2 * 2 * 3);
+    }
+  });
+
+  it('centres each object exactly on the bounding-box midpoint of its surviving vertices', () => {
+    const surface = twoObjectSurface();
+    const { objects } = objectSurfaceMeshes(surface);
+    const tangent = Math.tan((55 * Math.PI) / 360);
+    const vertex = (x, y, d) => [((x / 9) - 0.5) * 2 * tangent * d, ((0.5 - (y / 5)) * 2 * tangent * d * 801) / 1007, -d];
+    const expected = (x1, x2, d) => {
+      const [a, b] = [vertex(x1, 1, d), vertex(x2, 4, d)];
+      return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, -d];
+    };
+    assert.deepEqual(objects[0].pivot, expected(1, 3, 3.5));
+    assert.deepEqual(objects[1].pivot, expected(6, 8, 3));
+    for (const object of objects) {
+      for (let axis = 0; axis < 3; axis += 1) {
+        const values = object.positions.filter((_, index) => index % 3 === axis);
+        assert.ok(Math.abs(Math.min(...values) + Math.max(...values)) < 1e-12);
+      }
+    }
+  });
+
+  it('draws void overlap cells in no mesh and never counts them as background', () => {
+    const plain = objectSurfaceMeshes(twoObjectSurface());
+    const voided = objectSurfaceMeshes(twoObjectSurface({ voidCells: [12, 22] }));
+    assert.ok(voided.objects[0].indices.length < plain.objects[0].indices.length);
+    assert.equal(voided.background.indices.length, plain.background.indices.length);
+    assert.equal(voided.objects[1].indices.length, plain.objects[1].indices.length);
+    const allVoid = twoObjectSurface();
+    allVoid.regions = allVoid.regions.map((value) => (value === 2 ? -1 : value));
+    assert.throws(() => objectSurfaceMeshes(allVoid), /Flour stack/);
+  });
+
+  it('gives identical meshes and pivots from the public subset without private source records', () => {
+    const surface = twoObjectSurface();
+    const subset = publicSubset(surface);
+    validateSurface(subset);
+    assert.deepEqual(objectSurfaceMeshes(subset), objectSurfaceMeshes(surface));
+    assert.equal(JSON.stringify(subset).includes(SOURCE_ID), false);
+  });
+
+  it('keeps legacy surfaces on their old path and refuses to flatten two objects', () => {
+    assert.throws(() => surfaceMeshes(twoObjectSurface()), /two objects/);
+    const legacy = syntheticSurface();
+    const old = surfaceMeshes(legacy);
+    const unified = objectSurfaceMeshes(legacy);
+    assert.equal(unified.objects.length, 1);
+    assert.deepEqual(unified.objects[0], { id: 'selected-foreground', label: 'Selected foreground object', ...old.foreground });
+    assert.deepEqual(unified.background, old.background);
+  });
+
+  it('moves only the transformed object and keeps the other and the background unchanged', () => {
+    const { scene, background, objects, applyArrangement } = createObjectSceneObjects(THREE, twoObjectSurface());
+    assert.equal(scene.children.length, 3);
+    const [counter, flour] = objects;
+    assert.deepEqual(counter.mesh.userData, { objectId: 'object-1', label: 'Display counter' });
+    assert.deepEqual(background.userData, {});
+    const backgroundBefore = background.geometry.attributes.position.array.slice();
+    const flourBefore = flour.mesh.position.toArray();
+    applyArrangement({ objects: [{ id: 'object-1', offset: [0.5, 0, -0.25], yaw: 0.3 }, { id: 'object-2', offset: [0, 0, 0], yaw: 0 }], relationship: null });
+    assert.deepEqual(counter.mesh.position.toArray(), [counter.pivot[0] + 0.5, counter.pivot[1], counter.pivot[2] - 0.25]);
+    assert.equal(counter.mesh.rotation.y, 0.3);
+    assert.deepEqual(flour.mesh.position.toArray(), flourBefore);
+    assert.equal(flour.mesh.rotation.y, 0);
+    assert.deepEqual(background.geometry.attributes.position.array, backgroundBefore);
+    for (const edit of [{ objects: [{ id: 'object-1', offset: [0, 0, 0], yaw: 0 }] }, { objects: [{ id: 'object-1', offset: [0, 0, 0], yaw: 0 }, { id: 'object-3', offset: [0, 0, 0], yaw: 0 }] },
+      { objects: [{ id: 'object-1', offset: [3, 0, 0], yaw: 0 }, { id: 'object-2', offset: [0, 0, 0], yaw: 0 }] }, {}]) {
+      assert.throws(() => applyArrangement(edit), /transform/);
+    }
+    assert.equal(counter.mesh.rotation.y, 0.3);
   });
 });

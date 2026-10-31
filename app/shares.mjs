@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { OBJECT_IDS, arrangementOf, assertObjectsConfirmed, isTwoObject } from './arrangements.mjs';
 import { versionDependencies } from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
 
@@ -108,12 +109,17 @@ function parseRevoke(body) {
   return { requestId: body.requestId };
 }
 
-// Renderer input only: grid, depth, mask, camera assumptions and image size.
-// Source IDs, checksums, file names and texture records are never served.
+// Renderer input only: grid, depth, mask or object regions, camera
+// assumptions and image size. Source IDs, checksums, file names and texture
+// records are never served. Object boxes are shared because the whole
+// permitted texture is.
 export function visitorSurface(surface) {
   const { width, height, depth, foreground, assumptions, source } = surface;
+  const shape = surface.schema_version === 2
+    ? { schema_version: 2, regions: surface.regions, objects: surface.objects.map(({ id, label, box_xyxy: box }) => ({ id, label, box_xyxy: [...box] })) }
+    : { foreground };
   return {
-    width, height, depth, foreground,
+    width, height, depth, ...shape,
     assumptions: {
       horizontal_fov_degrees: assumptions.horizontal_fov_degrees, near: assumptions.near, far: assumptions.far,
       max_triangle_depth_span: assumptions.max_triangle_depth_span,
@@ -126,16 +132,28 @@ const sharesOf = (manifest) => manifest.shares ?? { previews: [], snapshots: [],
 const contributionsOf = (manifest) => manifest.collaboration?.contributions ?? [];
 const variantsOf = (manifest) => manifest.collaboration?.variants ?? [];
 
+// The saved fields of a version or variant in the scene's own shape: one
+// transform, or for two objects both transforms and the optional rule.
+function editFields(manifest, edit) {
+  return isTwoObject(manifest) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw };
+}
+
+function initialEdit(manifest) {
+  return isTwoObject(manifest)
+    ? { objects: OBJECT_IDS.map((id) => ({ id, offset: [0, 0, 0], yaw: 0 })), relationship: null }
+    : { offset: [0, 0, 0], yaw: 0 };
+}
+
 // The one resolver for a saved arrangement, shared by snapshots and stories:
-// an exact retained version or an immutable variant, with its own transform
+// an exact retained version or an immutable variant, with its own transforms
 // and inherited contribution dependencies. It never rebinds to the latest edit.
 export function savedView(manifest, view) {
   if (view.kind === 'version') {
     if (!Number.isInteger(view.version) || view.version < 1 || view.version > manifest.edit.version) return null;
-    const edit = view.version === 1 ? { offset: [0, 0, 0], yaw: 0 } : manifest.edits.find((item) => item.version === view.version);
+    const edit = view.version === 1 ? initialEdit(manifest) : manifest.edits.find((item) => item.version === view.version);
     if (!edit) return null;
     return {
-      edit: { offset: [...edit.offset], yaw: edit.yaw }, dependencies: versionDependencies(manifest, view.version), era: null, eraRevision: null,
+      edit: editFields(manifest, edit), dependencies: versionDependencies(manifest, view.version), era: null, eraRevision: null,
       label: `Saved version ${view.version}`,
     };
   }
@@ -144,7 +162,7 @@ export function savedView(manifest, view) {
   if (!variant) return null;
   const label = variant.kind === 'baseline' ? 'Saved reconstruction' : `Alternative arrangement ${variants.filter((item) => item.kind !== 'baseline').indexOf(variant) + 1}`;
   return {
-    edit: { offset: [...variant.edit.offset], yaw: variant.edit.yaw }, dependencies: [...variant.contributionIds],
+    edit: editFields(manifest, variant.edit), dependencies: [...variant.contributionIds],
     era: variant.eraAssertions.at(-1) ?? null, eraRevision: variant.eraRevision, label,
   };
 }
@@ -251,6 +269,7 @@ export class ShareStore {
   async #build(manifest, request) {
     const reason = await this.#sourceIssue(manifest);
     if (reason) this.#throwReason(reason);
+    assertObjectsConfirmed(manifest);
     const draft = await this.reconstructions.drafts.get(manifest.draftId);
     const source = draft.sources.find((item) => item.id === manifest.sourceId);
     const selected = request.views.map((view) => {
@@ -295,7 +314,7 @@ export class ShareStore {
       return {
         id: view.id,
         label,
-        edit: { offset: [...edit.offset], yaw: edit.yaw },
+        edit: structuredClone(edit),
         era: publicEra,
         evidence: {
           photo: { providerLabel: source.provider || null, attributedCaptureDate: source.dates?.capturedOn ?? null },
@@ -318,6 +337,8 @@ export class ShareStore {
     const publicView = {
       id: null, title: request.title, createdAt: null, synthetic: request.synthetic, startViewId: request.startViewId,
       camera: { position: [...request.camera.position], target: [...request.camera.target] }, views, stories: publicStories,
+      // The owner's names and source boxes for the two objects, as visible evidence.
+      ...(isTwoObject(manifest) && { objects: manifest.objects.map(({ id, label, box }) => ({ id, label, box: [...box] })) }),
     };
     const assets = {};
     for (const name of Object.keys(SHARED_ASSETS)) {

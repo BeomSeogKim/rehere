@@ -90,7 +90,9 @@ const eraText = (era) => {
 
 // bridge: { jobUrl, sources (this memory's source records), editor() ->
 // { version }, durationHintMs(sourceId) -> number|null, onChanged() after a
-// story is saved or withdrawn }.
+// story is saved or withdrawn, objects? }. objects, only on two-object
+// scenes: [{ id, name }]; the person then chooses the story's object, with
+// nothing chosen by default, and the body carries its targetId.
 export function mountStories(container, bridge) {
   let disposed = false;
   let readToken = 0;
@@ -102,6 +104,10 @@ export function mountStories(container, bridge) {
 
   const voiceSelect = el('select');
   const viewSelect = el('select');
+  const targetSelect = bridge.objects
+    ? el('select', {}, [el('option', { value: '', textContent: 'Choose an object' }), ...bridge.objects.map((object) => el('option', { value: object.id, textContent: object.name }))])
+    : null;
+  if (targetSelect) targetSelect.value = '';
   const title = el('input', { type: 'text', maxLength: 200 });
   const cueRows = el('div', { className: 'story-cue-rows' });
   const addCue = el('button', { type: 'button', className: 'secondary', textContent: 'Add a caption' });
@@ -125,7 +131,7 @@ export function mountStories(container, bridge) {
       field('Recording', voiceSelect),
       voiceNote,
       field('Saved view', viewSelect, 'Choose the exact saved version or alternative this story belongs to. It stays with that view.'),
-      el('p', { className: 'hint', textContent: `Object: ${TARGET_LABEL}` }),
+      targetSelect ? field('Object', targetSelect, 'The object this story is about. Listeners can pick an object to find its stories.') : el('p', { className: 'hint', textContent: `Object: ${TARGET_LABEL}` }),
       field('Story title', title),
       el('fieldset', { className: 'source-permissions' }, [
         el('legend', { textContent: 'Captions' }),
@@ -253,6 +259,7 @@ export function mountStories(container, bridge) {
     return {
       voiceSourceId: voiceSelect.value,
       view: choice ? { kind: choice.kind, version: choice.version, variantId: choice.variantId, eraRevision: choice.eraRevision } : null,
+      ...(targetSelect ? { targetId: targetSelect.value } : {}),
       title: title.value,
       cues: readCues(),
       captionConfirmed: confirmed.checked === true,
@@ -271,6 +278,7 @@ export function mountStories(container, bridge) {
 
   function resetForm() {
     title.value = '';
+    if (targetSelect) targetSelect.value = '';
     confirmed.checked = false;
     cueRows.replaceChildren();
     addCueRow();
@@ -336,7 +344,9 @@ export function mountStories(container, bridge) {
       ? 'Choose a recording.'
       : !input.view
         ? 'Choose the saved view this story belongs to.'
-        : !input.title.trim()
+        : targetSelect && !input.targetId
+          ? 'Choose the object this story is about.'
+          : !input.title.trim()
           ? 'Give the story a title.'
           : [...input.title].length > TITLE_LIMIT
             ? `Keep the title to ${TITLE_LIMIT} characters or fewer.`

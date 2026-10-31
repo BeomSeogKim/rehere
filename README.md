@@ -15,7 +15,10 @@ It preserves original checksums, source attribution, independent use permissions
 and unknown dates. Permitted photos can become partial depth scenes through
 local depth estimation and SAM2 segmentation. People can inspect model
 proposals, explore the visible surfaces, preview foreground changes and save
-versioned transforms. A separately enabled Meta planner connects written
+versioned transforms. A scene can also hold exactly two named objects, each
+moved separately, with one explicit left/right rule from the original
+viewpoint; this is not collision checking or a full room. A separately
+enabled Meta planner connects written
 memories to bounded changes with explicit approval and preserved version
 history. Unseen areas remain empty. Local owner sessions, scoped contributor
 credentials and recovery protect private content. Written contributions stay

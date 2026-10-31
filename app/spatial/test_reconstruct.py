@@ -1,6 +1,7 @@
 import contextlib
 import errno
 import io
+import json
 import os
 import subprocess
 import sys
@@ -220,6 +221,182 @@ class CommandTests(unittest.TestCase):
                     self.assertTrue(output in (occupied, jpeg) or not output.exists())
             self.assertEqual([path.name for path in occupied.iterdir()], ["summary.json"])
 
+
+
+OBJECTS = '[{"label": "Display counter", "box": [0, 435, 226, 790]}, {"label": "Flour stack", "box": [490, 450, 982, 781]}]'
+
+
+def two_object_layout(width=40, height=20):
+    """Background with object 1 in columns 4-13 and object 2 in columns 24-33, rows 4-15."""
+    regions = np.zeros((height, width), np.int8)
+    regions[4:16, 4:14] = 1
+    regions[4:16, 24:34] = 2
+    return np.full((height, width), 3.0), regions
+
+
+class TwoObjectArgumentTests(unittest.TestCase):
+    def parse(self, *extra):
+        return reconstruct.parse_args(["--image", "a.jpg", "--output", "out", "--source-id", SOURCE_ID, *extra])
+
+    def test_accepts_two_labelled_boxes_in_order(self):
+        args = self.parse("--objects", OBJECTS)
+        self.assertIsNone(args.box)
+        self.assertEqual(args.objects, [{"label": "Display counter", "box": [0.0, 435.0, 226.0, 790.0]}, {"label": "Flour stack", "box": [490.0, 450.0, 982.0, 781.0]}])
+        long_label = "\U0001d11e" * 40
+        self.assertEqual(self.parse("--objects", json.dumps([{"label": long_label, "box": [0, 0, 1, 1]}, {"label": "b", "box": [0, 0, 1, 1]}])).objects[0]["label"], long_label)
+
+    def test_rejects_invalid_objects_and_mixed_selection(self):
+        good = {"label": "a", "box": [0, 0, 1, 1]}
+        invalid = [
+            "not json", json.dumps([good]), json.dumps([good, {"label": "b", "box": [0, 0, 1, 1]}, good]),
+            json.dumps([good, {"label": "b", "box": [0, 0, 1, 1], "id": "x"}]), json.dumps([good, {"label": " b", "box": [0, 0, 1, 1]}]),
+            json.dumps([good, {"label": "", "box": [0, 0, 1, 1]}]), json.dumps([good, {"label": "b\u0007", "box": [0, 0, 1, 1]}]),
+            json.dumps([good, {"label": "\U0001d11e" * 41, "box": [0, 0, 1, 1]}]), json.dumps([good, {"label": "A", "box": [0, 0, 1, 1]}]),
+            json.dumps([good, {"label": "b", "box": [0, 0, 1]}]), json.dumps([good, {"label": "b", "box": [0, 0, True, 1]}]),
+            '[{"label": "a", "box": [0, 0, 1, 1]}, {"label": "b", "box": [0, 0, NaN, 1]}]',
+        ]
+        for text in invalid:
+            with self.subTest(text=text[:40]), self.assertRaises(SystemExit), unittest.mock.patch("sys.stderr"):
+                self.parse("--objects", text)
+        for extra in ([], ["--box", "0", "0", "1", "1", "--objects", OBJECTS]):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit), unittest.mock.patch("sys.stderr"):
+                self.parse(*extra)
+
+
+class TwoObjectRegionTests(unittest.TestCase):
+    def test_disjoint_masks_keep_both_objects(self):
+        first = np.zeros((10, 10), bool)
+        second = np.zeros((10, 10), bool)
+        first[:, :4] = True
+        second[:, 6:] = True
+        regions, overlap = reconstruct.combine_masks(first, second)
+        self.assertEqual(overlap, {"pixels": 0, "ratio": 0.0})
+        self.assertEqual(set(np.unique(regions)), {0, 1, 2})
+
+    def test_small_overlap_becomes_void_not_background(self):
+        first = np.zeros((100, 100), bool)
+        second = np.zeros((100, 100), bool)
+        first[:, :50] = True
+        second[:, 49:] = True
+        second[:, 49] = False
+        second[0:20, 49] = True  # 20 shared pixels: 0.4% of the smaller mask
+        regions, overlap = reconstruct.combine_masks(first, second)
+        self.assertEqual(overlap["pixels"], 20)
+        self.assertEqual(int((regions == reconstruct.VOID).sum()), 20)
+        self.assertTrue((regions[0:20, 49] == reconstruct.VOID).all())
+        self.assertEqual(int((regions == 0).sum()), 0)
+
+    def test_reports_a_tiny_positive_overlap_at_full_precision(self):
+        first = np.zeros((2000, 4000), bool)
+        second = np.zeros((2000, 4000), bool)
+        first[:, :1000] = True  # 2,000,000 pixels
+        second[:, 2000:3500] = True
+        second[0, 999] = True  # one shared pixel
+        regions, overlap = reconstruct.combine_masks(first, second)
+        self.assertEqual(overlap["pixels"], 1)
+        self.assertGreater(overlap["ratio"], 0)
+        self.assertEqual(overlap["ratio"], 1 / 2_000_000)  # one pixel of the smaller mask: 5e-7
+        self.assertEqual(json.loads(json.dumps(overlap))["ratio"], overlap["ratio"])
+        self.assertEqual(int((regions == reconstruct.VOID).sum()), 1)
+
+    def test_applies_the_one_percent_limit_exactly(self):
+        first = np.zeros((100, 1000), bool)
+        second = np.zeros((100, 1000), bool)
+        first[:, :100] = True  # 10,000 pixels, the smaller mask
+        second[:, 200:500] = True
+        second[0:100, 99] = True  # 100 shared pixels: exactly 1%
+        _, overlap = reconstruct.combine_masks(first, second)
+        self.assertEqual(overlap, {"pixels": 100, "ratio": 0.01})
+        second[0, 98] = True  # 101 shared pixels: just over 1%
+        with self.assertRaises(reconstruct.ProposalRejected):
+            reconstruct.combine_masks(first, second)
+
+    def test_large_overlap_or_empty_mask_is_rejected(self):
+        first = np.zeros((100, 100), bool)
+        second = np.zeros((100, 100), bool)
+        first[:, :50] = True
+        second[:, 45:] = True
+        with self.assertRaises(reconstruct.ProposalRejected):
+            reconstruct.combine_masks(first, second)
+        with self.assertRaises(reconstruct.ProposalRejected):
+            reconstruct.combine_masks(first, np.zeros((100, 100), bool))
+
+    def test_mask_levels_round_trip_to_grid_regions(self):
+        regions = np.array([[0, 1, 2, 0]], np.int8)
+        self.assertEqual(reconstruct.mask_levels(np.array([[0, 1, 2, -1]], np.int8)).tolist(), [[0, 127, 255, 63]])
+        self.assertEqual(reconstruct.grid_regions(reconstruct.mask_levels(regions), 4, 1).tolist(), regions.tolist())
+        # A void pixel also voids every node of the cells its footprint touches.
+        voided = reconstruct.grid_regions(reconstruct.mask_levels(np.array([[0, 1, 2, -1]], np.int8)), 4, 1)
+        self.assertEqual(voided.tolist(), [[0, 1, -1, -1]])
+
+    def assert_void_footprints_untouched(self, regions_full, grid):
+        """Every grid cell overlapped by a void pixel has only void corners, so no triangle covers it."""
+        height, width = regions_full.shape
+        grid_height, grid_width = grid.shape
+        for y, x in zip(*np.nonzero(regions_full == reconstruct.VOID)):
+            gx0, gx1 = x / width * (grid_width - 1), (x + 1) / width * (grid_width - 1)
+            gy0, gy1 = y / height * (grid_height - 1), (y + 1) / height * (grid_height - 1)
+            for column in range(int(gx0), min(int(np.ceil(gx1)), grid_width - 1)):
+                for row in range(int(gy0), min(int(np.ceil(gy1)), grid_height - 1)):
+                    corners = grid[row:row + 2, column:column + 2]
+                    self.assertTrue((corners == reconstruct.VOID).all(), (y, x, row, column))
+
+    def test_keeps_a_single_void_pixel_that_nearest_sampling_would_drop(self):
+        first = np.zeros((512, 512), bool)
+        second = np.zeros((512, 512), bool)
+        first[0:150, 0:150] = True
+        second[200:350, 200:350] = True
+        second[80, 80] = True
+        regions, overlap = reconstruct.combine_masks(first, second)
+        self.assertEqual(overlap["pixels"], 1)
+        levels = reconstruct.mask_levels(regions)
+        nearest = np.asarray(Image.fromarray(levels).resize((256, 256), Image.Resampling.NEAREST))
+        self.assertFalse((nearest == 63).any(), "nearest sampling alone loses this void pixel")
+        grid = reconstruct.grid_regions(levels, 256, 256)
+        self.assertTrue((grid == reconstruct.VOID).any())
+        self.assert_void_footprints_untouched(regions, grid)
+        # The footprint straddles a grid line, so the cells on both sides lose their corners: 3 x 3 nodes.
+        self.assertEqual(int((grid == reconstruct.VOID).sum()), 9)
+
+    def test_keeps_a_thin_void_boundary_at_production_scale(self):
+        first = np.zeros((768, 1024), bool)
+        second = np.zeros((768, 1024), bool)
+        first[100:700, 100:401] = True
+        second[100:700, 400:800] = True
+        regions, overlap = reconstruct.combine_masks(first, second)
+        self.assertEqual(overlap["pixels"], 600)
+        grid = reconstruct.grid_regions(reconstruct.mask_levels(regions), 256, 192)
+        self.assert_void_footprints_untouched(regions, grid)
+        depth = np.full(grid.shape, 3.0)
+        counts = reconstruct.region_triangles(depth, grid)
+        self.assertGreater(counts[1], 0)
+        self.assertGreater(counts[2], 0)
+
+    def test_accepts_readable_regions_and_counts_their_triangles(self):
+        depth, regions = two_object_layout()
+        coverages, triangles = reconstruct.check_regions(depth, regions)
+        self.assertEqual(coverages, [0.15, 0.15])
+        self.assertEqual([triangles[1], triangles[2]], [2 * 9 * 11, 2 * 9 * 11])
+        regions[5, 5] = reconstruct.VOID
+        voided = reconstruct.region_triangles(depth, regions)
+        self.assertEqual(voided[0], triangles[0])
+        self.assertLess(voided[1], triangles[1])
+
+    def test_rejects_small_large_or_unreadable_regions(self):
+        depth, regions = two_object_layout()
+        tiny = regions.copy()
+        tiny[tiny == 2] = 0
+        tiny[4:6, 24:27] = 2
+        large = regions.copy()
+        large[:, 0:22] = 1  # 55% of the grid
+        combined = np.zeros((20, 40), np.int8)
+        combined[:, 0:13] = 1
+        combined[:, 13:26] = 2
+        broken = depth.copy()
+        broken[4:16, 24:34] = np.where(np.indices((12, 10)).sum(axis=0) % 2, 2.0, 5.0)
+        for name, case_depth, case_regions in (("tiny", depth, tiny), ("large", depth, large), ("combined", depth, combined), ("unreadable", broken, regions)):
+            with self.subTest(name), self.assertRaises(reconstruct.ProposalRejected):
+                reconstruct.check_regions(case_depth, case_regions)
 
 if __name__ == "__main__":
     unittest.main()

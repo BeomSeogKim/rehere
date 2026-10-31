@@ -6,6 +6,7 @@
 
 import { createViewer } from './scene-viewer.js';
 import { createStoryPlayer } from './story-player.js';
+import { describeArrangement, objectNames, ruleText } from './arrangement.js';
 
 export const HEARTBEAT_MS = 15_000;
 export const HEARTBEAT_TIMEOUT_MS = 5_000;
@@ -191,9 +192,33 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     const message = el('p', { className: 'hint', role: 'status' });
     const buttons = el('div', { className: 'actions space-camera' });
     const storyBox = el('div', { className: 'visit-stories' });
+    // Two-object scenes: the visitor may pick one object to see its photo
+    // evidence and only its stories. Picking stops any playing story.
+    const objects = Array.isArray(manifest.objects) && manifest.objects.length === 2 ? manifest.objects : null;
+    const nameOf = objectNames(objects);
+    let objectId = null;
+    const objectButtons = el('div', { className: 'actions', role: 'group' });
+    const evidence = el('div', { className: 'object-evidence' });
+    const renderObjects = () => {
+      if (!objects) return;
+      for (const button of objectButtons.children) if (button.objectId !== undefined) button.setAttribute('aria-pressed', String(button.objectId === objectId));
+      const object = objects.find((entry) => entry.id === objectId);
+      if (!object) {
+        evidence.replaceChildren();
+        return;
+      }
+      const [width, height] = surface.source?.image_size ?? [1, 1];
+      const [x1, y1, x2, y2] = object.box;
+      const box = el('div', { className: `box-overlay box-overlay-${objects.indexOf(object) === 0 ? 'a' : 'b'}` }, [el('span', { className: 'box-badge', textContent: nameOf(object.id) })]);
+      Object.assign(box.style, { left: `${(x1 / width) * 100}%`, top: `${(y1 / height) * 100}%`, width: `${((x2 - x1) / width) * 100}%`, height: `${((y2 - y1) / height) * 100}%` });
+      evidence.replaceChildren(
+        el('p', { className: 'hint', textContent: `Photo evidence for ${nameOf(object.id)}: the box the owner drew. The outline inside it is a model estimate.` }),
+        el('div', { className: 'anchor-frame' }, [el('img', { src: textureUrl, alt: `The photo used for “${manifest.title}”, with the box for ${nameOf(object.id)}` }), box]),
+      );
+    };
     const renderStories = (viewId) => {
       disposePlayers();
-      const viewStories = (manifest.stories ?? []).filter((story) => story.viewId === viewId);
+      const viewStories = (manifest.stories ?? []).filter((story) => story.viewId === viewId && (!objectId || story.target?.id === objectId));
       storyBox.replaceChildren(
         ...(viewStories.length ? [el('h3', { textContent: 'Recorded stories for this view' })] : []),
         ...viewStories.map((story) => {
@@ -201,6 +226,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           players.push(player);
           return el('div', { className: 'visit-story' }, [
             el('p', { className: 'space-choice-label', textContent: story.title }),
+            ...(objects && story.target ? [el('p', { className: 'hint', textContent: `About ${nameOf(story.target.id)}` })] : []),
             el('p', {
               className: 'hint',
               textContent: `Recording by ${story.providerLabel || 'an unnamed provider'}. Captions written by ${story.captionAuthorLabel || 'the owner'}; they are not checked by Rehere. Nothing plays until you press Play.`,
@@ -213,8 +239,15 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     const showView = (id) => {
       currentId = id;
       const view = views.get(id);
-      viewer?.applyEdit(view.edit);
+      if (view.edit?.objects) viewer?.applyArrangement(view.edit);
+      else viewer?.applyEdit(view.edit);
       details.replaceChildren(...viewDetails(view, labelOf));
+      if (objects && view.edit?.objects) {
+        details.append(
+          el('p', { textContent: `Rule: ${ruleText(view.edit.relationship, nameOf)}.${view.edit.relationship ? ' It compares where the two centres appear from the original photo; it does not measure distance.' : ''}` }),
+          el('p', { className: 'hint', textContent: `Arrangement in this view: ${describeArrangement(view.edit, nameOf)}.` }),
+        );
+      }
       renderStories(id);
       for (const button of buttons.children) button.setAttribute('aria-pressed', String(button.viewId === id));
     };
@@ -223,6 +256,19 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       buttons.append(button);
     }
     const back = el('button', { type: 'button', className: 'secondary', textContent: 'Back to the starting view' });
+    if (objects) {
+      const pickObject = (id) => {
+        objectId = id;
+        renderObjects();
+        renderStories(currentId);
+      };
+      objectButtons.append(
+        el('span', { textContent: 'Objects: ' }),
+        el('button', { type: 'button', className: 'secondary', textContent: 'All objects', objectId: null, onclick: () => pickObject(null) }),
+        ...objects.map((object) => el('button', { type: 'button', className: 'secondary', textContent: nameOf(object.id), objectId: object.id, onclick: () => pickObject(object.id) })),
+      );
+      renderObjects();
+    }
     container.replaceChildren(
       el('h1', { textContent: manifest.title }),
       // Identifies which saved copy this is; the copy does not change later. A
@@ -239,6 +285,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       message,
       buttons,
       back,
+      ...(objects ? [objectButtons, evidence] : []),
       details,
       storyBox,
       el('p', { className: 'hint', textContent: DEVICE_NOTE }),

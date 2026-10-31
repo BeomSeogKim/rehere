@@ -4,7 +4,9 @@ An offline command that turns one local JPEG or PNG photograph and a
 rectangular object box into editable visible surfaces. Depth Anything V2 Small
 proposes relative depth; SAM2 Tiny proposes an object mask inside the box. The
 output loads with the scene builder in
-[`photo-scene.js`](../public/photo-scene.js).
+[`photo-scene.js`](../public/photo-scene.js). With `--objects` it instead
+segments exactly two named objects; see [two objects](../OBJECTS.md) for the
+confirmation and editing flow around that output.
 
 The command does not fetch URLs, check source permissions, or isolate jobs.
 The caller must confirm that the person allowed model processing and must give
@@ -48,6 +50,21 @@ rotation, and must satisfy `0 <= X1 < X2 <= width` and `0 <= Y1 < Y2 <= height`.
 `--output` must be an empty or absent directory whose parent exists; existing
 files are never overwritten.
 
+For two objects, replace `--box` with `--objects` (the two are mutually
+exclusive):
+
+```sh
+.venv/bin/python reconstruct.py --image photo.jpg --output jobs/JOB_ID \
+  --source-id 3f2b6c1e-8d4a-4b7e-9c2f-1a2b3c4d5e6f \
+  --objects '[{"label": "Chair", "box": [195, 385, 415, 700]},
+             {"label": "Counter", "box": [565, 445, 905, 685]}]'
+```
+
+The JSON lists exactly two `{label, box}` entries. Labels must already be
+trimmed, non-blank, at most 80 UTF-16 units, free of control characters and
+different ignoring case; they are returned unchanged as `object-1` and
+`object-2` in that order. Boxes follow the `--box` rules and may overlap.
+
 Exit codes: `0` success, `2` invalid arguments, image, or output path, `3`
 missing dependency or cached weights, `4` unusable model proposal (choose a
 different box or photograph), `5` an output file could not be written (for
@@ -61,8 +78,8 @@ standard error. After exit `5` the directory may hold some outputs but no
 |---|---|
 | `texture.jpg` | RGB re-encode of the decoded pixels without EXIF, ICC, or text metadata |
 | `depth-preview.png` | Normalized depth on the surface grid |
-| `mask.png` | Binary mask at the source resolution |
-| `mask-overlay.jpg` | Mask tinted over the texture for review |
+| `mask.png` | Mask at the source resolution: binary, or for two objects 0 background, 63 unassigned, 127 object 1, 255 object 2 |
+| `mask-overlay.jpg` | Mask tinted over the texture for review; two objects get two tints, outlines and white unassigned pixels, with no text |
 | `surface.json` | Surface grid for the scene builder |
 | `summary.json` | Hashes, box, orientation, coverage, devices, timings, model revisions |
 
@@ -70,6 +87,13 @@ standard error. After exit `5` the directory may hold some outputs but no
 `surface.json` records the source ID, the SHA-256 of the original input bytes,
 the texture's SHA-256, the image size, and the box as object `foreground`.
 The original file is not copied; the caller keeps it.
+
+A two-object run writes `surface.json` with `schema_version: 2`: `objects`
+and `source.selected_objects` hold each ID, label and box, and `regions` gives
+every grid cell `-1` (unassigned), `0` (background), `1` or `2` instead of a
+binary `foreground`. `summary.json` adds per-object coverage and triangle
+counts, background triangles, the overlap pixel count and full-precision ratio,
+and the `mask.png` legend. One-box output is unchanged.
 
 ## Method and limits
 
@@ -90,6 +114,13 @@ The original file is not copied; the caller keeps it.
   result where the scene builder would keep no foreground or no background
   triangle after its mask-boundary and depth-span rules. Non-finite or
   constant depth is rejected.
+- Two objects: depth runs once and SAM2 once with both boxes. Pixels in both
+  masks become unassigned rather than background; an overlap above 1% of the
+  smaller mask is rejected. An unassigned pixel also unassigns every grid node
+  of the cells it touches, so no drawn triangle covers it. Each object must
+  cover 1-50% of the grid, both together at most 60%, and each object and the
+  background must keep at least 32 renderable triangles. The outlines are model
+  proposals: a person must confirm both objects before the app uses them.
 - Depth and mask are model proposals, not confirmed observations of the place.
   Only photographed surfaces exist: there is no closed room, no background fill,
   no object back faces, and no multi-view alignment. Large viewpoint changes
@@ -119,8 +150,8 @@ explicit consent before transmission.
 
 ## Tests
 
-The tests cover argument, box, image, grid, depth-range, and mask checks and do
-not load models:
+The tests cover argument, box, image, grid, depth-range, mask, two-object
+argument, overlap, unassigned-pixel and region checks and do not load models:
 
 ```sh
 .venv/bin/python -m unittest -v test_reconstruct test_prepare_model_image

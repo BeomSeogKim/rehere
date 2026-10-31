@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pcmWav } from './audio-derivative.mjs';
+import { OBJECT_IDS, assertObjectsConfirmed, isTwoObject, objectMarker } from './arrangements.mjs';
 import { dependenciesBlocked } from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
 import { savedView } from './shares.mjs';
@@ -73,15 +74,27 @@ function parseCues(cues) {
   return total <= STORY_LIMITS.cueTotal ? parsed : null;
 }
 
-export function parseStoryRequest(body) {
-  if (!exactKeys(body, ['requestId', 'voiceSourceId', 'view', 'title', 'cues', 'captionConfirmed'])) throw fail(400, UNREADABLE);
+const STORY_KEYS = ['requestId', 'voiceSourceId', 'view', 'title', 'cues', 'captionConfirmed'];
+
+// A two-object scene also names the one object the story is about.
+export function parseStoryRequest(body, twoObjects = false) {
+  if (!exactKeys(body, twoObjects ? [...STORY_KEYS, 'targetId'] : STORY_KEYS)) throw fail(400, UNREADABLE);
   const view = parseView(body.view);
   const cues = parseCues(body.cues);
-  const valid = isId(body.requestId) && isId(body.voiceSourceId) && view && cues && filled(body.title, STORY_LIMITS.title);
+  const valid = isId(body.requestId) && isId(body.voiceSourceId) && view && cues && filled(body.title, STORY_LIMITS.title)
+    && (!twoObjects || OBJECT_IDS.includes(body.targetId));
   if (!valid) throw fail(400, UNREADABLE);
   if (body.captionConfirmed !== true) throw fail(400, 'Confirm that the captions convey what can be heard in the recording.');
-  return { requestId: body.requestId, voiceSourceId: body.voiceSourceId, view, title: body.title, cues };
+  return { requestId: body.requestId, voiceSourceId: body.voiceSourceId, view, title: body.title, cues, ...(twoObjects && { targetId: body.targetId }) };
 }
+
+// The object a story is about: the owner's named object, or the one
+// foreground of a single-object scene.
+const storyTarget = (context, showLabel = true) => {
+  if (context.targetLabel === undefined) return { ...STORY_TARGET };
+  // A blocked story shows a fixed marker, not the owner's object name.
+  return { id: context.target, label: showLabel ? context.targetLabel : objectMarker(context.target) };
+};
 
 const storiesOf = (manifest) => manifest.stories ?? { items: [], receipts: [] };
 const viewKey = (view) => (view.kind === 'version' ? `version:${view.version}` : `variant:${view.variantId}`);
@@ -114,6 +127,7 @@ export class StoryStore {
   // the mutex. Returns the frozen context and the recording's stored file.
   async #context(manifest, request) {
     if (manifest.status !== 'ready') throw fail(409, 'Only a finished scene can have recorded stories.');
+    assertObjectsConfirmed(manifest);
     const r = this.reconstructions;
     const draft = await r.drafts.get(manifest.draftId);
     const sources = Array.isArray(draft?.sources) ? draft.sources : [];
@@ -139,7 +153,8 @@ export class StoryStore {
         edit: resolved.edit,
         dependencies: resolved.dependencies,
         era,
-        target: STORY_TARGET.id,
+        target: request.targetId ?? STORY_TARGET.id,
+        ...(request.targetId && { targetLabel: manifest.objects.find((item) => item.id === request.targetId).label }),
         photo: { sourceId: photo.id, sha256: photo.sha256 },
         voice: { sourceId: voice.id, sha256: voice.sha256, provider: voice.provider || null },
       },
@@ -181,7 +196,7 @@ export class StoryStore {
       available,
       blockedReason: reason && BLOCKED[reason],
       title: available ? story.title : '',
-      target: { ...STORY_TARGET },
+      target: storyTarget(context, available),
       view: { ...context.view, label: context.label, era: available ? context.era : null },
       voice: { sourceId: context.voice.sourceId, provider: context.voice.provider },
       captionAuthor: { displayName: story.captionAuthor.displayName },
@@ -217,11 +232,13 @@ export class StoryStore {
   // recorded unless the playback copy was made and every check still holds.
   async create(draftId, jobId, principal, body) {
     this.#owner(principal);
-    const request = parseStoryRequest(body);
-    const { requestId, ...values } = request;
-    const requestDigest = sha256(JSON.stringify(values));
     const r = this.reconstructions;
     await r.recover();
+    // Whether a scene has two objects is fixed when it is built, so the body
+    // shape can be chosen before the admission slot.
+    const request = parseStoryRequest(body, isTwoObject(await this.#scene(draftId, jobId)));
+    const { requestId, ...values } = request;
+    const requestDigest = sha256(JSON.stringify(values));
     const admitted = await r.serialize(async () => {
       const manifest = await this.#scene(draftId, jobId);
       const existing = storiesOf(manifest).items.find((item) => item.requestId === requestId);
@@ -389,7 +406,7 @@ export class StoryStore {
     return {
       pinned: { storyId: story.id, viewId: matches[0].id, audioSha256: story.audio.sha256, contentSha256: sha256(JSON.stringify([story.title, story.cues, story.context])) },
       publicStory: {
-        viewId: matches[0].id, title: story.title, providerLabel: story.context.voice.provider, captionAuthorLabel: story.captionAuthor.displayName,
+        viewId: matches[0].id, target: storyTarget(story.context), title: story.title, providerLabel: story.context.voice.provider, captionAuthorLabel: story.captionAuthor.displayName,
         cues: story.cues.map((cue) => ({ ...cue })), durationMs: story.durationMs, audio: { type: WAV_TYPE, size: story.audio.size },
       },
     };

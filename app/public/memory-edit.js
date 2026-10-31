@@ -20,6 +20,10 @@ export function proposalBlockedReason(source) {
   return null;
 }
 
+// The object a two-object proposal was planned for: the stored request's
+// target, or the plan's own when only that is given.
+const targetOf = (proposal) => proposal?.targetId ?? proposal?.result?.targetId ?? null;
+
 export function formatTransform({ offset, yaw }) {
   const [x, y, z] = offset.map((value) => value.toFixed(2));
   return `left/right ${x}, down/up ${y}, away/toward ${z}, turn ${Math.round((yaw * 180) / Math.PI)}°`;
@@ -105,8 +109,12 @@ const reasonOf = (result) => (typeof result.body?.error === 'string' ? result.bo
 const withReason = (result, note) => (reasonOf(result) ? `${reasonOf(result)} ${note}` : note);
 
 // bridge: { jobUrl, textureUrl, source, editor(), showTransform(edit|null),
-// setLocked(boolean), saved(edit), unconfirmed(), conflict() }. editor()
-// returns { version, offset, yaw, clean } for the manual editor's state.
+// setLocked(boolean), saved(edit), unconfirmed(), conflict(), targets? }.
+// editor(targetId?) returns { version, offset, yaw, clean, relationship? } for the
+// manual editor's state (on two-object scenes, the saved transform of the
+// object named, or of the selected one when none is named). targets, given only for two-object scenes: { selected() -> id |
+// null, nameOf(id), describe(arrangement) -> text, anchorRegion([u, v]) ->
+// region number | null, ruleText(rule) -> text }.
 export function mountMemoryEdit(container, bridge) {
   let disposed = false;
   let current = null;
@@ -133,6 +141,8 @@ export function mountMemoryEdit(container, bridge) {
   const count = el('span', { textContent: '0' });
   const consent = el('input', { type: 'checkbox' });
   const plan = el('button', { type: 'button', textContent: 'Plan a change' });
+  // The version whose return would change the two-object rule, once asked.
+  let ruleUndoVersion = null;
   const hint = el('p', { className: 'hint' });
   const status = el('p', { className: 'hint', role: 'status' });
   status.setAttribute('aria-live', 'polite');
@@ -169,7 +179,7 @@ export function mountMemoryEdit(container, bridge) {
   function setPreview(on) {
     previewing = on;
     const anchor = on && current.result.action === 'face_anchor' ? current.result.anchor.point : null;
-    guide = bridge.showTransform(on ? current.result.transform : null, anchor) ?? null;
+    guide = bridge.showTransform(on ? current.result.transform : null, anchor, targetOf(current)) ?? null;
     if (!on) frontChecked = false;
     bridge.setLocked(on || busy);
   }
@@ -203,14 +213,17 @@ export function mountMemoryEdit(container, bridge) {
     const raw = text.value;
     count.textContent = raw.length.toLocaleString('en-US');
     const active = current && ACTIVE.has(current.status);
-    hint.textContent = !editor.clean
+    const needsTarget = bridge.targets && !bridge.targets.selected();
+    hint.textContent = needsTarget
+      ? 'Choose the object this memory is about before planning.'
+      : !editor.clean
       ? 'Save or revert your manual change, or load the saved version, before planning from a memory.'
       : !raw.trim()
         ? 'Write what you remember to plan a change.'
         : !consent.checked
           ? 'Tick the box to allow sending this message and the photo to Meta.'
           : '';
-    plan.disabled = Boolean(blocked) || busy || active || !editorReady() || !raw.trim() || raw.length > TEXT_LIMIT || !consent.checked;
+    plan.disabled = Boolean(blocked) || busy || active || needsTarget || !editorReady() || !raw.trim() || raw.length > TEXT_LIMIT || !consent.checked;
     renderReview();
     renderHistory();
   }
@@ -224,9 +237,13 @@ export function mountMemoryEdit(container, bridge) {
       review.replaceChildren(el('p', { className: 'memory-status', textContent: REDACTED_TEXT }));
       return;
     }
-    const editor = bridge.editor();
+    // Compared with the saved state of the plan's own object, never the one
+    // chosen now; the version is the scene's.
+    const editor = bridge.editor(bridge.targets ? targetOf(current) : undefined);
     const nodes = [el('p', { className: 'memory-status', textContent: proposalStatusText(current) })];
     nodes.push(el('p', { className: 'memory-statement' }, [el('strong', { textContent: 'Your memory: ' }), `“${current.statement.text}”`]));
+    // A plan stays with the object it was made for, whatever is chosen now.
+    if (bridge.targets && targetOf(current)) nodes.push(el('p', { className: 'hint', textContent: `Planned for ${bridge.targets.nameOf(targetOf(current))}.` }));
 
     if (ACTIVE.has(current.status)) {
       const cancel = el('button', { type: 'button', className: 'secondary', textContent: 'Cancel planning', disabled: busy });
@@ -273,7 +290,11 @@ export function mountMemoryEdit(container, bridge) {
               'This turns the side of the object that faced the camera in the photo. That side is not necessarily the object’s real front, especially in a photo taken at an angle.',
           }),
         );
-        if (previewing) {
+        // On a two-object scene only a point on the background can be faced.
+        const offBackground = bridge.targets && bridge.targets.anchorRegion(result.anchor.point) !== 0;
+        if (offBackground) {
+          nodes.push(el('p', { className: 'form-message is-error', textContent: 'The marked point is on one of the objects or on an area left unknown, so turning toward it is not supported. Refine your message instead of applying.' }));
+        } else if (previewing) {
           const problem = !guide
             ? 'The 3D preview is not available, so this direction cannot be checked here and cannot be applied.'
             : !guide.readable
@@ -327,7 +348,7 @@ export function mountMemoryEdit(container, bridge) {
           const isCurrent = entry.version === editor.version;
           const item = el('li', {}, [
             el('span', { className: 'space-choice-label', textContent: `Version ${entry.version}${isCurrent ? ' (current)' : ''}: ${historyLabel(entry)}` }),
-            el('span', { className: 'hint', textContent: formatTransform(entry) }),
+            el('span', { className: 'hint', textContent: entry.objects && bridge.targets ? bridge.targets.describe(entry) : formatTransform(entry) }),
           ]);
           const source = entry.proposalId ? byId.get(entry.proposalId) : null;
           if (source && isRedacted(source)) {
@@ -341,8 +362,25 @@ export function mountMemoryEdit(container, bridge) {
           if (!isCurrent) {
             const undo = el('button', { type: 'button', className: 'secondary', textContent: `Return to version ${entry.version}` });
             undo.disabled = busy || previewing || !editor.clean;
-            undo.addEventListener('click', () => undoTo(entry.version));
+            // On two-object scenes a different rule must be confirmed first.
+            const ruleChanges = Boolean(bridge.targets) && JSON.stringify(entry.relationship ?? null) !== JSON.stringify(editor.relationship ?? null);
+            undo.addEventListener('click', () => {
+              if (!ruleChanges) {
+                undoTo(entry.version, false);
+                return;
+              }
+              ruleUndoVersion = entry.version;
+              sync();
+            });
             item.append(undo);
+            if (ruleChanges && ruleUndoVersion === entry.version) {
+              const confirm = el('button', { type: 'button', textContent: `Return to version ${entry.version} and change the rule`, disabled: undo.disabled });
+              confirm.addEventListener('click', () => undoTo(entry.version, true));
+              item.append(
+                el('p', { className: 'hint', textContent: `This also changes the rule from “${bridge.targets.ruleText(editor.relationship)}” to “${bridge.targets.ruleText(entry.relationship)}”.` }),
+                confirm,
+              );
+            }
           }
           return item;
         }),
@@ -415,8 +453,10 @@ export function mountMemoryEdit(container, bridge) {
     mutate(async () => {
       const raw = text.value;
       const { version } = bridge.editor();
-      if (!planAttempt || planAttempt.text !== raw || planAttempt.baseVersion !== version) {
-        planAttempt = { requestId: crypto.randomUUID(), baseVersion: version, text: raw, consent: true };
+      const targetId = bridge.targets ? bridge.targets.selected() : undefined;
+      if (bridge.targets && !targetId) return;
+      if (!planAttempt || planAttempt.text !== raw || planAttempt.baseVersion !== version || planAttempt.targetId !== targetId) {
+        planAttempt = { requestId: crypto.randomUUID(), baseVersion: version, text: raw, consent: true, ...(bridge.targets ? { targetId } : {}) };
       }
       const result = await postJson(`${bridge.jobUrl}/proposals`, planAttempt);
       if (disposed) return;
@@ -491,10 +531,12 @@ export function mountMemoryEdit(container, bridge) {
     });
   }
 
-  function undoTo(targetVersion) {
+  function undoTo(targetVersion, ruleChangeConfirmed = false) {
+    ruleUndoVersion = null;
     mutate(async () => {
-      if (!reusable(undoAttempt) || undoAttempt.body.targetVersion !== targetVersion) {
-        undoAttempt = { body: { requestId: crypto.randomUUID(), baseVersion: bridge.editor().version, targetVersion } };
+      const extra = bridge.targets ? { ruleChangeConfirmed } : {};
+      if (!reusable(undoAttempt) || undoAttempt.body.targetVersion !== targetVersion || undoAttempt.body.ruleChangeConfirmed !== extra.ruleChangeConfirmed) {
+        undoAttempt = { body: { requestId: crypto.randomUUID(), baseVersion: bridge.editor().version, targetVersion, ...extra } };
       }
       const result = await postJson(`${bridge.jobUrl}/undo`, undoAttempt.body);
       if (disposed) return;

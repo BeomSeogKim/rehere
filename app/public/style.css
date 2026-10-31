@@ -322,3 +322,34 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
 .share-panel { margin: 16px 0; }
 .share-preview:empty { display: none; }
 .share-preview { margin-top: 12px; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius); }
+
+.box-overlay-b { border-style: dashed; }
+.box-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(20, 18, 16, 0.8);
+  border-radius: 0 0 6px 0;
+  white-space: nowrap;
+}
+.space-viewport-wrap { position: relative; }
+.object-badges { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.object-badge {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 2px 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(20, 18, 16, 0.8);
+  border: 1px solid #fff;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.relation-strip { margin: 12px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); }
+.relation-strip p { margin: 4px 0; }
+[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }

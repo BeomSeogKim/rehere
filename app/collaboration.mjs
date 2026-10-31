@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  OBJECT_IDS, arrangementOf, assertObjectsConfirmed, assertRelationship, isTwoObject, withTarget,
+} from './arrangements.mjs';
 import { RequestError } from './drafts.mjs';
 import { ACTIVE_PROPOSAL } from './memory-proposals.mjs';
 
@@ -108,22 +111,28 @@ function parseSubmit(body) {
   return { requestId: body.requestId, text: body.text, permissions: { place, model, share }, periodClaim: body.periodClaim };
 }
 
-function parseTransform(transform) {
-  if (!exactKeys(transform, ['offset', 'yaw'])) return null;
+// A two-object candidate names the one object it moves; the rest of the
+// arrangement and its rule come from the saved scene, never from the request.
+function parseTransform(transform, twoObjects) {
+  if (!exactKeys(transform, twoObjects ? ['targetId', 'offset', 'yaw'] : ['offset', 'yaw'])) return null;
   const { offset, yaw } = transform;
   const valid = Array.isArray(offset) && offset.length === 3 && offset.every((value) => finite(value) && Math.abs(value) <= OFFSET_LIMIT)
-    && finite(yaw) && yaw >= -Math.PI && yaw <= Math.PI;
-  return valid ? { offset: [...offset], yaw } : null;
+    && finite(yaw) && yaw >= -Math.PI && yaw <= Math.PI && (!twoObjects || OBJECT_IDS.includes(transform.targetId));
+  if (!valid) return null;
+  return twoObjects ? { targetId: transform.targetId, offset: [...offset], yaw } : { offset: [...offset], yaw };
 }
 
-function parseReview(body) {
+// The saved edit fields of a scene version, in its own shape.
+const editFields = (edit) => (Array.isArray(edit.objects) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw });
+
+function parseReview(body, twoObjects) {
   if (!exactKeys(body, ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'])) throw fail(400, UNREADABLE);
   const { requestId, baseVersion, baseRevision, decision, reason, conflict } = body;
   const valid = isId(requestId) && Number.isInteger(baseVersion) && baseVersion >= 1 && Number.isInteger(baseRevision) && baseRevision >= 1
     && Object.hasOwn(DECISIONS, decision) && plain(reason, COLLABORATION_LIMITS.reason) && CONFLICTS.has(conflict);
   if (!valid) throw fail(400, UNREADABLE);
   const geometry = decision === 'adopt' || decision === 'alternative';
-  const transform = body.transform === null ? null : parseTransform(body.transform);
+  const transform = body.transform === null ? null : parseTransform(body.transform, twoObjects);
   if (geometry ? !transform : body.transform !== null) throw fail(400, 'The candidate position and turn could not be read.');
   return { requestId, baseVersion, baseRevision, decision, reason, conflict, transform };
 }
@@ -216,7 +225,7 @@ function projectVariant(manifest, variant, sourceBlocked) {
     // The label names the provider; a blocked variant shows a fixed label instead.
     label: blocked ? 'Blocked reconstruction' : variant.label,
     parentVersion: variant.parentVersion,
-    edit: { ...variant.edit, offset: [...variant.edit.offset] },
+    edit: { version: variant.edit.version, ...editFields(variant.edit) },
     contributionIds: [...variant.contributionIds],
     createdAt: variant.createdAt,
     createdBy: variant.createdBy,
@@ -343,13 +352,14 @@ export class CollaborationStore {
         reviews: [],
         withdrawnAt: null,
       };
-      // The first contribution freezes the saved scene as the baseline to compare against.
+      // The first contribution freezes the saved scene as the baseline to compare
+      // against: its whole current arrangement and rule for a two-object scene.
       const variants = collaboration.variants.length > 0 ? collaboration.variants : [{
         id: randomUUID(),
         kind: 'baseline',
         label: 'Saved reconstruction',
         parentVersion: manifest.edit.version,
-        edit: { version: manifest.edit.version, offset: [...manifest.edit.offset], yaw: manifest.edit.yaw },
+        edit: { version: manifest.edit.version, ...editFields(manifest.edit) },
         contributionIds: currentDependencies(manifest),
         createdAt: now,
         createdBy: null,
@@ -366,10 +376,11 @@ export class CollaborationStore {
 
   async review(draftId, jobId, principal, contributionId, body) {
     this.#owner(principal, draftId);
-    const request = parseReview(body);
     await this.reconstructions.recover();
     return this.reconstructions.serialize(async () => {
       const manifest = await this.#scene(draftId, jobId);
+      const twoObjects = isTwoObject(manifest);
+      const request = parseReview(body, twoObjects);
       const collaboration = collaborationOf(manifest);
       const contribution = collaboration.contributions.find((item) => item.id === contributionId);
       if (!contribution) throw fail(404, CONTRIBUTION_NOT_FOUND);
@@ -396,14 +407,21 @@ export class CollaborationStore {
         if (dependenciesBlocked(manifest, parent)) throw fail(409, BLOCKED_MESSAGE);
         const dependencies = [contribution.id, ...parent.filter((id) => id !== contribution.id)];
         const adopt = request.decision === 'adopt';
-        if (adopt) edit = { version: manifest.edit.version + 1, ...request.transform };
+        let fields = request.transform;
+        if (twoObjects) {
+          assertObjectsConfirmed(manifest);
+          // Only the named object changes; a contribution can never clear the rule.
+          fields = withTarget(arrangementOf(manifest.edit), request.transform.targetId, request.transform);
+          assertRelationship(manifest, fields);
+        }
+        if (adopt) edit = { version: manifest.edit.version + 1, ...fields };
         variant = {
           id: randomUUID(),
           kind: 'candidate',
           label: `${contribution.provider.displayName}'s recollection`,
           parentVersion: manifest.edit.version,
           // An alternative is not a saved main version, so it has no version number.
-          edit: { version: adopt ? edit.version : null, ...request.transform },
+          edit: { version: adopt ? edit.version : null, ...fields },
           contributionIds: dependencies,
           createdAt: now,
           createdBy: principal.id,
@@ -413,7 +431,10 @@ export class CollaborationStore {
         review.variantId = variant.id;
         review.version = edit?.version ?? null;
         if (adopt) {
-          editReceipt = { requestId: request.requestId, kind: 'contribution', contributionId, baseVersion: request.baseVersion, ...edit, dependencies };
+          editReceipt = {
+            requestId: request.requestId, kind: 'contribution', contributionId, baseVersion: request.baseVersion, ...edit, dependencies,
+            ...(twoObjects && { targetId: request.transform.targetId }),
+          };
         }
       }
       const updated = {
@@ -443,7 +464,7 @@ export class CollaborationStore {
     return {
       contribution: projectContribution(contribution, true),
       variant: variant ? projectVariant(manifest, variant, sourceBlocked) : null,
-      edit: edit ? { version: edit.version, offset: edit.offset, yaw: edit.yaw } : null,
+      edit: edit ? { version: edit.version, ...editFields(edit) } : null,
     };
   }
 

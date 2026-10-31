@@ -29,7 +29,10 @@ not interpret the sentence with a model. Adoption saves the reviewed transform,
 new version, attribution and decision together. An alternative saves its own
 immutable transform and parent version, leaving the current scene unchanged.
 The photo, inferred surface and human recollection keep their separate roles;
-owner approval does not certify historical truth.
+owner approval does not certify historical truth. In a two-object scene the
+owner chooses which named object the recollection positions; the result keeps
+the other object's transform and the current relationship rule, and a rule it
+would break blocks adoption. See [two objects](OBJECTS.md).
 
 A changed saved version requires another review. An unconfirmed response keeps
 the prepared request for an exact retry; reusing a request ID with different

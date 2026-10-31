@@ -377,7 +377,8 @@ describe('story context and restrictions', () => {
       assert.deepEqual(manifest.views[0].edit, { offset: [0, 0, 0], yaw: 0 });
       assert.equal(manifest.stories.length, 1);
       const [publicStory] = manifest.stories;
-      assert.deepEqual(Object.keys(publicStory).sort(), ['audio', 'captionAuthorLabel', 'cues', 'durationMs', 'id', 'providerLabel', 'title', 'viewId']);
+      assert.deepEqual(Object.keys(publicStory).sort(), ['audio', 'captionAuthorLabel', 'cues', 'durationMs', 'id', 'providerLabel', 'target', 'title', 'viewId']);
+      assert.deepEqual(publicStory.target, { id: 'selected-foreground', label: 'Selected foreground object' });
       assert.equal(publicStory.viewId, viewId);
       assert.notEqual(publicStory.id, story.id);
       const serialized = JSON.stringify(manifest);

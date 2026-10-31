@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { RequestError } from './drafts.mjs';
-import { surfaceMeshes } from './public/photo-scene.js';
+import { objectSurfaceMeshes, surfaceMeshes } from './public/photo-scene.js';
 
 export const TARGET_ID = 'selected-foreground';
 export const ACTIONS = Object.freeze(['translate', 'rotate', 'face_anchor', 'clarify']);
@@ -34,6 +34,7 @@ export const PROPOSAL_MESSAGES = {
   provider: 'The model service could not complete the request.',
   unknown: 'The proposal could not be prepared. Please try again.',
   restricted: 'The owner turned off model processing or stopped using this photo, so no proposal is offered. A model request that was already sent may still count toward usage.',
+  relationship: 'This change would break the relationship preserved for this arrangement. Nothing was changed. Keep that relationship or explicitly change it before trying again.',
 };
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -51,10 +52,13 @@ function readable(body, keys, valid) {
   return { ...body };
 }
 
-export function parseProposalRequest(body) {
-  const request = readable(body, ['requestId', 'baseVersion', 'text', 'consent'], ({ requestId, baseVersion, text, consent }) =>
+export function parseProposalRequest(body, { targetIds = null } = {}) {
+  const targeted = Array.isArray(targetIds);
+  const keys = ['requestId', 'baseVersion', 'text', 'consent', ...(targeted ? ['targetId'] : [])];
+  const request = readable(body, keys, ({ requestId, baseVersion, text, consent, targetId }) =>
     isRequestId(requestId) && isVersion(baseVersion) && typeof text === 'string' && text.trim() !== ''
-    && Array.from(text).length <= TEXT_LIMIT && typeof consent === 'boolean');
+    && Array.from(text).length <= TEXT_LIMIT && typeof consent === 'boolean'
+    && (!targeted || targetIds.includes(targetId)));
   if (request.consent !== true) throw new RequestError(403, 'Sending the photo and message to the model needs explicit consent.');
   return request;
 }
@@ -65,15 +69,17 @@ export const parseApplyRequest = (body) =>
   readable(body, ['requestId', 'baseVersion', 'frontConfirmed'], ({ requestId, baseVersion, frontConfirmed }) =>
     isRequestId(requestId) && isVersion(baseVersion) && typeof frontConfirmed === 'boolean');
 
-export const parseUndoRequest = (body) =>
-  readable(body, ['requestId', 'baseVersion', 'targetVersion'], ({ requestId, baseVersion, targetVersion }) =>
-    isRequestId(requestId) && isVersion(baseVersion) && isVersion(targetVersion));
+export const parseUndoRequest = (body, { twoObjects = false } = {}) =>
+  readable(body, ['requestId', 'baseVersion', 'targetVersion', ...(twoObjects ? ['ruleChangeConfirmed'] : [])], ({ requestId, baseVersion, targetVersion, ruleChangeConfirmed }) =>
+    isRequestId(requestId) && isVersion(baseVersion) && isVersion(targetVersion)
+    && (!twoObjects || typeof ruleChangeConfirmed === 'boolean'));
 
-export function newProposal({ id, requestId, baseVersion, text, statementId, now }) {
+export function newProposal({ id, requestId, baseVersion, text, statementId, now, targetId = null }) {
   return {
     id,
     requestId,
     baseVersion,
+    ...(targetId !== null && { targetId }),
     statement: { id: statementId, kind: 'human_memory', text, sha256: createHash('sha256').update(text, 'utf8').digest('hex'), modelConsent: true },
     createdAt: now,
     updatedAt: now,
@@ -96,6 +102,16 @@ export function staleProposals(proposals, version, now) {
 
 // Version 1 is the unedited build; every later version has a stored receipt.
 export function editHistory(manifest) {
+  if (Array.isArray(manifest.objects)) {
+    const entries = manifest.edits.map(({ version, objects, relationship, kind = 'manual', proposalId, targetVersion, targetId }) => ({
+      version, objects: objects.map((item) => ({ ...item, offset: [...item.offset] })), relationship: relationship && { ...relationship }, kind,
+      ...(proposalId !== undefined && { proposalId }),
+      ...(targetVersion !== undefined && { targetVersion }),
+      ...(targetId !== undefined && { targetId }),
+    }));
+    const initial = { version: 1, objects: manifest.objects.map(({ id }) => ({ id, offset: [0, 0, 0], yaw: 0 })), relationship: null, kind: 'initial' };
+    return [initial, ...entries].sort((a, b) => a.version - b.version);
+  }
   const entries = manifest.edits.map(({ version, offset, yaw, kind = 'manual', proposalId, targetVersion }) => ({
     version,
     offset,
@@ -117,19 +133,27 @@ export function wrapYaw(yaw) {
 // exactly as photo-scene.surfaceMeshes places vertices, then returns the yaw
 // that turns the object's visible front (local +z) toward it. Returns null for
 // a point on the foreground or one at the object's current centre.
-export function anchorYaw(surface, [u, v], offset) {
+export function anchorYaw(surface, [u, v], offset, targetId = TARGET_ID) {
   const { width, height, depth, foreground, assumptions } = surface;
   const [imageWidth, imageHeight] = surface.source.image_size;
   const column = Math.round(u * (width - 1));
   const row = Math.round(v * (height - 1));
   const index = row * width + column;
-  if (foreground[index] !== 0) return null;
+  let pivot;
+  if (surface.schema_version === 2) {
+    const selected = surface.objects.findIndex((item) => item.id === targetId);
+    if (selected < 0 || surface.regions[index] !== 0) return null;
+    pivot = objectSurfaceMeshes(surface).objects.find((item) => item.id === targetId)?.pivot;
+    if (!pivot) return null;
+  } else {
+    if (foreground[index] !== 0 || targetId !== TARGET_ID) return null;
+    ({ pivot } = surfaceMeshes(surface).foreground);
+  }
   const tangent = Math.tan((assumptions.horizontal_fov_degrees * Math.PI) / 360);
   const d = depth[index];
   const gridU = column / (width - 1);
   const gridV = row / (height - 1);
   const anchor = [(gridU - 0.5) * 2 * tangent * d, ((0.5 - gridV) * 2 * tangent * d * imageHeight) / imageWidth, -d];
-  const { pivot } = surfaceMeshes(surface).foreground;
   const dx = anchor[0] - (pivot[0] + offset[0]);
   const dz = anchor[2] - (pivot[2] + offset[2]);
   if (Math.hypot(dx, dz) < 1e-6) return null;
@@ -143,7 +167,7 @@ const filled = (value, max) => plain(value, max) && value.trim() !== '';
 // the absolute transform from the saved one. Returns { result } or
 // { error, code }: error is the fixed browser message, code a fixed category
 // for operator logs that never contains model, human or provider text.
-export function validatePlan(plan, { sourceId, baseVersion, saved, surface }) {
+export function validatePlan(plan, { sourceId, baseVersion, saved, surface, targetId: expectedTargetId = TARGET_ID }) {
   const reject = (code, error = PROPOSAL_MESSAGES.invalid) => ({ error, code });
   if (!exactKeys(plan, PLAN_KEYS)) return reject('plan_keys');
   if (!ACTIONS.includes(plan.action)) return reject('action');
@@ -151,6 +175,7 @@ export function validatePlan(plan, { sourceId, baseVersion, saved, surface }) {
   if (plan.sourceId !== sourceId) return reject('source_id');
   if (plan.baseVersion !== baseVersion) return reject('base_version');
   if (!plain(reason, 400)) return reject('reason');
+  if (surface?.schema_version === 2 && !surface.objects.some((item) => item.id === expectedTargetId)) return reject('context_target_id');
   // The first field, in fixed order, that must be null for this action but is not.
   const extra = (fields) => fields.find((field) => plan[field] !== null);
   const result = (transform) => ({ result: { ...plan, delta: delta && [...delta], anchor: anchor && { label: anchor.label, point: [...anchor.point] }, transform } });
@@ -161,7 +186,7 @@ export function validatePlan(plan, { sourceId, baseVersion, saved, surface }) {
     if (!filled(question, 400)) return reject('clarify_question');
     return result(null);
   }
-  if (targetId !== TARGET_ID) return reject(`${action}_target_id`);
+  if (targetId !== expectedTargetId) return reject(`${action}_target_id`);
   if (question !== null) return reject(`${action}_question_not_null`);
   if (action === 'translate') {
     const field = extra(['yawDelta', 'anchor']);
@@ -183,7 +208,7 @@ export function validatePlan(plan, { sourceId, baseVersion, saved, surface }) {
   if (!filled(anchor.label, 120)) return reject('face_anchor_label');
   const { point } = anchor;
   if (!Array.isArray(point) || point.length !== 2 || !point.every((value) => finite(value) && value >= 0 && value <= 1)) return reject('face_anchor_point');
-  const yaw = anchorYaw(surface, point, saved.offset);
+  const yaw = anchorYaw(surface, point, saved.offset, expectedTargetId);
   if (yaw === null) return reject('face_anchor_on_object', PROPOSAL_MESSAGES.anchor);
   return result({ offset: [...saved.offset], yaw });
 }

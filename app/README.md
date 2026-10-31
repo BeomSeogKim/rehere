@@ -34,7 +34,8 @@ can be used to build a partial scene. Select a foreground box, review the
 inferred depth and mask, explore the visible surfaces, and preview a foreground
 move or rotation before saving it. Unseen areas stay empty. This is a local
 model reconstruction from one photograph, not a complete room or calibrated
-geometry.
+geometry. A scene can instead hold exactly two named objects that are confirmed,
+moved and related separately; see [two objects](OBJECTS.md).
 
 Scoped contributors can submit written recollections. Owners can preview a
 manual change, adopt it or preserve an alternative, and record a separate
@@ -42,7 +43,9 @@ explicit time assertion. Withdrawal blocks dependent spatial uses. See the
 [collaboration guide](COLLABORATION.md) for grants, review and restoration.
 
 Recorded stories connect a permitted imported recording to an explicitly chosen
-saved arrangement and the selected foreground object. Human-supplied captions
+saved arrangement and its foreground object, or one named object of a
+two-object scene.
+Human-supplied captions
 and provider attribution accompany a converted playback copy, with explicit
 visitor selection and current withdrawal checks. See [recorded stories](STORIES.md).
 
@@ -171,9 +174,11 @@ is claimed.
 | `GET /api/drafts/<id>/reconstructions/<job>/assets/<name>` | A validated derivative of a ready job |
 | `POST /api/drafts/<id>/reconstructions/<job>/edit` | Save `requestId`, `baseVersion`, `offset` and `yaw` |
 
+Two-object scenes use the request shapes in [the two-object guide](OBJECTS.md).
+
 These controls coordinate one local server process. They do not implement
-multi-process locking, visitor sharing, power-loss durability or the
-full spatial editing contract.
+multi-process locking, power-loss durability or the full spatial editing
+contract.
 
 ## Memory-driven proposals
 

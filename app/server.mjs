@@ -9,9 +9,9 @@ import { ShareStore, UNAVAILABLE as VISIT_UNAVAILABLE, isVisitToken } from './sh
 import { createAudioDecoder } from './audio-derivative.mjs';
 import { StoryStore } from './stories.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
-import { parseApplyRequest, parseCancelRequest, parseProposalRequest, parseUndoRequest } from './memory-proposals.mjs';
+import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
-import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, parseEditRequest, pythonModelImage, pythonRunner } from './reconstructions.mjs';
+import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner } from './reconstructions.mjs';
 
 const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 const DEFAULT_DATA_DIR = fileURLToPath(new URL('./data/', import.meta.url));
@@ -44,6 +44,8 @@ const STATIC_FILES = new Map([
   ['/playback.js', ['playback.js', 'text/javascript; charset=utf-8']],
   ['/story-player.js', ['story-player.js', 'text/javascript; charset=utf-8']],
   ['/stories.js', ['stories.js', 'text/javascript; charset=utf-8']],
+  ['/scene-relations.js', ['scene-relations.js', 'text/javascript; charset=utf-8']],
+  ['/arrangement.js', ['arrangement.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // Pinned local Three.js files. OrbitControls imports the bare specifier
@@ -76,6 +78,8 @@ const PROPOSAL_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/propos
 const PROPOSAL_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals\/([^/]+)\/(cancel|apply)$/;
 const HISTORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/history$/;
 const UNDO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/undo$/;
+const RELATIONSHIP_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/relationship$/;
+const OBJECTS_CONFIRM_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/confirm$/;
 const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
 const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/(contributions|collaboration)$/;
 const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw)$/;
@@ -651,14 +655,13 @@ export function createAppServer({
     }
     const editMatch = JOB_EDIT_PATH.exec(pathname);
     if (editMatch && req.method === 'POST') {
-      const request = parseEditRequest(await readJsonBody(req));
-      sendJson(res, 200, await reconstructions.edit(editMatch[1], editMatch[2], request));
+      // One- and two-object scenes take different bodies; the store reads the scene first.
+      sendJson(res, 200, await reconstructions.edit(editMatch[1], editMatch[2], await readJsonBody(req)));
       return;
     }
     const proposalsMatch = PROPOSALS_PATH.exec(pathname);
     if (proposalsMatch && req.method === 'POST') {
-      const request = parseProposalRequest(await readJsonBody(req));
-      sendJson(res, 202, await reconstructions.createProposal(proposalsMatch[1], proposalsMatch[2], request));
+      sendJson(res, 202, await reconstructions.createProposal(proposalsMatch[1], proposalsMatch[2], await readJsonBody(req)));
       return;
     }
     if (proposalsMatch && reading) {
@@ -692,8 +695,17 @@ export function createAppServer({
     }
     const undoMatch = UNDO_PATH.exec(pathname);
     if (undoMatch && req.method === 'POST') {
-      const request = parseUndoRequest(await readJsonBody(req));
-      sendJson(res, 200, await reconstructions.undo(undoMatch[1], undoMatch[2], request));
+      sendJson(res, 200, await reconstructions.undo(undoMatch[1], undoMatch[2], await readJsonBody(req)));
+      return;
+    }
+    const relationshipMatch = RELATIONSHIP_PATH.exec(pathname);
+    if (relationshipMatch && req.method === 'POST') {
+      sendJson(res, 200, await reconstructions.relationship(relationshipMatch[1], relationshipMatch[2], await readJsonBody(req)));
+      return;
+    }
+    const confirmMatch = OBJECTS_CONFIRM_PATH.exec(pathname);
+    if (confirmMatch && req.method === 'POST') {
+      sendJson(res, 200, await reconstructions.confirmObjects(confirmMatch[1], confirmMatch[2], await readJsonBody(req)));
       return;
     }
     const jobAssetMatch = JOB_ASSET_PATH.exec(pathname);

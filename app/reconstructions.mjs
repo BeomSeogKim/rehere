@@ -8,8 +8,13 @@ import {
 } from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
 import {
-  ACTIVE_PROPOSAL, PROPOSAL_MESSAGES, editHistory, newProposal, pythonImagePreparer, staleProposals, validatePlan,
+  ACTIVE_PROPOSAL, PROPOSAL_MESSAGES, editHistory, newProposal, parseProposalRequest, parseUndoRequest, pythonImagePreparer, staleProposals, validatePlan,
 } from './memory-proposals.mjs';
+import {
+  OBJECT_IDS, arrangementOf, assertObjectsConfirmed, assertRelationship, isTwoObject, objectMarker, objectPivots, withTarget,
+} from './arrangements.mjs';
+import { objectSurfaceMeshes } from './public/photo-scene.js';
+import { checkRelationship } from './public/scene-relations.js';
 import { SourcePolicies, allows } from './source-policies.mjs';
 import { sha256 } from './sources.mjs';
 
@@ -55,10 +60,12 @@ export const pythonModelImage = ({ python = defaultPython() } = {}) => pythonIma
 
 // Spawns the offline worker with server-chosen arguments only.
 export function pythonRunner({ python = defaultPython() } = {}) {
-  return ({ imagePath, outputDir, sourceId, box, signal }) =>
+  return ({ imagePath, outputDir, sourceId, box, objects, signal }) =>
     new Promise((resolve) => {
       const env = workerEnv();
-      const args = [path.join(SPATIAL_DIR, 'reconstruct.py'), '--image', imagePath, '--output', outputDir, '--source-id', sourceId, '--box', ...box.map(String)];
+      // A two-object build sends both admitted labels and boxes, in object order.
+      const selection = objects ? ['--objects', JSON.stringify(objects.map(({ label, box: objectBox }) => ({ label, box: objectBox })))] : ['--box', ...box.map(String)];
+      const args = [path.join(SPATIAL_DIR, 'reconstruct.py'), '--image', imagePath, '--output', outputDir, '--source-id', sourceId, ...selection];
       const child = spawn(python, args, { cwd: SPATIAL_DIR, env, shell: false, stdio: ['ignore', 'ignore', 'pipe'], signal, killSignal: 'SIGKILL' });
       let stderr = '';
       child.stderr.on('data', (chunk) => {
@@ -119,17 +126,87 @@ function exactKeys(value, keys) {
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 
-export function parseBuildRequest(body) {
-  if (!exactKeys(body, ['requestId', 'sourceId', 'box'])) throw new RequestError(400, 'The build request could not be read.');
-  const { requestId, sourceId, box } = body;
-  if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId) || typeof sourceId !== 'string' || !UUID_PATTERN.test(sourceId)) {
-    throw new RequestError(400, 'The build request could not be read.');
-  }
+function parseBox(box) {
   if (!Array.isArray(box) || box.length !== 4 || !box.every(finite)) throw new RequestError(400, 'The selected box could not be read.');
   const [x1, y1, x2, y2] = box;
   if (x1 < 0 || y1 < 0 || !(x2 > x1) || !(y2 > y1)) throw new RequestError(400, 'The selected box must have a size and start inside the photo.');
-  return { requestId, sourceId, box: [x1, y1, x2, y2] };
+  return [x1, y1, x2, y2];
 }
+
+// Frozen limits for a two-object build, recomputed from the delivered grid
+// rather than taken from the worker's summary: each object covers 1-50% of the
+// grid, both together at most 60%, the background and each object keep at
+// least 32 triangles, and a mask overlap is at most 1% of the smaller mask.
+export const MIN_REGION_TRIANGLES = 32;
+export const OBJECT_COVERAGE = Object.freeze({ min: 0.01, max: 0.5, combined: 0.6 });
+export const MAX_OVERLAP_RATIO = 0.01;
+const LABEL_LIMIT = 80;
+const LABEL_CONTROL = /[\u0000-\u001f\u007f]/;
+
+function parseObjects(objects) {
+  if (!Array.isArray(objects) || objects.length !== OBJECT_IDS.length || !objects.every((item) => exactKeys(item, ['label', 'box']))) {
+    throw new RequestError(400, 'The two objects could not be read.');
+  }
+  const parsed = objects.map(({ label, box }, index) => {
+    const name = typeof label === 'string' ? label.trim() : '';
+    if (!name || name.length > LABEL_LIMIT || LABEL_CONTROL.test(name)) throw new RequestError(400, 'Give each object a name of 1 to 80 characters.');
+    return { id: OBJECT_IDS[index], label: name, box: parseBox(box) };
+  });
+  if (parsed[0].label.toLowerCase() === parsed[1].label.toLowerCase()) {
+    throw new RequestError(400, 'Give the two objects different names so each can be told apart.');
+  }
+  return parsed;
+}
+
+export function parseBuildRequest(body) {
+  const twoObjects = exactKeys(body, ['requestId', 'sourceId', 'objects']);
+  if (!twoObjects && !exactKeys(body, ['requestId', 'sourceId', 'box'])) throw new RequestError(400, 'The build request could not be read.');
+  const { requestId, sourceId } = body;
+  if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId) || typeof sourceId !== 'string' || !UUID_PATTERN.test(sourceId)) {
+    throw new RequestError(400, 'The build request could not be read.');
+  }
+  return twoObjects ? { requestId, sourceId, objects: parseObjects(body.objects) } : { requestId, sourceId, box: parseBox(body.box) };
+}
+
+const transformValid = (offset, yaw) => Array.isArray(offset) && offset.length === 3 && offset.every((value) => finite(value) && value >= -2 && value <= 2)
+  && finite(yaw) && yaw >= -Math.PI && yaw <= Math.PI;
+
+export function parseObjectEditRequest(body) {
+  if (!exactKeys(body, ['requestId', 'baseVersion', 'targetId', 'offset', 'yaw'])) throw new RequestError(400, 'The edit could not be read.');
+  const { requestId, baseVersion, targetId, offset, yaw } = body;
+  const valid = typeof requestId === 'string' && UUID_PATTERN.test(requestId) && Number.isInteger(baseVersion) && baseVersion >= 1
+    && OBJECT_IDS.includes(targetId) && transformValid(offset, yaw);
+  if (!valid) throw new RequestError(400, 'The edit could not be read.');
+  return { requestId, baseVersion, targetId, offset: [...offset], yaw };
+}
+
+function parseRule(rule) {
+  if (rule === null) return null;
+  const valid = exactKeys(rule, ['kind', 'leftId', 'rightId', 'frame']) && rule.kind === 'left_of' && rule.frame === 'original-photo'
+    && OBJECT_IDS.includes(rule.leftId) && OBJECT_IDS.includes(rule.rightId) && rule.leftId !== rule.rightId;
+  if (!valid) throw new RequestError(400, 'The relationship could not be read.');
+  return { kind: 'left_of', leftId: rule.leftId, rightId: rule.rightId, frame: 'original-photo' };
+}
+
+export function parseRelationshipRequest(body) {
+  if (!exactKeys(body, ['requestId', 'baseVersion', 'relationship', 'confirmed'])) throw new RequestError(400, 'The relationship could not be read.');
+  const { requestId, baseVersion, confirmed } = body;
+  if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId) || !Number.isInteger(baseVersion) || baseVersion < 1) {
+    throw new RequestError(400, 'The relationship could not be read.');
+  }
+  if (confirmed !== true) throw new RequestError(400, 'Confirm the relationship change before saving it.');
+  return { requestId, baseVersion, relationship: parseRule(body.relationship) };
+}
+
+function parseConfirmRequest(body) {
+  const valid = exactKeys(body, ['requestId', 'objectIds']) && typeof body.requestId === 'string' && UUID_PATTERN.test(body.requestId)
+    && Array.isArray(body.objectIds) && body.objectIds.length === OBJECT_IDS.length && new Set(body.objectIds).size === OBJECT_IDS.length
+    && body.objectIds.every((id) => OBJECT_IDS.includes(id));
+  if (!valid) throw new RequestError(400, 'The confirmation could not be read.');
+  return { requestId: body.requestId };
+}
+
+
 
 export function parseEditRequest(body) {
   if (!exactKeys(body, ['requestId', 'baseVersion', 'offset', 'yaw'])) throw new RequestError(400, 'The edit could not be read.');
@@ -159,6 +236,14 @@ export function publicManifest(manifest, source = { place: true, model: true }) 
   const contributionBlocked = usageBlocked(manifest);
   return {
     ...rest,
+    // Labels are the owner's text about the photo; without its place use only
+    // fixed markers are shown. The stored labels are kept on disk.
+    ...(isTwoObject(manifest) && {
+      objects: manifest.objects.map(({ id, label, box, pivot }) => ({
+        id, label: source.place ? label : objectMarker(id), box: [...box], pivot: pivot ? [...pivot] : null,
+      })),
+      objectsConfirmed: Boolean(manifest.objectsConfirmed),
+    }),
     usageBlocked: sourceBlocked || contributionBlocked,
     modelBlocked: sourceBlocked || (ready && !source.model) || modelBlocked(manifest),
     blockedReason: sourceBlocked ? 'source' : contributionBlocked ? 'contribution' : null,
@@ -234,6 +319,59 @@ function checkSurface(surface, summary, expected) {
   if (!Array.isArray(foreground) || foreground.length !== cells || !foreground.every((value) => value === 0 || value === 1)) return false;
   if (!hasRenderableRegions(width, height, depth, foreground, assumptions.max_triangle_depth_span)) return false;
   return summary?.source_id === expected.sourceId && summary?.source_sha256 === expected.sourceSha256 && summary?.texture_sha256 === expected.textureSha256;
+}
+
+// A two-object surface must match the admitted request exactly and leave
+// enough triangles for the background and each object. Returns the pivots the
+// renderer will use, computed once by the same pure mesh code.
+function checkObjectSurface(surface, summary, expected) {
+  const { width, height, depth, regions, source, assumptions, objects } = surface ?? {};
+  if (surface?.schema_version !== 2) return null;
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2 || width * height > 262_144) return null;
+  if (source?.source_id !== expected.sourceId || source?.sha256 !== expected.sourceSha256) return null;
+  if (!sameValues(source.image_size, [expected.width, expected.height])) return null;
+  const requested = expected.objects.map(({ id, label, box }) => ({ id, label, box_xyxy: box }));
+  if (!sameValues(source.selected_objects, requested) || !sameValues(objects, requested)) return null;
+  if (source.texture?.file !== 'texture.jpg' || source.texture?.sha256 !== expected.textureSha256) return null;
+  const fov = assumptions?.horizontal_fov_degrees;
+  const { near, far, max_triangle_depth_span: span } = assumptions ?? {};
+  if (!finite(fov) || !(fov > 0 && fov < 180) || !finite(near) || !finite(far) || !(near > 0) || !(far > near) || !finite(span) || !(span > 0)) return null;
+  const cells = width * height;
+  if (!Array.isArray(depth) || depth.length !== cells || !depth.every((value) => finite(value) && value >= near - 1e-5 && value <= far + 1e-5)) return null;
+  if (!Array.isArray(regions) || regions.length !== cells || !regions.every((value) => value === -1 || value === 0 || value === 1 || value === 2)) return null;
+  if (summary?.source_id !== expected.sourceId || summary?.source_sha256 !== expected.sourceSha256 || summary?.texture_sha256 !== expected.textureSha256) return null;
+  const coverage = [1, 2].map((region) => regions.filter((value) => value === region).length / cells);
+  if (!coverage.every((value) => value >= OBJECT_COVERAGE.min && value <= OBJECT_COVERAGE.max)) return null;
+  if (coverage[0] + coverage[1] > OBJECT_COVERAGE.combined) return null;
+  // Void cells exist exactly when the masks overlapped, and the overlap is small.
+  const overlap = summary.overlap;
+  if (!exactKeys(overlap, ['pixels', 'ratio']) || !Number.isInteger(overlap.pixels) || overlap.pixels < 0) return null;
+  if (!finite(overlap.ratio) || overlap.ratio < 0 || overlap.ratio > MAX_OVERLAP_RATIO || (overlap.pixels === 0) !== (overlap.ratio === 0)) return null;
+  if (regions.includes(-1) !== overlap.pixels > 0) return null;
+  let meshes;
+  try {
+    meshes = objectSurfaceMeshes(surface);
+  } catch {
+    return null;
+  }
+  const enough = (part) => part.indices.length / 3 >= MIN_REGION_TRIANGLES;
+  if (!enough(meshes.background) || meshes.objects.length !== OBJECT_IDS.length || !meshes.objects.every(enough)) return null;
+  const pivots = meshes.objects.map(({ id, pivot }) => ({ id, pivot: [...pivot] }));
+  if (!pivots.every(({ id, pivot }, index) => id === OBJECT_IDS[index] && Array.isArray(pivot) && pivot.length === 3 && pivot.every(finite))) return null;
+  return pivots;
+}
+
+// Arguments the model adapter receives for a two-object scene: the selected
+// target, both objects with their labels, boxes and saved transforms, and the rule.
+function modelContext(manifest, targetId) {
+  return {
+    targetId,
+    objects: manifest.objects.map(({ id, label, box }) => {
+      const saved = manifest.edit.objects.find((item) => item.id === id);
+      return { id, label, box: [...box], offset: [...saved.offset], yaw: saved.yaw };
+    }),
+    relationship: manifest.edit.relationship ? { ...manifest.edit.relationship } : null,
+  };
 }
 
 const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -399,15 +537,19 @@ export class ReconstructionStore {
     const accepted = await this.serialize(async () => {
       const existing = await this.findRequest(request.requestId);
       if (existing) {
-        if (existing.draftId !== draftId || existing.sourceId !== request.sourceId || !sameValues(existing.box, request.box)) {
+        const sameSelection = request.objects
+          ? sameValues(existing.objects?.map(({ id, label, box }) => ({ id, label, box })), request.objects)
+          : !existing.objects && sameValues(existing.box, request.box);
+        if (existing.draftId !== draftId || existing.sourceId !== request.sourceId || !sameSelection) {
           throw new RequestError(409, 'This build request was already used for a different photo or box.');
         }
         return { manifest: existing, start: false };
       }
       const { source, imagePath, size } = await this.verifiedOriginal(draftId, request.sourceId);
-      const [, , x2, y2] = request.box;
-      if (x2 > size.width || y2 > size.height) {
-        throw new RequestError(400, `The selected box must stay inside the photo (${size.width} x ${size.height} pixels).`);
+      for (const [, , x2, y2] of request.objects ? request.objects.map((item) => item.box) : [request.box]) {
+        if (x2 > size.width || y2 > size.height) {
+          throw new RequestError(400, `The selected box must stay inside the photo (${size.width} x ${size.height} pixels).`);
+        }
       }
       if (this.closed) throw new RequestError(503, 'The app is shutting down. Try again later.');
       if (this.active) throw new RequestError(409, 'Another scene is being built right now. Try again when it finishes.');
@@ -418,14 +560,18 @@ export class ReconstructionStore {
         draftId,
         sourceId: request.sourceId,
         sourceSha256: source.sha256,
-        box: request.box,
+        ...(request.objects
+          ? { objects: request.objects.map((item) => ({ ...item, box: [...item.box], pivot: null })), objectsConfirmed: null }
+          : { box: request.box }),
         requestId: request.requestId,
         status: 'queued',
         createdAt: now,
         updatedAt: now,
         error: null,
         derivedAssets: [],
-        edit: { version: 1, offset: [0, 0, 0], yaw: 0 },
+        edit: request.objects
+          ? { version: 1, objects: OBJECT_IDS.map((id) => ({ id, offset: [0, 0, 0], yaw: 0 })), relationship: null }
+          : { version: 1, offset: [0, 0, 0], yaw: 0 },
         edits: [],
       };
       await mkdir(this.jobDir(draftId, manifest.id), { recursive: true });
@@ -486,7 +632,8 @@ export class ReconstructionStore {
         }
         let started;
         try {
-          started = Promise.resolve(this.runner({ imagePath, outputDir, sourceId: manifest.sourceId, box: manifest.box, signal: controller.signal }));
+          const selection = isTwoObject(manifest) ? { objects: manifest.objects.map(({ id, label, box }) => ({ id, label, box })) } : { box: manifest.box };
+          started = Promise.resolve(this.runner({ imagePath, outputDir, sourceId: manifest.sourceId, ...selection, signal: controller.signal }));
         } catch (error) {
           started = Promise.reject(error);
         }
@@ -503,7 +650,8 @@ export class ReconstructionStore {
         manifest = await this.serialize(() => this.update(manifest, { status: 'failed', error: failureMessage(result ?? {}) }));
         return;
       }
-      const derivedAssets = await this.verifyOutputs(outputDir, manifest, size);
+      const verified = await this.verifyOutputs(outputDir, manifest, size);
+      const derivedAssets = verified?.derivedAssets;
       if (!derivedAssets) {
         manifest = await this.serialize(() => (controller.signal.aborted ? stopped() : this.update(manifest, { status: 'failed', error: MESSAGES.invalidOutput })));
         return;
@@ -519,7 +667,9 @@ export class ReconstructionStore {
           await rm(assetsDir, { recursive: true, force: true });
           return stopped();
         }
-        return this.update(manifest, { status: 'ready', derivedAssets });
+        // The pivots are computed once from the verified surface and never change.
+        const objects = verified.pivots && manifest.objects.map((item) => ({ ...item, pivot: verified.pivots.find((entry) => entry.id === item.id).pivot }));
+        return this.update(manifest, { status: 'ready', derivedAssets, ...(objects && { objects }) });
       });
     } catch (error) {
       console.error('reconstruction failed:', error?.code ?? error?.name ?? 'error');
@@ -558,9 +708,15 @@ export class ReconstructionStore {
     } catch {
       return null;
     }
-    const expected = { ...size, sourceId: manifest.sourceId, sourceSha256: manifest.sourceSha256, box: manifest.box, textureSha256: sha256(files['texture.jpg']) };
-    if (!checkSurface(surface, summary, expected)) return null;
-    return Object.keys(OUTPUTS).map((name) => ({
+    const expected = { ...size, sourceId: manifest.sourceId, sourceSha256: manifest.sourceSha256, box: manifest.box, objects: manifest.objects, textureSha256: sha256(files['texture.jpg']) };
+    let pivots = null;
+    if (isTwoObject(manifest)) {
+      pivots = checkObjectSurface(surface, summary, expected);
+      if (!pivots) return null;
+    } else if (!checkSurface(surface, summary, expected)) {
+      return null;
+    }
+    const derivedAssets = Object.keys(OUTPUTS).map((name) => ({
       name,
       type: OUTPUTS[name].type,
       size: files[name].length,
@@ -568,13 +724,16 @@ export class ReconstructionStore {
       parentSourceId: manifest.sourceId,
       role: 'derived',
     }));
+    return { derivedAssets, pivots };
   }
 
-  async edit(draftId, jobId, request) {
+  async edit(draftId, jobId, body) {
     await this.recover();
     return this.serialize(async () => {
       const manifest = await this.readManifest(draftId, jobId);
       if (!manifest) throw new RequestError(404, 'This scene could not be found.');
+      if (isTwoObject(manifest)) return this.#editObject(manifest, parseObjectEditRequest(body));
+      const request = parseEditRequest(body);
       const previous = manifest.edits.find((item) => item.requestId === request.requestId);
       if (previous) {
         if ((previous.kind ?? 'manual') !== 'manual' || previous.baseVersion !== request.baseVersion || !sameValues(previous.offset, request.offset) || previous.yaw !== request.yaw) {
@@ -591,6 +750,84 @@ export class ReconstructionStore {
       const edit = { version: manifest.edit.version + 1, offset: request.offset, yaw: request.yaw };
       await this.saveVersion(manifest, edit, { requestId: request.requestId, baseVersion: request.baseVersion, ...edit, dependencies: currentDependencies(manifest) });
       return edit;
+    });
+  }
+
+  // Callers hold the mutex. Common checks before a new two-object version.
+  async #objectVersionAllowed(manifest, baseVersion) {
+    if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
+    await this.permittedPhoto(manifest.draftId, manifest.sourceId);
+    if (baseVersion !== manifest.edit.version) {
+      throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before applying this edit.');
+    }
+    assertSceneUsable(manifest, 'place');
+    assertObjectsConfirmed(manifest);
+  }
+
+  // Moves or turns one object. The server starts from the whole saved
+  // arrangement, so the other object and the rule cannot be changed here.
+  async #editObject(manifest, request) {
+    const previous = manifest.edits.find((item) => item.requestId === request.requestId);
+    if (previous) {
+      const same = previous.kind === 'manual' && previous.baseVersion === request.baseVersion && previous.targetId === request.targetId
+        && sameValues(previous.request, { offset: request.offset, yaw: request.yaw });
+      if (!same) throw new RequestError(409, 'This edit request was already used with different values.');
+      return { version: previous.version, ...arrangementOf(previous) };
+    }
+    await this.#objectVersionAllowed(manifest, request.baseVersion);
+    const arrangement = withTarget(arrangementOf(manifest.edit), request.targetId, request);
+    assertRelationship(manifest, arrangement);
+    const edit = { version: manifest.edit.version + 1, ...arrangement };
+    await this.saveVersion(manifest, edit, {
+      requestId: request.requestId, kind: 'manual', targetId: request.targetId, request: { offset: request.offset, yaw: request.yaw },
+      baseVersion: request.baseVersion, ...edit, dependencies: currentDependencies(manifest),
+    });
+    return edit;
+  }
+
+  // Saves, changes or removes the one relationship rule as a new version. The
+  // rule must already hold for the saved arrangement.
+  async relationship(draftId, jobId, body) {
+    await this.recover();
+    return this.serialize(async () => {
+      const manifest = await this.editableScene(draftId, jobId);
+      if (!isTwoObject(manifest)) throw new RequestError(409, 'This scene has one object, so it has no relationship to set.');
+      const request = parseRelationshipRequest(body);
+      const previous = manifest.edits.find((item) => item.requestId === request.requestId);
+      if (previous) {
+        if (previous.kind !== 'relationship' || previous.baseVersion !== request.baseVersion || !sameValues(previous.relationship, request.relationship)) {
+          throw new RequestError(409, 'This request was already used with different values.');
+        }
+        return { version: previous.version, ...arrangementOf(previous) };
+      }
+      await this.#objectVersionAllowed(manifest, request.baseVersion);
+      if (sameValues(manifest.edit.relationship, request.relationship)) throw new RequestError(409, 'This relationship is already saved.');
+      const arrangement = { ...arrangementOf(manifest.edit), relationship: request.relationship };
+      assertRelationship(manifest, arrangement);
+      const edit = { version: manifest.edit.version + 1, ...arrangement };
+      await this.saveVersion(manifest, edit, {
+        requestId: request.requestId, kind: 'relationship', baseVersion: request.baseVersion, ...edit, dependencies: currentDependencies(manifest),
+      });
+      return edit;
+    });
+  }
+
+  // Records once that the owner checked both outlined objects. Not a version.
+  async confirmObjects(draftId, jobId, body) {
+    await this.recover();
+    return this.serialize(async () => {
+      const manifest = await this.editableScene(draftId, jobId);
+      if (!isTwoObject(manifest)) throw new RequestError(409, 'This scene has one object, so there is nothing to confirm.');
+      const { requestId } = parseConfirmRequest(body);
+      if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be confirmed.');
+      await this.permittedPhoto(draftId, manifest.sourceId);
+      let current = manifest;
+      if (!manifest.objectsConfirmed) {
+        if (!(await this.sourceUses(draftId, manifest.sourceId)).place) throw new RequestError(403, SOURCE_BLOCKED_MESSAGE);
+        current = await this.update(manifest, { objectsConfirmed: { requestId, confirmedAt: new Date().toISOString() } });
+      }
+      const { objects, objectsConfirmed } = publicManifest(current, await this.sourceUses(draftId, manifest.sourceId));
+      return { objects, objectsConfirmed };
     });
   }
 
@@ -642,14 +879,16 @@ export class ReconstructionStore {
     return editHistory(manifest).map((entry) => ({ ...entry, blocked: !place || dependenciesBlocked(manifest, versionDependencies(manifest, entry.version)) }));
   }
 
-  async createProposal(draftId, jobId, request) {
+  async createProposal(draftId, jobId, body) {
     await this.recover();
     const accepted = await this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
+      const twoObjects = isTwoObject(manifest);
+      const request = parseProposalRequest(body, { targetIds: twoObjects ? [...OBJECT_IDS] : null });
       const proposals = manifest.proposals ?? [];
       const existing = proposals.find((item) => item.requestId === request.requestId);
       if (existing) {
-        if (existing.baseVersion !== request.baseVersion || existing.statement.text !== request.text) {
+        if (existing.baseVersion !== request.baseVersion || existing.statement.text !== request.text || (existing.targetId ?? null) !== (request.targetId ?? null)) {
           throw new RequestError(409, 'This proposal request was already used with a different message or version.');
         }
         return { proposal: await this.projectProposal(manifest, existing), start: false };
@@ -663,11 +902,12 @@ export class ReconstructionStore {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before asking for a proposal.');
       }
       assertSceneUsable(manifest, 'model');
+      assertObjectsConfirmed(manifest);
       if (!this.proposalModel) throw new RequestError(503, 'Memory-based editing with the hosted model is not set up on this computer.');
       if (this.closed) throw new RequestError(503, 'The app is shutting down. Try again later.');
       if (this.activeProposal) throw new RequestError(409, 'Another proposal is being prepared right now. Try again when it finishes.');
       const now = new Date().toISOString();
-      const proposal = newProposal({ id: randomUUID(), statementId: randomUUID(), now, ...request });
+      const proposal = newProposal({ id: randomUUID(), statementId: randomUUID(), now, ...request, targetId: request.targetId ?? null });
       const stored = await this.update(manifest, { proposals: [...proposals, proposal] });
       // close() may have started while the record was being written; never start a call after it.
       if (this.closed) {
@@ -676,9 +916,15 @@ export class ReconstructionStore {
         return { proposal: interrupted, start: false };
       }
       this.activeProposal = { id: proposal.id, draftId, jobId, sourceId: manifest.sourceId, controller: new AbortController(), done: null };
-      const [x1, y1, x2, y2] = manifest.box;
+      // For two objects the model sees the selected object's box and transform,
+      // plus the whole arrangement as context; it may change only that object.
+      const target = twoObjects ? manifest.objects.find((item) => item.id === request.targetId) : null;
+      const box = target ? target.box : manifest.box;
+      const [x1, y1, x2, y2] = box;
       const selection = [x1 / size.width, y1 / size.height, x2 / size.width, y2 / size.height];
-      return { proposal, start: true, imagePath, selection, box: manifest.box, sourceId: manifest.sourceId, saved: manifest.edit };
+      const targetSaved = target && manifest.edit.objects.find((item) => item.id === target.id);
+      const saved = targetSaved ? { offset: [...targetSaved.offset], yaw: targetSaved.yaw } : manifest.edit;
+      return { proposal, start: true, imagePath, selection, box, sourceId: manifest.sourceId, saved, context: twoObjects ? modelContext(manifest, request.targetId) : null };
     });
     if (accepted.start) this.activeProposal.done = this.runProposal(draftId, jobId, accepted);
     return accepted.proposal;
@@ -700,7 +946,7 @@ export class ReconstructionStore {
 
   // The model runs outside the manifest mutex. Its result is committed only if
   // the proposal is still processing and the saved version is unchanged.
-  async runProposal(draftId, jobId, { proposal, imagePath, selection, box, sourceId, saved }) {
+  async runProposal(draftId, jobId, { proposal, imagePath, selection, box, sourceId, saved, context }) {
     const { controller } = this.activeProposal;
     const { signal } = controller;
     const finish = (changes) => this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current) => (current.status === 'processing' ? changes : null)));
@@ -753,7 +999,7 @@ export class ReconstructionStore {
           if (now?.status !== 'processing' || dependencyIssue(scene, currentDependencies(scene), 'model')) return null;
           return { value: start() };
         });
-        return { call: this.proposalModel({ text: proposal.statement.text, image, selection, sourceId, baseVersion: proposal.baseVersion, saved, signal, admit }) };
+        return { call: this.proposalModel({ text: proposal.statement.text, image, selection, sourceId, baseVersion: proposal.baseVersion, saved, signal, admit, ...context }) };
       });
       if (!dispatched) return;
       const outcome = await dispatched.call;
@@ -771,13 +1017,22 @@ export class ReconstructionStore {
         if (!outcome?.ok) {
           return { ...record, status: 'failed', error: PROPOSAL_MESSAGES[outcome?.reason] ?? PROPOSAL_MESSAGES.provider };
         }
-        const checked = validatePlan(outcome.plan, { sourceId, baseVersion: current.baseVersion, saved: manifest.edit, surface });
+        const twoObjects = isTwoObject(manifest);
+        const targetSaved = twoObjects ? manifest.edit.objects.find((item) => item.id === current.targetId) : manifest.edit;
+        const checked = validatePlan(outcome.plan, {
+          sourceId, baseVersion: current.baseVersion, saved: targetSaved, surface, ...(twoObjects && { targetId: current.targetId }),
+        });
         if (checked.error) {
           console.error(`proposal ${current.id} plan rejected: ${checked.code}`);
           return { ...record, status: 'failed', error: checked.error };
         }
         const { result } = checked;
         if (result.action === 'clarify') return { ...record, status: 'clarify', result, question: result.question };
+        // The candidate is merged into the whole arrangement and must keep its rule.
+        if (twoObjects && !checkRelationship(withTarget(arrangementOf(manifest.edit), current.targetId, result.transform), objectPivots(manifest)).ok) {
+          console.error(`proposal ${current.id} plan rejected: relationship`);
+          return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.relationship };
+        }
         return { ...record, status: 'ready', result };
       }); });
     } catch (error) {
@@ -815,7 +1070,8 @@ export class ReconstructionStore {
         if (previous.kind !== 'proposal' || previous.proposalId !== proposalId || previous.baseVersion !== request.baseVersion || previous.frontConfirmed !== request.frontConfirmed) {
           throw new RequestError(409, 'This apply request was already used with different values.');
         }
-        return { edit: { version: previous.version, offset: previous.offset, yaw: previous.yaw }, proposal: await this.projectProposal(manifest, proposal) };
+        const replayed = isTwoObject(manifest) ? { version: previous.version, ...arrangementOf(previous) } : { version: previous.version, offset: previous.offset, yaw: previous.yaw };
+        return { edit: replayed, proposal: await this.projectProposal(manifest, proposal) };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
       await this.permittedPhoto(draftId, manifest.sourceId);
@@ -831,11 +1087,20 @@ export class ReconstructionStore {
         throw new RequestError(409, 'Confirm that the visible side of the object is its front before applying this turn.');
       }
       assertSceneUsable(manifest, 'model');
+      assertObjectsConfirmed(manifest);
       const { offset, yaw } = proposal.result.transform;
-      const edit = { version: manifest.edit.version + 1, offset: [...offset], yaw };
+      let edit;
+      if (isTwoObject(manifest)) {
+        const arrangement = withTarget(arrangementOf(manifest.edit), proposal.targetId, { offset, yaw });
+        assertRelationship(manifest, arrangement);
+        edit = { version: manifest.edit.version + 1, ...arrangement };
+      } else {
+        edit = { version: manifest.edit.version + 1, offset: [...offset], yaw };
+      }
       const applied = { ...proposal, status: 'applied', appliedVersion: edit.version, updatedAt: new Date().toISOString() };
       const receipt = {
         requestId: request.requestId, kind: 'proposal', proposalId, frontConfirmed: request.frontConfirmed, baseVersion: request.baseVersion, ...edit,
+        ...(proposal.targetId !== undefined && { targetId: proposal.targetId }),
         dependencies: currentDependencies(manifest),
       };
       await this.saveVersion(manifest, edit, receipt, proposals.map((item) => (item.id === proposalId ? applied : item)));
@@ -843,19 +1108,23 @@ export class ReconstructionStore {
     });
   }
 
-  async undo(draftId, jobId, request) {
+  async undo(draftId, jobId, body) {
     await this.recover();
     return this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
+      const twoObjects = isTwoObject(manifest);
+      const request = parseUndoRequest(body, { twoObjects });
       const previous = manifest.edits.find((item) => item.requestId === request.requestId);
       if (previous) {
-        if (previous.kind !== 'undo' || previous.baseVersion !== request.baseVersion || previous.targetVersion !== request.targetVersion) {
+        if (previous.kind !== 'undo' || previous.baseVersion !== request.baseVersion || previous.targetVersion !== request.targetVersion
+          || (twoObjects && previous.ruleChangeConfirmed !== request.ruleChangeConfirmed)) {
           throw new RequestError(409, 'This undo request was already used with different values.');
         }
-        return { version: previous.version, offset: previous.offset, yaw: previous.yaw };
+        return twoObjects ? { version: previous.version, ...arrangementOf(previous) } : { version: previous.version, offset: previous.offset, yaw: previous.yaw };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
       await this.permittedPhoto(draftId, manifest.sourceId);
+      assertObjectsConfirmed(manifest);
       if (request.baseVersion !== manifest.edit.version) {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before undoing.');
       }
@@ -864,6 +1133,19 @@ export class ReconstructionStore {
       // Undo is the way out of a blocked scene, so it checks the target, not the current version.
       const dependencies = versionDependencies(manifest, target.version);
       if (dependenciesBlocked(manifest, dependencies)) throw new RequestError(409, 'That saved version depends on a withdrawn contribution and cannot be restored.');
+      if (twoObjects) {
+        // Restoring a version also restores its rule; a different rule needs explicit confirmation.
+        const arrangement = arrangementOf(target);
+        if (!sameValues(arrangement.relationship, manifest.edit.relationship) && request.ruleChangeConfirmed !== true) {
+          throw new RequestError(409, 'Restoring this version also changes the relationship between the objects. Confirm that change to continue.');
+        }
+        assertRelationship(manifest, arrangement);
+        const edit = { version: manifest.edit.version + 1, ...arrangement };
+        await this.saveVersion(manifest, edit, {
+          requestId: request.requestId, kind: 'undo', targetVersion: target.version, ruleChangeConfirmed: request.ruleChangeConfirmed, baseVersion: request.baseVersion, ...edit, dependencies,
+        });
+        return edit;
+      }
       const edit = { version: manifest.edit.version + 1, offset: [...target.offset], yaw: target.yaw };
       await this.saveVersion(manifest, edit, { requestId: request.requestId, kind: 'undo', targetVersion: target.version, baseVersion: request.baseVersion, ...edit, dependencies });
       return edit;

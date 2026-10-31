@@ -4,7 +4,9 @@
 
 import * as THREE from '/vendor/three.module.js';
 import { OrbitControls } from '/vendor/OrbitControls.js';
-import { createSceneObjects, facingGuide, surfacePoint } from './photo-scene.js';
+// A namespace import: the two-object builder is looked up only for a
+// two-object surface, so the legacy viewer never depends on it.
+import * as photoScene from './photo-scene.js';
 
 // Camera limits the viewer itself enforces; a saved camera must stay within them.
 export const CAMERA_LIMITS = Object.freeze({ coordinate: 50, minDistance: 0.5, maxDistance: 8 });
@@ -14,7 +16,9 @@ export const CAMERA_LIMITS = Object.freeze({ coordinate: 50, minDistance: 0.5, m
 // of showing a blank or untextured scene as if it had worked.
 // Every allocation registers its release as soon as it exists, so a failure at
 // any later step frees what was already created.
-export async function createViewer(viewport, surface, textureUrl, label) {
+// onDraw, when given, runs after every frame is drawn (camera moves included),
+// for anything placed over the canvas.
+export async function createViewer(viewport, surface, textureUrl, label, { onDraw = null } = {}) {
   const releases = [];
   let released = false;
   const release = () => {
@@ -29,14 +33,14 @@ export async function createViewer(viewport, surface, textureUrl, label) {
     }
   };
   try {
-    return await setUpViewer(viewport, surface, textureUrl, label, releases, release);
+    return await setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw);
   } catch (error) {
     release();
     throw error;
   }
 }
 
-async function setUpViewer(viewport, surface, textureUrl, label, releases, release) {
+async function setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw) {
   let renderer;
   try {
     renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -56,16 +60,24 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   }
   releases.push(() => texture.dispose());
   texture.colorSpace = THREE.SRGBColorSpace;
-  const objects = createSceneObjects(THREE, surface, texture);
+  const twoObjects = surface?.schema_version === 2;
+  if (twoObjects && typeof photoScene.createObjectSceneObjects !== 'function') throw new Error('unsupported');
+  const objects = twoObjects ? photoScene.createObjectSceneObjects(THREE, surface, texture) : photoScene.createSceneObjects(THREE, surface, texture);
+  const meshes = twoObjects ? [objects.background, ...objects.objects.map((object) => object.mesh)] : [objects.background, objects.foreground];
   releases.push(() => {
-    for (const mesh of [objects.background, objects.foreground]) {
+    for (const mesh of meshes) {
       mesh.geometry.dispose();
       mesh.material.dispose();
     }
   });
   objects.scene.background = new THREE.Color(0x161b20);
 
-  const camera = new THREE.PerspectiveCamera(objects.verticalFovDegrees, 1, 0.01, 50);
+  // The vertical field of view follows from the horizontal one and the photo's
+  // aspect, as the surface builder computes it.
+  const [imageWidth, imageHeight] = surface.source.image_size;
+  const tangent = Math.tan((surface.assumptions.horizontal_fov_degrees * Math.PI) / 360);
+  const verticalFov = objects.verticalFovDegrees ?? (2 * Math.atan((tangent * imageHeight) / imageWidth) * 180) / Math.PI;
+  const camera = new THREE.PerspectiveCamera(verticalFov, 1, 0.01, 50);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   const canvas = renderer.domElement;
   canvas.tabIndex = 0;
@@ -78,7 +90,10 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   controls.minDistance = CAMERA_LIMITS.minDistance;
   controls.maxDistance = CAMERA_LIMITS.maxDistance;
   controls.listenToKeyEvents(canvas);
-  const draw = () => renderer.render(objects.scene, camera);
+  const draw = () => {
+    renderer.render(objects.scene, camera);
+    onDraw?.();
+  };
   controls.addEventListener('change', draw);
 
   // The photo was taken from the origin looking down -z; the target sits inside
@@ -106,6 +121,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   // A face-anchor preview draws the photographed side as an arrow and a line to
   // the target point, so a person can check the relation before applying.
   let guide = null;
+  let arrangement = null;
   const clearGuide = () => {
     if (!guide) return;
     objects.scene.remove(guide.group);
@@ -122,15 +138,20 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
 
   return {
     originalView: () => look([0, 0, 0]),
-    showGuide(transform, point) {
+    showGuide(transform, point, targetId = null) {
       clearGuide();
       if (!transform || !point) {
         draw();
         return null;
       }
-      const centre = objects.pivot.map((value, axis) => value + transform.offset[axis]);
-      const target = surfacePoint(surface, point);
-      const relation = facingGuide(centre, transform.yaw, target);
+      const pivot = twoObjects ? objects.objects.find((object) => object.id === targetId)?.pivot : objects.pivot;
+      if (!pivot) {
+        draw();
+        return null;
+      }
+      const centre = pivot.map((value, axis) => value + transform.offset[axis]);
+      const target = photoScene.surfacePoint(surface, point);
+      const relation = photoScene.facingGuide(centre, transform.yaw, target);
       const group = new THREE.Group();
       const arrow = new THREE.ArrowHelper(new THREE.Vector3(...relation.direction), new THREE.Vector3(...centre), 0.6, 0xffd400, 0.15, 0.08);
       // The level line is what the turn can face; the drop line joins it to
@@ -155,6 +176,19 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     // The camera as two finite vectors, for snapshots that must restore the
     // exact view later.
     getCamera: () => ({ position: camera.position.toArray(), target: controls.target.toArray() }),
+    // Where each object's visible centre appears on screen now, in viewport
+    // pixels, for text labels drawn over the canvas. Two-object surfaces only.
+    projectCentres() {
+      if (!twoObjects) return [];
+      const width = viewport.clientWidth;
+      const height = viewport.clientHeight;
+      return objects.objects.map(({ id, pivot }) => {
+        const transform = arrangement?.objects.find((object) => object.id === id);
+        const offset = transform?.offset ?? [0, 0, 0];
+        const point = new THREE.Vector3(pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]).project(camera);
+        return { id, x: ((point.x + 1) / 2) * width, y: ((1 - point.y) / 2) * height, visible: point.z > -1 && point.z < 1 && Math.abs(point.x) <= 1 && Math.abs(point.y) <= 1 };
+      });
+    },
     setCamera({ position, target }) {
       camera.position.set(...position);
       controls.target.set(...target);
@@ -163,6 +197,12 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     },
     applyEdit(edit) {
       objects.applyEdit(edit);
+      draw();
+    },
+    // Two-object surfaces: shows a whole arrangement, both objects at once.
+    applyArrangement(edit) {
+      arrangement = edit;
+      objects.applyArrangement(edit);
       draw();
     },
     dispose: release,

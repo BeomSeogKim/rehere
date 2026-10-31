@@ -714,3 +714,69 @@ describe('stories and sharing in one scene', () => {
     view.space.dispose();
   });
 });
+
+describe('typing a manual value', () => {
+  it('keeps the typed text while typing, and never saves a cached value behind an invalid field', async () => {
+    const view = await openScene();
+    const x = view.axis('Left / right');
+    const slider = view.axis('Left / right slider');
+    for (const typed of ['0.', '0.4']) {
+      x.value = typed;
+      x.dispatch('input');
+      assert.equal(x.value, typed, 'the field being typed is not rewritten');
+    }
+    assert.equal(slider.value, '0.4', 'the other control follows the parsed value');
+    x.value = '';
+    x.dispatch('input');
+    assert.equal(x.value, '', 'an empty intermediate (also what a lone minus sign reads as) stays');
+    assert.equal(view.button('Apply and save').disabled, true);
+    x.value = '40';
+    x.dispatch('input');
+    x.dispatch('blur');
+    assert.equal(x.value, '40', 'an invalid draft is not silently dropped');
+    assert.equal(view.button('Apply and save').disabled, true, 'the last valid 0.4 cannot be saved behind 40');
+    view.button('Apply and save').dispatch('click');
+    assert.equal(posts.length, 0);
+    x.value = '-0.3';
+    x.dispatch('input');
+    x.dispatch('blur');
+    assert.equal(view.button('Apply and save').disabled, false);
+    view.button('Apply and save').dispatch('click');
+    assert.deepEqual(posts[0].body.offset, [-0.3, 0, 0]);
+    view.space.dispose();
+  });
+
+  it('offers Revert for an invalid draft over a clean preview, and Revert restores the saved value', async () => {
+    const view = await openScene();
+    const x = view.axis('Left / right');
+    x.value = '40';
+    x.dispatch('input');
+    assert.equal(view.button('Revert to saved').disabled, false);
+    view.button('Revert to saved').dispatch('click');
+    assert.equal(x.value, '0');
+    assert.equal(view.button('Revert to saved').disabled, true);
+    view.space.dispose();
+  });
+
+  it('keeps an invalid field as typed when another field changes, and sends nothing until it is valid', async () => {
+    const view = await openScene();
+    const [x, y] = [view.axis('Left / right'), view.axis('Down / up')];
+    x.value = '0.4';
+    x.dispatch('input');
+    x.value = '40';
+    x.dispatch('input');
+    x.dispatch('blur');
+    y.value = '0.1';
+    y.dispatch('input');
+    y.dispatch('blur');
+    assert.equal(x.value, '40');
+    assert.equal(view.button('Apply and save').disabled, true);
+    view.button('Apply and save').dispatch('click');
+    assert.equal(posts.length, 0);
+    x.value = '0.3';
+    x.dispatch('input');
+    view.button('Apply and save').dispatch('click');
+    assert.deepEqual(posts[0].body.offset, [0.3, 0.1, 0]);
+    view.space.dispose();
+  });
+});
