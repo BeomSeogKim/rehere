@@ -300,6 +300,13 @@ async function verifyFile(file, expected) {
   return true;
 }
 
+// Forgets every successful byte check for one contribution's folder, so a
+// deleted bundle is never treated as verified from memory.
+export function forgetContributionFiles(jobDir, contributionId) {
+  const prefix = photoDir(jobDir, contributionId) + path.sep;
+  for (const file of verified.keys()) if (file.startsWith(prefix)) verified.delete(file);
+}
+
 async function bundleAvailable(jobDir, contribution) {
   const dir = photoDir(jobDir, contribution.id);
   if (contribution.photo) {

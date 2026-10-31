@@ -4,6 +4,7 @@ import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attestPhotos, contributionsDir } from './contribution-photos.mjs';
+import { cleanupContributionFiles, removeManifestTemps, safeJobDirectory } from './contribution-deletion-files.mjs';
 import {
   assertSceneUsable, issueMessage, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, usageBlocked, versionDependencies,
 } from './collaboration.mjs';
@@ -263,7 +264,7 @@ async function readJson(file) {
 async function writeJsonAtomic(file, value) {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temp, JSON.stringify(value, null, 2));
+    await writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
     await rename(temp, file);
   } catch (error) {
     await rm(temp, { force: true }).catch(() => {});
@@ -282,7 +283,16 @@ function assertReplayUsable(manifest, version) {
 // left by an interrupted submission, or a folder renamed before its manifest
 // write failed. Referenced folders are never touched.
 async function sweepContributionPhotos(jobDir, manifest) {
-  const referenced = new Set((manifest.collaboration?.contributions ?? []).filter((item) => item?.photo || item?.voice).map((item) => item.id));
+  // Deleted contributions are never swept here: their bounded deletion
+  // cleanup owns their folders, even after completion.
+  const referenced = new Set((manifest.collaboration?.contributions ?? []).filter((item) => item?.photo || item?.voice || item?.status === 'deleted').map((item) => item.id));
+  // Only a real directory is swept; a symlinked contributions folder is never followed.
+  try {
+    if (!(await lstat(contributionsDir(jobDir))).isDirectory()) return;
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
   let names;
   try {
     names = await readdir(contributionsDir(jobDir));
@@ -444,6 +454,10 @@ export class ReconstructionStore {
     this.recovered ??= this.serialize(async () => {
       for (const draftId of await listDirs(this.rootDir)) {
         for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
+          // Nothing in a job is read or changed unless every folder from the
+          // data root down to it is a real directory; an unsafe job is skipped
+          // and the others are still recovered.
+          if (!(await safeJobDirectory(this.jobDir(draftId, jobId), this.rootDir).catch(() => false))) continue;
           const file = path.join(this.jobDir(draftId, jobId), 'manifest.json');
           // Story playback files are staged per job; anything left there was never published.
           await rm(path.join(this.jobDir(draftId, jobId), 'story-staging'), { recursive: true, force: true });
@@ -459,7 +473,14 @@ export class ReconstructionStore {
             changes.proposals = manifest.proposals.map((item) =>
               ACTIVE_PROPOSAL.has(item.status) ? { ...item, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted, updatedAt: now } : item);
           }
-          if (Object.keys(changes).length > 0) await writeJsonAtomic(file, { ...manifest, ...changes, updatedAt: now });
+          let current = manifest;
+          if (Object.keys(changes).length > 0) {
+            current = { ...manifest, ...changes, updatedAt: now };
+            await writeJsonAtomic(file, current);
+          }
+          // Deletions whose access stopped resume their cleanup; a failure
+          // leaves them pending without affecting anything else.
+          await this.completeDeletions(current).catch(() => {});
         }
       }
       await rm(this.stagingDir, { recursive: true, force: true });
@@ -621,6 +642,31 @@ export class ReconstructionStore {
       this.active.done = this.run(accepted.manifest, accepted.imagePath, accepted.size);
     }
     return publicManifest(accepted.manifest, await this.sourceUses(draftId, accepted.manifest.sourceId));
+  }
+
+  // Callers hold the mutex, so no manifest write is in progress. Removes the
+  // files of every deletion whose access stopped and leftover temporary
+  // manifests, then records completion for those whose absence is verified.
+  async completeDeletions(manifest) {
+    const jobDir = this.jobDir(manifest.draftId, manifest.id);
+    const collaboration = manifest.collaboration;
+    const pending = (collaboration?.contributions ?? []).filter((item) => item?.status === 'deleted' && item.deletion?.state === 'access-stopped');
+    if (pending.length === 0) return manifest;
+    const cleaned = [];
+    // The data root is passed so every path component down to the job folder
+    // is checked; a symlinked draft or job folder is never followed.
+    for (const item of pending) if (await cleanupContributionFiles(jobDir, item.id, this.rootDir)) cleaned.push(item.id);
+    // Leftover temporary manifests can hold old text, so they are removed on
+    // every attempt, even while some media cleanup is still pending.
+    const tempsRemoved = await removeManifestTemps(jobDir, this.rootDir);
+    if (cleaned.length === 0 || !tempsRemoved) return manifest;
+    const completedAt = new Date().toISOString();
+    return this.update(manifest, {
+      collaboration: {
+        ...collaboration,
+        contributions: collaboration.contributions.map((item) => (cleaned.includes(item.id) ? { ...item, deletion: { ...item.deletion, state: 'complete', completedAt } } : item)),
+      },
+    });
   }
 
   async update(manifest, changes) {

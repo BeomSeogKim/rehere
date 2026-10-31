@@ -72,6 +72,83 @@ export function contributionAllows(contribution, purpose) {
     && (!contribution.voice || contribution.voice.source.permissions[purpose] === true);
 }
 
+// Deletion of one whole contribution by its provider. Access stops in one
+// atomic manifest write that leaves a content-free tombstone and clears every
+// linked copy the app tracks; the files are removed afterwards and only then
+// is the deletion complete.
+const DELETED_DIGEST = 'deleted';
+const REMOVED_LABEL = 'Contribution removed';
+const DELETED_MESSAGE = 'This contribution was deleted.';
+
+// Only what the provider may see: the deletion state and their own material counts.
+function projectTombstone(contribution) {
+  const { state, completedAt, inventory } = contribution.deletion;
+  return { id: contribution.id, kind: 'human_recollection', status: 'deleted', deletedAt: contribution.deletedAt, deletion: { state, completedAt, inventory: { ...inventory } } };
+}
+
+// Whether a frozen share selection refers to a contribution in any way.
+export function shareReferences(frozen, id) {
+  return Boolean(frozen) && (
+    (frozen.views ?? []).some((view) => (view.dependencies ?? []).includes(id))
+    || (frozen.quotes ?? []).some((quote) => quote.contributionId === id)
+    || (frozen.contributorPhotos ?? []).some((item) => item.contributionId === id)
+    || (frozen.recordings ?? []).some((item) => item.contributionId === id));
+}
+
+// Everything in the manifest that holds or derives from one contribution.
+function deletionScope(manifest, contribution) {
+  const { id } = contribution;
+  const collaboration = collaborationOf(manifest);
+  const variants = collaboration.variants.filter((variant) => variant.contributionIds.includes(id));
+  const variantIds = new Set(variants.map((variant) => variant.id));
+  const shares = manifest.shares ?? { previews: [], snapshots: [] };
+  return {
+    variants,
+    versions: (manifest.edits ?? []).filter((edit) => (edit.dependencies ?? []).includes(id)).map((edit) => edit.version),
+    proposals: (manifest.proposals ?? []).filter((proposal) => versionDependencies(manifest, proposal.baseVersion).includes(id)),
+    stories: (manifest.stories?.items ?? []).filter((story) => (story.context?.dependencies ?? []).includes(id)),
+    previews: shares.previews.filter((preview) => shareReferences(preview.frozen, id)),
+    snapshots: shares.snapshots.filter((snapshot) => shareReferences(snapshot.frozen, id)),
+    receipts: collaboration.receipts.filter((receipt) => receipt.contributionId === id || receipt.target === id || variantIds.has(receipt.target)),
+  };
+}
+
+// The provider's own material, and whether it is used: fixed keys only.
+function ownInventory(contribution, scope) {
+  const voice = contribution.voice;
+  const history = Array.isArray(voice?.captionHistory) ? voice.captionHistory.length : 0;
+  return {
+    writing: contribution.text ? 1 : 0, photo: contribution.photo ? 1 : 0, voice: voice ? 1 : 0, playback: voice ? 1 : 0,
+    captionVersions: voice ? (voice.captions ? 1 : 0) + history : 0,
+    usedInPlace: scope.versions.length > 0 || scope.variants.some((variant) => variant.kind !== 'baseline'),
+    sharedViewsAffected: scope.previews.length + scope.snapshots.length > 0,
+  };
+}
+
+// The private impact the provider confirms, as a hash: every affected ID,
+// revision and membership, sorted. Any relevant change gives another hash.
+function impactHash(contribution, scope) {
+  const sorted = (rows) => rows.map((row) => JSON.stringify(row)).sort();
+  return sha256(JSON.stringify({
+    contribution: [contribution.id, contribution.revision, contribution.status, contribution.withdrawnAt, contribution.review?.decision ?? null, contribution.voice?.captions?.sha256 ?? null],
+    inventory: ownInventory(contribution, scope),
+    variants: sorted(scope.variants.map((variant) => [variant.id, variant.kind, variant.eraRevision, variant.label])),
+    versions: [...scope.versions].sort((a, b) => a - b),
+    proposals: sorted(scope.proposals.map((proposal) => [proposal.id, proposal.status, proposal.updatedAt])),
+    stories: sorted(scope.stories.map((story) => [story.id, story.status])),
+    previews: sorted(scope.previews.map((preview) => [preview.id, preview.snapshotId, preview.removedFor ?? null])),
+    snapshots: sorted(scope.snapshots.map((snapshot) => [snapshot.id, snapshot.revokedAt, snapshot.removedFor ?? null])),
+  }));
+}
+
+function parseDeletion(body) {
+  const valid = exactKeys(body, ['requestId', 'impactSha256', 'confirmDeletion']) && isId(body.requestId)
+    && (body.impactSha256 === null || (typeof body.impactSha256 === 'string' && /^[0-9a-f]{64}$/.test(body.impactSha256)));
+  if (!valid) throw fail(400, UNREADABLE);
+  if (body.confirmDeletion !== true) throw fail(400, 'Confirm that you want to delete this contribution from Rehere.');
+  return { requestId: body.requestId, impactSha256: body.impactSha256 };
+}
+
 // Caption versions a recording can have, the first one included.
 export const CAPTION_VERSIONS = 20;
 
@@ -339,6 +416,7 @@ const UNKNOWN_ERA = Object.freeze({
 // The providing principal (an owner too) also sees the request ID, for receipt
 // lookup after a lost response. Photo source IDs, checksums and names stay private.
 function projectContribution(manifest, contribution, principal) {
+  if (contribution.status === 'deleted') return projectTombstone(contribution);
   const owner = principal.role === 'owner';
   const withdrawn = contribution.withdrawnAt !== null;
   const review = contribution.review && {
@@ -544,9 +622,12 @@ export class CollaborationStore {
   #receipt(collaboration, request, action, principalId, target, requestDigest = digest(request)) {
     const receipt = collaboration.receipts.find((item) => item.requestId === request.requestId);
     if (!receipt) return null;
-    if (receipt.action !== action || receipt.principalId !== principalId || receipt.target !== target || receipt.digest !== requestDigest) {
-      throw fail(409, REUSED);
-    }
+    if (receipt.action !== action || receipt.principalId !== principalId || receipt.target !== target) throw fail(409, REUSED);
+    // A receipt whose content was removed by a deletion keeps only its barrier:
+    // the same actor, action and target get the content-free current result,
+    // and nothing is ever recreated.
+    if (receipt.digest === DELETED_DIGEST) return receipt;
+    if (receipt.digest !== requestDigest) throw fail(409, REUSED);
     return receipt;
   }
 
@@ -811,8 +892,8 @@ export class CollaborationStore {
   }
 
   // Only the contribution's own provider, whatever their role, may change or
-  // look up its captions. Checked before anything about the captions.
-  #captionContribution(manifest, principal, contributionId) {
+  // look up its captions, or delete it. Checked before anything else about it.
+  #providerContribution(manifest, principal, contributionId) {
     const contribution = collaborationOf(manifest).contributions.find((item) => item.id === contributionId);
     if (!contribution) throw fail(404, CONTRIBUTION_NOT_FOUND);
     if (contribution.principalId !== principal.id) throw principal.role === 'owner' ? fail(403, NOT_ALLOWED) : fail(404, CONTRIBUTION_NOT_FOUND);
@@ -830,7 +911,7 @@ export class CollaborationStore {
     return this.reconstructions.serialize(async () => {
       const manifest = await this.#scene(draftId, jobId);
       const collaboration = collaborationOf(manifest);
-      const contribution = this.#captionContribution(manifest, principal, contributionId);
+      const contribution = this.#providerContribution(manifest, principal, contributionId);
       const replay = this.#receipt(collaboration, request, 'captions', principal.id, contributionId);
       if (replay) return { contribution: projectContribution(manifest, contribution, principal), appliedCaptionVersion: replay.captionVersion };
       if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was withdrawn, so its captions cannot change.');
@@ -863,6 +944,160 @@ export class CollaborationStore {
     });
   }
 
+  // What deleting a contribution would do, for its provider: only their own
+  // material counts and whether it is used, plus a hash binding the full
+  // private impact. For a deleted contribution, its deletion state.
+  async deletionPreview(draftId, jobId, principal, contributionId) {
+    this.#scope(principal, draftId);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const contribution = this.#providerContribution(manifest, principal, contributionId);
+      if (contribution.status === 'deleted') {
+        return { state: contribution.deletion.state, impact: { ...contribution.deletion.inventory }, impactSha256: null };
+      }
+      const scope = deletionScope(manifest, contribution);
+      return { state: 'present', impact: ownInventory(contribution, scope), impactSha256: impactHash(contribution, scope) };
+    });
+  }
+
+  // Deletes one whole contribution for its provider. First, under the mutex,
+  // one atomic write stops access: a content-free tombstone, every tracked
+  // linked copy cleared and a minimal receipt. Only after that write is
+  // dependent model work aborted and are the files removed; the deletion is
+  // complete only once their absence is verified. A replay, or a cleanup-only
+  // request with no impact hash on an existing tombstone, resumes cleanup.
+  async delete(draftId, jobId, principal, contributionId, body) {
+    this.#scope(principal, draftId);
+    const request = parseDeletion(body);
+    await this.reconstructions.recover();
+    const stopped = await this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const collaboration = collaborationOf(manifest);
+      const contribution = this.#providerContribution(manifest, principal, contributionId);
+      const replay = collaboration.receipts.find((item) => item.requestId === request.requestId);
+      if (replay) {
+        if (replay.action !== 'delete' || replay.principalId !== principal.id || replay.target !== contributionId) throw fail(409, REUSED);
+        return { aborts: [] };
+      }
+      if (contribution.status === 'deleted') return { aborts: [] };
+      if (request.impactSha256 === null) throw fail(409, 'Review what deleting this contribution removes, then confirm again.');
+      const scope = deletionScope(manifest, contribution);
+      if (impactHash(contribution, scope) !== request.impactSha256) throw fail(409, 'What deleting this contribution affects has changed. Review it again before confirming.');
+      const { changes, aborts } = this.#redaction(manifest, contribution, scope, principal, request);
+      await this.reconstructions.update(manifest, changes);
+      return { aborts };
+    });
+    // Access has stopped. Dependent model work ends now, whatever its stored
+    // status says; a late result is refused by the existing admission checks.
+    // Aborting is best effort and never undoes or blocks the stop or cleanup.
+    const active = this.reconstructions.activeProposal;
+    if (active && stopped.aborts.includes(active.id)) {
+      try {
+        active.controller.abort();
+      } catch {
+        console.error('deletion: stopping dependent model work failed');
+      }
+    }
+    await this.#completeDeletion(draftId, jobId);
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      return { contribution: projectTombstone(this.#providerContribution(manifest, principal, contributionId)) };
+    });
+  }
+
+  // The one atomic change that stops access and clears linked copies.
+  #redaction(manifest, contribution, scope, principal, request) {
+    const now = new Date().toISOString();
+    const id = contribution.id;
+    const collaboration = collaborationOf(manifest);
+    const inventory = ownInventory(contribution, scope);
+    const review = contribution.review && {
+      decision: contribution.review.decision, reviewedBy: contribution.review.reviewedBy, reviewedAt: contribution.review.reviewedAt,
+      baseRevision: contribution.review.baseRevision, variantId: contribution.review.variantId, version: contribution.review.version,
+    };
+    const tombstone = {
+      id, requestId: contribution.requestId, principalId: contribution.principalId, provider: { displayName: null },
+      text: '', textSha256: null, periodClaim: '', permissions: null, photo: null, voice: null,
+      createdAt: contribution.createdAt, revision: contribution.revision + 1, status: 'deleted', review, reviews: [],
+      withdrawnAt: contribution.withdrawnAt ?? now, deletedAt: now,
+      deletion: {
+        state: 'access-stopped', completedAt: null, inventory,
+        linked: {
+          variants: scope.variants.length, proposals: scope.proposals.length, stories: scope.stories.length,
+          shareRecords: scope.previews.length + scope.snapshots.length, receipts: scope.receipts.length,
+        },
+      },
+    };
+    const linkedVariants = new Set(scope.variants.map((variant) => variant.id));
+    const linkedReceipts = new Set(scope.receipts);
+    const scrubEra = (era) => era && { ...era, label: '', statement: '', assertedBy: null };
+    const next = {
+      ...collaboration,
+      contributions: collaboration.contributions.map((item) => (item.id === id ? tombstone : item)),
+      variants: collaboration.variants.map((variant) => (linkedVariants.has(variant.id)
+        ? { ...variant, label: REMOVED_LABEL, eraAssertions: variant.eraAssertions.map(scrubEra) } : variant)),
+      receipts: collaboration.receipts.map((receipt) => {
+        if (!linkedReceipts.has(receipt)) return receipt;
+        const { captionSha256, ...kept } = receipt;
+        return { ...kept, digest: DELETED_DIGEST };
+      }),
+    };
+    const { next: saved } = this.#save(manifest, next, { requestId: request.requestId, action: 'delete', principalId: principal.id, target: id, digest: DELETED_DIGEST });
+    const changes = { collaboration: saved };
+
+    // Proposals made from a version that depends on it: their statement,
+    // result and question may carry the contribution; active ones fail.
+    const affected = new Set(scope.proposals.map((proposal) => proposal.id));
+    const current = currentDependencies(manifest).includes(id);
+    // Every dependent proposal's live model call is stopped, even when its
+    // stored status is no longer active; only active ones change status here.
+    const aborts = (manifest.proposals ?? []).filter((proposal) => current || affected.has(proposal.id)).map((proposal) => proposal.id);
+    const failing = (manifest.proposals ?? []).filter((proposal) => ACTIVE_PROPOSAL.has(proposal.status) && aborts.includes(proposal.id)).map((proposal) => proposal.id);
+    if (manifest.proposals) {
+      changes.proposals = manifest.proposals.map((proposal) => {
+        const active = failing.includes(proposal.id);
+        if (!affected.has(proposal.id) && !active) return proposal;
+        const cleared = affected.has(proposal.id)
+          ? { ...proposal, statement: { ...proposal.statement, text: null, sha256: null }, result: null, question: null } : proposal;
+        return active ? { ...cleared, status: 'failed', error: BLOCKED_MESSAGE, updatedAt: now } : cleared;
+      });
+    }
+    // Owner stories keep their own title, recording and captions; only the
+    // copied arrangement label and time assertion are cleared.
+    if (manifest.stories && scope.stories.length > 0) {
+      const stories = new Set(scope.stories.map((story) => story.id));
+      changes.stories = {
+        ...manifest.stories,
+        items: manifest.stories.items.map((story) => (stories.has(story.id)
+          ? { ...story, context: { ...story.context, label: REMOVED_LABEL, era: scrubEra(story.context.era) } } : story)),
+      };
+    }
+    // Every share preview or snapshot that refers to it keeps only its opaque
+    // barriers and is revoked; its visitor content and frozen pins are removed.
+    if (manifest.shares && scope.previews.length + scope.snapshots.length > 0) {
+      const previews = new Set(scope.previews.map((item) => item.id));
+      const snapshots = new Set(scope.snapshots.map((item) => item.id));
+      const removed = (record) => ({ ...record, frozen: null, publicView: null, digest: DELETED_DIGEST, removedFor: 'contribution-deleted' });
+      changes.shares = {
+        ...manifest.shares,
+        previews: manifest.shares.previews.map((preview) => (previews.has(preview.id) ? { ...removed(preview), requestDigest: DELETED_DIGEST } : preview)),
+        snapshots: manifest.shares.snapshots.map((snapshot) => (snapshots.has(snapshot.id) ? { ...removed(snapshot), revokedAt: snapshot.revokedAt ?? now } : snapshot)),
+      };
+    }
+    return { changes, aborts };
+  }
+
+  // Removes the files of every deletion whose access already stopped, under
+  // the mutex so no manifest write is in progress, and records completion only
+  // after their absence is verified. Any failure leaves the deletion pending.
+  async #completeDeletion(draftId, jobId) {
+    await this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      await this.reconstructions.completeDeletions(manifest);
+    }).catch(() => {});
+  }
+
   // The outcome of one committed caption request by this provider, with the
   // contribution as it is now (redacted after withdrawal). Unknown is 404,
   // which does not prove the request will never arrive.
@@ -872,7 +1107,7 @@ export class CollaborationStore {
     await this.reconstructions.recover();
     return this.reconstructions.serialize(async () => {
       const manifest = await this.#scene(draftId, jobId);
-      const contribution = this.#captionContribution(manifest, principal, contributionId);
+      const contribution = this.#providerContribution(manifest, principal, contributionId);
       const receipt = collaborationOf(manifest).receipts.find((item) => item.requestId === requestId && item.action === 'captions'
         && item.principalId === principal.id && item.target === contributionId);
       if (!receipt) throw fail(404, 'This caption change could not be found.');

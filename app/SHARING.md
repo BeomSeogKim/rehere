@@ -135,6 +135,13 @@ renderer, texture and shared wording. Hidden pages pause immediately; resuming
 requires fresh authorization. Late requests cannot reopen a stopped view.
 Already delivered bytes or recordings made outside the app cannot be recalled.
 
+A provider can separately delete their contribution from the app's tracked
+local storage. This clears affected stored previews and visitor packets, not
+just their live access. Their content-free records keep old requests and tokens
+from issuing the removed packet again. Other providers' originals and
+independent snapshots remain. File cleanup can remain pending after access has
+stopped; this does not recall visitor copies or erase device backups.
+
 Spatial views, permitted writing and explicitly selected [recorded stories with
 captions](STORIES.md) and captioned contributor recordings can be shared.
 A story stays with its exact saved view; private edits do not rebind it.

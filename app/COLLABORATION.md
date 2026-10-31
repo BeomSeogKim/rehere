@@ -163,6 +163,43 @@ Restore a demonstrably unaffected saved version as a new version to resume;
 the intervening history stays intact. Later visitor snapshots must apply the
 same current grants and withdrawals even when their versions are fixed.
 
+## Delete a contribution locally
+
+The providing person can separately choose **Delete from Rehere** for their
+whole contribution, including one already withdrawn. Review the affected
+material and uses, acknowledge that removal cannot be undone, then confirm.
+If those uses change after review, review them again before confirming.
+The owner cannot delete another provider's contribution through this control.
+
+Access stops and linked content is redacted in one atomic manifest write.
+Stored originals, inspection and listening copies are removed separately.
+The interface distinguishes **access stopped, cleanup pending** from completed
+removal. A failed cleanup stays pending; the same explicit retry or server
+restart can resume it. An uncertain response never means that removal failed.
+After reload, check the earlier operation rather than submit another deletion
+automatically. Only an opaque pending request identifier is kept in the browser.
+
+Removal covers the contribution's writing, material metadata, caption history
+and attached review notes. It also clears app-tracked copies: affected visitor
+previews and snapshots, linked variant labels and time wording, copied story
+context labels, and dependent model proposal content. Affected visitor packets
+stay stopped. The app retains only content-free processing records and the
+dependency identifiers needed to keep saved geometry blocked and prevent old
+requests or links from recreating removed content.
+
+Other contributions and the owner's original photos, recordings, story captions
+and independently written notes remain. Saved geometry and edit history remain
+blocked where they depend on the removed contribution; an independent saved
+arrangement can still be restored. Account profile information is separate.
+
+Completed removal means removal from this app's tracked storage on this
+computer. It does not erase copies already downloaded, viewed or screenshotted,
+unlinked notes written elsewhere, previously emitted terminal logs, device
+backups, freed disk blocks or anything already sent to a hosted service.
+It is not secure erasure or a provider-retention guarantee. Unexpected files
+or symbolic links in a contribution directory leave cleanup pending rather
+than expand the deletion to arbitrary files.
+
 ## Operation
 
 These records use the existing reconstruction manifest and mutation queue.

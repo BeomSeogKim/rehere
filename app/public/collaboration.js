@@ -36,7 +36,7 @@ const PERMISSION_LABELS = {
   model: 'Use for model processing',
   share: 'Share with others',
 };
-const FINAL = new Set(['adopted', 'alternative', 'rejected', 'withdrawn']);
+const FINAL = new Set(['adopted', 'alternative', 'rejected', 'withdrawn', 'deleted']);
 
 // A contributor photo: one JPEG or PNG, recognised by its first bytes, up to
 // the raw limit. The server decodes it and remains the authority.
@@ -122,6 +122,27 @@ const CAPTION_BINDING_TEXT = {
   changed: 'The listening captions were added or corrected after this review. The review describes what you saw then.',
   unknown: 'Which listening captions this review saw is not known.',
 };
+// A deleted contribution, as both the owner and its provider see it: whether
+// local cleanup finished, and which of the provider's own materials were
+// removed. Nothing about its content, provider or reviews is left to show.
+const DELETION_LIMITS =
+  'Rehere cannot remove copies someone downloaded, viewed or screenshotted; notes others wrote without linking them to it; account profiles; terminal logs already written; backups of this computer or data its disk keeps after deletion; or anything already sent to a hosted service.';
+function deletionMaterials(inventory) {
+  const parts = [
+    inventory?.writing ? 'the words' : null,
+    inventory?.photo ? 'the photo' : null,
+    inventory?.voice ? 'the recording' : null,
+    inventory?.playback ? 'its listening copy' : null,
+    Number.isInteger(inventory?.captionVersions) && inventory.captionVersions > 0 ? `${inventory.captionVersions} caption version${inventory.captionVersions === 1 ? '' : 's'}` : null,
+  ].filter(Boolean);
+  if (parts.length <= 1) return parts[0] ?? 'what was sent';
+  return `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+}
+function deletionStateText(deletion) {
+  return deletion?.state === 'complete'
+    ? `Removed from this app's tracked storage on this computer${deletion.completedAt ? ` on ${when(deletion.completedAt)}` : ''}: ${deletionMaterials(deletion.inventory)}.`
+    : `Every use has stopped and its content is gone from Rehere's records. Removing its stored files (${deletionMaterials(deletion?.inventory)}) on this computer is still finishing.`;
+}
 // What a withdrawal covers, named by what was actually sent.
 function withdrawnParts(contribution) {
   const parts = [contribution.text?.trim() ? 'your words' : null, contribution.photo ? 'your photo' : null, contribution.voice ? 'your recording' : null].filter(Boolean);
@@ -157,6 +178,8 @@ export function contributionStatusText(contribution) {
       return 'The owner decided not to use it.';
     case 'withdrawn':
       return 'Withdrawn. Rehere no longer shows or uses this recollection.';
+    case 'deleted':
+      return 'Deleted by the person who sent it.';
     default:
       return 'Status unknown.';
   }
@@ -306,7 +329,11 @@ export function mountContributor(container, { principal = null, media = null } =
   let attempt = null;
   let photoFile = null;
   let previewUrl = null;
+  // Object URLs and players of the list, each with the contribution it shows,
+  // so one row can be released on its own.
   let ownUrls = [];
+  // The rendered row of each contribution in the list.
+  const ownRows = new Map();
   // Players for the person's own recordings in the list; every render, place
   // change or close disposes them, which aborts a pending load and stops sound.
   let ownPlayers = [];
@@ -321,6 +348,11 @@ export function mountContributor(container, { principal = null, media = null } =
   // this place; a re-render keeps them, a place change or closing drops them.
   const captionEditors = new Map();
   const captionNotes = new Map();
+  // Deletions being previewed or not known to have been accepted, per
+  // contribution of this place.
+  const deletions = new Map();
+  // The last local-cleanup retry outcome per deleted contribution.
+  const cleanupNotes = new Map();
   const recorder = createRecorder(media ?? { mediaDevices: globalThis.navigator?.mediaDevices, MediaRecorder: globalThis.MediaRecorder });
   let takeUrl = null;
   let takeBlob = null;
@@ -477,9 +509,10 @@ export function mountContributor(container, { principal = null, media = null } =
 
   function revokeOwn() {
     ownToken += 1;
-    for (const url of ownUrls) URL.revokeObjectURL(url);
+    for (const { url } of ownUrls) URL.revokeObjectURL(url);
     ownUrls = [];
-    for (const player of ownPlayers.splice(0)) player.dispose();
+    for (const { player } of ownPlayers.splice(0)) player.dispose();
+    ownRows.clear();
   }
   // A different original starts with its facts unknown and every use off;
   // re-choosing the same file keeps what was set for it. Text uses are kept.
@@ -592,7 +625,7 @@ export function mountContributor(container, { principal = null, media = null } =
   removePhoto.addEventListener('click', () => setPhoto(null));
 
   // Loads one review copy for display; it is released on the next render.
-  async function photoImage(url, alt) {
+  async function photoImage(url, alt, id) {
     const token = ownToken;
     try {
       const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
@@ -601,7 +634,12 @@ export function mountContributor(container, { principal = null, media = null } =
       // A later render or closing already released this list.
       if (disposed || token !== ownToken) return null;
       const objectUrl = URL.createObjectURL(blob);
-      ownUrls.push(objectUrl);
+      // This row was already replaced, for example by its deletion.
+      if (!ownRows.has(id)) {
+        URL.revokeObjectURL(objectUrl);
+        return null;
+      }
+      ownUrls.push({ id, url: objectUrl });
       return el('img', { className: 'space-proposal', src: objectUrl, alt });
     } catch {
       return null;
@@ -618,7 +656,7 @@ export function mountContributor(container, { principal = null, media = null } =
     const contribution = result.ok ? result.body?.contribution : null;
     const applied = result.body?.appliedCaptionVersion;
     if (!contribution || typeof contribution !== 'object' || contribution.id !== id || !Number.isInteger(applied) || applied < 1 || applied > 20) return false;
-    if (contribution.status === 'withdrawn') return true;
+    if (contribution.status === 'withdrawn' || contribution.status === 'deleted') return true;
     const now = contribution.voice?.captions;
     return Boolean(now) && typeof now.sha256 === 'string' && Number.isInteger(now.version) && now.version >= applied && now.version <= 20 && Array.isArray(now.cues);
   };
@@ -825,15 +863,16 @@ export function mountContributor(container, { principal = null, media = null } =
     const target = place;
     const contribution = body.contribution;
     const applied = body.appliedCaptionVersion;
-    const now = contribution.status === 'withdrawn' ? null : contribution.voice?.captions ?? null;
+    const gone = contribution.status === 'withdrawn' || contribution.status === 'deleted';
+    const now = gone ? null : contribution.voice?.captions ?? null;
     storePending(null, captionKey(editor.id));
     editor.attempt = null;
     editor.pendingId = null;
     editor.note.textContent = '';
     captionNotes.set(
       editor.id,
-      contribution.status === 'withdrawn'
-        ? 'Your caption change was saved before this recollection was withdrawn. It is no longer shown or used.'
+      gone
+        ? `Your caption change was saved before this recollection was ${contribution.status}. It is no longer shown or used.`
         : now?.version !== applied
           ? `Your listening captions were saved as version ${applied}. A later version${now ? ` (version ${now.version})` : ''} is now current.`
           : applied === 1
@@ -851,11 +890,59 @@ export function mountContributor(container, { principal = null, media = null } =
     }
   }
 
+  // A deleted contribution's row. Accepting it settles any earlier deletion
+  // attempt and leaves nothing of the contribution's own state in this page.
+  function tombstoneRow(contribution) {
+    deletions.delete(contribution.id);
+    storePending(null, deletionKey(contribution.id));
+    captionEditors.delete(contribution.id);
+    captionNotes.delete(contribution.id);
+    storePending(null, captionKey(contribution.id));
+    const item = el('li', {}, [
+      el('p', { className: 'collab-status', textContent: 'You deleted this recollection.' }),
+      el('p', { className: 'hint', textContent: deletionStateText(contribution.deletion) }),
+      el('p', { className: 'hint', textContent: DELETION_LIMITS }),
+    ]);
+    if (contribution.deletion?.state !== 'complete') {
+      // Check again only reads; retrying cleanup is a separate explicit
+      // request that resumes the accepted deletion and starts nothing new.
+      const again = el('button', { type: 'button', className: 'secondary', textContent: 'Check again' });
+      again.addEventListener('click', () => loadOwn());
+      const retry = el('button', { type: 'button', className: 'secondary', textContent: 'Retry local cleanup' });
+      retry.addEventListener('click', () => retryCleanup(contribution.id, retry));
+      item.append(el('div', { className: 'actions' }, [again, retry]));
+    } else cleanupNotes.delete(contribution.id);
+    if (cleanupNotes.has(contribution.id)) item.append(el('p', { className: 'form-message', textContent: cleanupNotes.get(contribution.id) }));
+    ownRows.set(contribution.id, item);
+    return item;
+  }
+
+  // Applies an accepted deletion at once, before any list read: that row's
+  // players stop, its URLs are released and it becomes the deleted record.
+  // Other rows and the form stay as they are.
+  function acceptTombstone(contribution) {
+    const id = contribution.id;
+    for (const entry of ownPlayers.filter((entry) => entry.id === id)) entry.player.dispose();
+    ownPlayers = ownPlayers.filter((entry) => entry.id !== id);
+    for (const entry of ownUrls.filter((entry) => entry.id === id)) URL.revokeObjectURL(entry.url);
+    ownUrls = ownUrls.filter((entry) => entry.id !== id);
+    const old = ownRows.get(id);
+    const row = tombstoneRow(contribution);
+    if (old && [...own.children].includes(old)) {
+      if (typeof old.replaceWith === 'function') old.replaceWith(row);
+      else own.replaceChildren(...[...own.children].map((child) => (child === old ? row : child)));
+    }
+    if (captionRecovery.children.length) showCaptionRecovery();
+  }
+
   function renderOwn(contributions) {
     revokeOwn();
     const mine = generation;
     own.replaceChildren(
       ...contributions.map((contribution) => {
+        // A deletion was accepted: it settles any earlier deletion attempt and
+        // leaves nothing of the contribution's own state in this page.
+        if (contribution.status === 'deleted') return tombstoneRow(contribution);
         const item = el('li', {}, [
           el('p', { className: 'collab-status', textContent: contributionStatusText(contribution) }),
           contribution.text === null
@@ -864,6 +951,7 @@ export function mountContributor(container, { principal = null, media = null } =
               ? el('p', { className: 'hint', textContent: 'No written words were sent.' })
               : el('p', { className: 'memory-text', textContent: contribution.text }),
         ]);
+        ownRows.set(contribution.id, item);
         if (contribution.periodClaim) item.append(el('p', { className: 'hint', textContent: `Time as you remember it: ${contribution.periodClaim}` }));
         // Without words there are no word uses; the line above already says so.
         if (contribution.permissions || contribution.status === 'withdrawn') item.append(el('p', { className: 'hint', textContent: usesText(contribution) }));
@@ -887,7 +975,7 @@ export function mountContributor(container, { principal = null, media = null } =
               story: { title: 'Your recording', cues: voice.captions?.cues ?? [], durationMs: voice.durationMs, audio: voice.audio },
               fetchAudio: (signal) => fetch(voice.url, { credentials: 'same-origin', cache: 'no-store', signal }),
             });
-            ownPlayers.push(player);
+            ownPlayers.push({ id: contribution.id, player });
             item.append(player.element);
           } else item.append(el('p', { className: 'hint', textContent: 'Your recording is not available now.' }));
           const history = captionHistoryBox(voice);
@@ -900,17 +988,232 @@ export function mountContributor(container, { principal = null, media = null } =
           if (contribution.photo.available && contribution.photo.url) {
             const slot = el('div');
             item.append(slot);
-            photoImage(contribution.photo.url, 'Your photo, as the owner sees it, without file details').then((image) => {
-              if (disposed || mine !== generation) return;
+            photoImage(contribution.photo.url, 'Your photo, as the owner sees it, without file details', contribution.id).then((image) => {
+              if (disposed || mine !== generation || ownRows.get(contribution.id) !== item) return;
               slot.replaceChildren(image ?? el('p', { className: 'hint', textContent: 'The photo is not available now.' }));
             });
           } else item.append(el('p', { className: 'hint', textContent: 'The photo is not available now.' }));
         }
         if (contribution.status !== 'withdrawn') item.append(withdrawControl(contribution));
+        item.append(deleteControl(contribution));
         return item;
       }),
     );
     status.textContent = contributions.length ? '' : 'Nothing sent yet.';
+  }
+
+  // Only the opaque request ID of a deletion not known to have been accepted.
+  const deletionKey = (id) => (storeKey() ? `rehere:deletion-pending:${principal.id}:${place.draftId}:${place.jobId}:${id}` : null);
+  const tombstoneAnswer = (result, id) => {
+    const contribution = result.ok ? result.body?.contribution : null;
+    return Boolean(contribution) && contribution.id === id && contribution.status === 'deleted' && ['access-stopped', 'complete'].includes(contribution.deletion?.state);
+  };
+
+  // Deleting: a preview of what it affects, an unchecked acknowledgment and
+  // a final press. Nothing changes on the server before that press.
+  function deleteControl(contribution) {
+    const slot = el('div');
+    const start = el('button', { type: 'button', className: 'secondary', textContent: 'Delete from Rehere…' });
+    start.addEventListener('click', () => {
+      const created = openDeletion(contribution.id, false);
+      created.onCancel = () => slot.replaceChildren(start);
+      slot.replaceChildren(created.wrap);
+      loadDeletionPreview(created);
+    });
+    let d = deletions.get(contribution.id);
+    if (!d && storedPending(deletionKey(contribution.id))) d = openDeletion(contribution.id, true);
+    // A new list may mean a different impact: a shown or loading preview and
+    // its acknowledgment are dropped. A sent request stays exactly as it was.
+    if (d && !d.attempt && (d.preview || d.previewLoading)) {
+      d.previewToken += 1;
+      d.previewLoading = false;
+      d.busy = false;
+      d.preview = null;
+      d.ack.checked = false;
+      d.note.textContent = 'Your list changed. Review what deleting affects again before deleting.';
+    }
+    if (d) {
+      d.onCancel = () => slot.replaceChildren(start);
+      renderDeletion(d);
+      slot.append(d.wrap);
+    } else slot.append(start);
+    return slot;
+  }
+
+  function openDeletion(id, lookup) {
+    const d = {
+      id,
+      attempt: null,
+      pendingId: lookup ? storedPending(deletionKey(id)) : null,
+      preview: null,
+      previewToken: 0,
+      previewLoading: false,
+      busy: false,
+      onCancel: null,
+      view: el('div'),
+      ack: el('input', { type: 'checkbox' }),
+      final: el('button', { type: 'button' }),
+      check: el('button', { type: 'button', className: 'secondary', textContent: 'Check earlier deletion' }),
+      review: el('button', { type: 'button', className: 'secondary', textContent: 'Review the deletion again' }),
+      cancel: el('button', { type: 'button', className: 'secondary', textContent: 'Keep it' }),
+      note: el('p', { className: 'form-message', role: 'alert', textContent: lookup ? 'An earlier deletion may have been accepted. Check it before doing anything else.' : '' }),
+    };
+    d.wrap = el('div', {}, [d.view, el('div', { className: 'actions' }, [d.cancel, d.review, d.check, d.final]), d.note]);
+    d.ack.addEventListener('change', () => renderDeletion(d));
+    d.final.addEventListener('click', () => deleteNow(d));
+    d.review.addEventListener('click', () => loadDeletionPreview(d));
+    d.cancel.addEventListener('click', () => {
+      deletions.delete(d.id);
+      d.onCancel?.();
+    });
+    // The list decides: a deleted row settles the earlier request; a row still
+    // present does not prove it was refused.
+    d.check.addEventListener('click', async () => {
+      const mine = generation;
+      d.busy = true;
+      renderDeletion(d);
+      await loadOwn();
+      if (disposed || mine !== generation || deletions.get(d.id) !== d) return;
+      d.busy = false;
+      d.note.textContent = 'Your list still shows it. That does not prove the earlier deletion was refused; it may still be recorded. Check again later, or review the deletion again to make a new request.';
+      renderDeletion(d);
+    });
+    deletions.set(id, d);
+    return d;
+  }
+
+  function renderDeletion(d) {
+    d.view.replaceChildren();
+    if (d.preview) {
+      const impact = d.preview.impact;
+      d.view.append(
+        el('p', { className: 'hint', textContent: `Deleting removes ${deletionMaterials(impact)} from this app's tracked storage on this computer. It cannot be undone. Withdrawing only stops use and keeps what you sent privately.` }),
+        ...(impact.usedInPlace ? [el('p', { className: 'hint', textContent: 'It was used for this place. Saved scenes that depended on it stay blocked; their positions are kept without your material.' })] : []),
+        ...(impact.sharedViewsAffected ? [el('p', { className: 'hint', textContent: 'Shared views and previews that use it stop for good, and what visitors would see from them is cleared.' })] : []),
+        el('p', {
+          className: 'hint',
+          textContent: 'Linked copies are cleared too: the owner’s review notes about it, labels and time notes on alternatives made from it, and model suggestions based on scenes that used it. Other people’s own material is kept.',
+        }),
+        el('p', { className: 'hint', textContent: DELETION_LIMITS }),
+        el('label', { className: 'memory-consent' }, [d.ack, ' I understand this deletion cannot be undone']),
+      );
+    }
+    const unknown = Boolean(d.pendingId);
+    d.final.textContent = d.attempt ? 'Delete again (same request)' : 'Delete permanently';
+    d.final.hidden = !d.attempt && !d.preview;
+    d.final.disabled = d.busy || (!d.attempt && d.ack.checked !== true);
+    d.check.hidden = !unknown || Boolean(d.attempt);
+    d.check.disabled = d.busy;
+    d.review.hidden = Boolean(d.attempt) || Boolean(d.preview) || d.busy;
+    d.cancel.hidden = unknown || d.busy;
+  }
+
+  async function loadDeletionPreview(d) {
+    const mine = generation;
+    const target = place;
+    const token = ++d.previewToken;
+    d.busy = true;
+    d.previewLoading = true;
+    d.preview = null;
+    d.ack.checked = false;
+    renderDeletion(d);
+    const result = await request(`${scope()}/contributions/${d.id}/deletion`);
+    if (disposed || mine !== generation || place !== target || deletions.get(d.id) !== d || token !== d.previewToken) return;
+    d.busy = false;
+    d.previewLoading = false;
+    const body = result.body;
+    if (result.ok && body?.state && body.state !== 'present') {
+      // Already deleted: the list shows it.
+      await loadOwn();
+      return;
+    }
+    if (result.ok && body?.state === 'present' && body.impact && typeof body.impact === 'object' && /^[0-9a-f]{64}$/.test(body.impactSha256 ?? '')) {
+      d.preview = { impact: body.impact, impactSha256: body.impactSha256 };
+    } else d.note.textContent = `${reasonOf(result) || 'Rehere could not show what deleting would affect.'} Nothing was deleted.`;
+    renderDeletion(d);
+  }
+
+  async function retryCleanup(id, button) {
+    const mine = generation;
+    const target = place;
+    button.disabled = true;
+    readToken += 1;
+    const requestId = crypto.randomUUID();
+    const result = await postJson(`${scope()}/contributions/${id}/delete`, { requestId, impactSha256: null, confirmDeletion: true });
+    if (disposed || mine !== generation || place !== target) return;
+    button.disabled = false;
+    cleanupNotes.set(
+      id,
+      tombstoneAnswer(result, id)
+        ? result.body.contribution.deletion.state === 'complete'
+          ? 'Local cleanup finished.'
+          : 'Local cleanup is still not finished. Every use stays stopped; you can try again later.'
+        : unclear(result)
+          ? 'Rehere could not confirm the cleanup retry. Every use stays stopped; check again or retry later.'
+          : `${reasonOf(result)} Every use stays stopped.`,
+    );
+    if (tombstoneAnswer(result, id)) acceptTombstone(result.body.contribution);
+    if ((await loadOwn()) === null && !disposed && mine === generation && place === target) message.textContent = `${cleanupNotes.get(id)} Your list could not be refreshed; reload the page to see it.`;
+  }
+
+  // One immutable request: pressing again after an unknown outcome repeats
+  // it exactly. Late answers for another place or a closed screen are dropped.
+  async function deleteNow(d) {
+    if (d.busy || !place) return;
+    let attempt = d.attempt;
+    if (!attempt) {
+      if (!d.preview || d.ack.checked !== true) return;
+      const requestId = crypto.randomUUID();
+      attempt = { requestId, body: { requestId, impactSha256: d.preview.impactSha256, confirmDeletion: true } };
+    }
+    const mine = generation;
+    const target = place;
+    d.attempt = attempt;
+    d.pendingId = attempt.requestId;
+    storePending(attempt.requestId, deletionKey(d.id));
+    d.busy = true;
+    d.note.textContent = '';
+    renderDeletion(d);
+    readToken += 1;
+    let result = await postJson(`${scope()}/contributions/${d.id}/delete`, attempt.body);
+    if (disposed || mine !== generation || place !== target || deletions.get(d.id) !== d) return;
+    d.busy = false;
+    if (result.ok && !tombstoneAnswer(result, d.id)) result = { ...result, ok: false, status: 0 };
+    if (unclear(result)) {
+      d.note.textContent = withReason(result, 'Rehere could not confirm whether the deletion was accepted. Pressing it again repeats the same request.');
+      renderDeletion(d);
+      return;
+    }
+    if (result.ok) {
+      const done = result.body.contribution.deletion.state === 'complete';
+      acceptTombstone(result.body.contribution);
+      const note = done
+        ? 'Deleted. It was removed from this app’s tracked storage on this computer.'
+        : 'Deleted from use. Every use has stopped and its content is gone from Rehere’s records; removing its stored files is still finishing.';
+      message.textContent = note;
+      if ((await loadOwn()) === null && !disposed && mine === generation && place === target) message.textContent = `${note} Your list could not be refreshed; reload the page to see it.`;
+      return;
+    }
+    // Signed out or not allowed says nothing about an earlier try.
+    if (result.status === 401 || result.status === 403) {
+      d.note.textContent = 'Rehere did not accept this because you are signed out or no longer allowed here. Whether an earlier try was accepted is still unknown.';
+      message.textContent = d.note.textContent;
+      renderDeletion(d);
+      await loadOwn();
+      return;
+    }
+    storePending(null, deletionKey(d.id));
+    d.attempt = null;
+    d.pendingId = null;
+    if (result.status === 409) {
+      // What it affects changed: a new preview and a new acknowledgment.
+      await loadDeletionPreview(d);
+      if (deletions.get(d.id) === d) d.note.textContent = `${reasonOf(result)} Nothing was deleted. Review what it affects again before deleting.`;
+      return;
+    }
+    d.ack.checked = false;
+    d.note.textContent = `${reasonOf(result) || 'It could not be deleted.'} Nothing was deleted.`;
+    renderDeletion(d);
   }
 
   // Withdrawal takes two presses: it hides the words and any photo and
@@ -927,7 +1230,7 @@ export function mountContributor(container, { principal = null, media = null } =
       wrap.replaceChildren(
         el('p', {
           className: 'hint',
-          textContent: `Rehere will stop showing and using what you sent${parts.length ? `, including the ${parts.join(' and ')}` : ''}, and any scene or shared view that depends on it will be blocked. Copies someone already saved outside Rehere cannot be removed from here.`,
+          textContent: `Rehere will stop showing and using what you sent${parts.length ? `, including the ${parts.join(' and ')}` : ''}, and any scene or shared view that depends on it will be blocked. Rehere keeps what you sent privately; to remove it from this app's stored data, use Delete from Rehere. Copies someone already saved outside Rehere cannot be removed from here.`,
         }),
         cancel,
         confirm,
@@ -976,7 +1279,10 @@ export function mountContributor(container, { principal = null, media = null } =
       status.textContent = 'Your recollections could not be loaded. Try again later.';
       // Signed out or no longer allowed: no draft stays. Otherwise unsaved
       // caption text stays reachable with a way to read the list again.
-      if (result.status === 401 || result.status === 403) captionEditors.clear();
+      if (result.status === 401 || result.status === 403) {
+        captionEditors.clear();
+        deletions.clear();
+      }
       showCaptionRecovery();
       return null;
     }
@@ -1043,6 +1349,8 @@ export function mountContributor(container, { principal = null, media = null } =
     generation += 1;
     captionEditors.clear();
     captionNotes.clear();
+    deletions.clear();
+    cleanupNotes.clear();
     captionRecovery.replaceChildren();
     place = next;
     // A send still pending for the previous place no longer holds this form.
@@ -1183,6 +1491,7 @@ export function mountContributor(container, { principal = null, media = null } =
       disposed = true;
       generation += 1;
       captionEditors.clear();
+      deletions.clear();
       revokeOwn();
       setPhoto(null);
       recorder.discard();
@@ -1382,6 +1691,12 @@ export function mountCollaboration(container, bridge) {
     if (disposed || !state) return;
     list.replaceChildren(
       ...state.contributions.map((entry) => {
+        if (entry.status === 'deleted') {
+          return el('li', {}, [
+            el('p', { className: 'collab-status' }, [el('strong', { textContent: 'Removed contribution' }), ` · ${contributionStatusText(entry)}`]),
+            el('p', { className: 'hint', textContent: deletionStateText(entry.deletion) }),
+          ]);
+        }
         const pick = el('button', { type: 'button', className: 'secondary', textContent: entry.id === selectedId ? 'Selected' : 'Review', disabled: entry.id === selectedId });
         pick.addEventListener('click', () => {
           stopShowing();

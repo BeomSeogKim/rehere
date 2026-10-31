@@ -16,6 +16,11 @@ export const SHARE_LIMITS = Object.freeze({
   previewMs: 15 * MINUTE, snapshotMs: 7 * 24 * 60 * MINUTE, snapshotsPerScene: 50, stories: 8, contributorPhotos: 20, recordings: 8,
 });
 const RECORDING_LABEL = 'Contributor recording; human-written listening captions; not verified history.';
+// A preview or snapshot that referred to a deleted contribution keeps only its
+// opaque barriers: it is never shown, rebuilt, issued or reissued.
+const REMOVED_TITLE = 'Removed contribution';
+const REMOVED_REASON = 'A contribution this view used was deleted.';
+const removedRecord = () => fail(409, 'This shared view was removed because a contribution it used was deleted.');
 const SHA = /^[0-9a-f]{64}$/;
 const CONTRIBUTOR_PHOTO_LABEL = 'Photo supplied by a contributor. Not automatically matched; not verified history.';
 const EVIDENCE_ASSET = /^([1-9][0-9]?)\.jpg$/;
@@ -541,6 +546,7 @@ export class ShareStore {
       const requestDigest = sha256(JSON.stringify(values));
       const existing = shares.previews.find((item) => item.requestId === requestId);
       if (existing) {
+        if (existing.removedFor) throw removedRecord();
         if (existing.requestDigest !== requestDigest) throw fail(409, 'This request was already used with different values.');
         // A replay gets the same validity checks as a read; stored words are never returned for a stale preview.
         await this.#checkPreview(manifest, existing);
@@ -552,8 +558,10 @@ export class ShareStore {
         id: randomUUID(), requestId, requestDigest, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + SHARE_LIMITS.previewMs).toISOString(),
         createdBy: principal.id, frozen, publicView: { ...publicView, id: null }, digest: contentDigest(publicView), snapshotId: null,
       };
-      // Expired previews that were never issued are dropped; issued ones stay for audit.
-      const previews = shares.previews.filter((item) => item.snapshotId !== null || Date.parse(item.expiresAt) > now);
+      // Expired previews that were never issued are dropped; issued ones stay
+      // for audit, and removed ones stay as barriers so their request ID can
+      // never build a new preview.
+      const previews = shares.previews.filter((item) => item.snapshotId !== null || item.removedFor || Date.parse(item.expiresAt) > now);
       await this.reconstructions.update(manifest, { shares: { ...shares, previews: [...previews, preview] } });
       return this.#previewResult(preview);
     });
@@ -561,6 +569,7 @@ export class ShareStore {
 
   // Callers already hold the manifest mutex.
   async #checkPreview(manifest, preview) {
+    if (preview.removedFor) throw removedRecord();
     if (this.now() >= Date.parse(preview.expiresAt)) throw fail(409, 'This preview expired. Make a new preview.');
     const reason = await this.#liveIssue(manifest, preview.frozen);
     if (reason) this.#throwReason(reason);
@@ -619,6 +628,7 @@ export class ShareStore {
       const shares = sharesOf(manifest);
       const existing = shares.snapshots.find((item) => item.requestId === request.requestId);
       if (existing) {
+        if (existing.removedFor) throw removedRecord();
         if (existing.previewId !== request.previewId || existing.digest !== request.previewDigest || !sameVerifier(existing.tokenVerifier, tokenVerifier)) {
           throw fail(409, 'This request was already used with different values.');
         }
@@ -627,6 +637,7 @@ export class ShareStore {
       if (await this.#findSnapshot(tokenVerifier)) throw fail(409, 'This link key was already used. Prepare a new one.');
       const preview = shares.previews.find((item) => item.id === request.previewId);
       if (!preview) throw fail(404, 'This preview could not be found.');
+      if (preview.removedFor) throw removedRecord();
       if (preview.snapshotId !== null) throw fail(409, 'This preview was already issued. Make a new preview for another link.');
       if (preview.digest !== request.previewDigest) throw fail(409, 'The preview changed. Review it again before issuing.');
       const now = this.now();
@@ -653,6 +664,7 @@ export class ShareStore {
   }
 
   async #status(manifest, snapshot) {
+    if (snapshot.removedFor) return { status: 'revoked', reason: REMOVED_REASON };
     if (snapshot.revokedAt) return { status: 'revoked', reason: 'Revoked by the owner.' };
     if (this.now() >= Date.parse(snapshot.expiresAt)) return { status: 'expired', reason: 'The link reached its expiry time.' };
     const reason = await this.#liveIssue(manifest, snapshot.frozen);
@@ -662,9 +674,11 @@ export class ShareStore {
   // Owner metadata only: no token verifier, frozen content or link.
   async #metadata(manifest, snapshot) {
     return {
-      id: snapshot.id, title: snapshot.publicView.title, createdAt: snapshot.createdAt, expiresAt: snapshot.expiresAt,
+      id: snapshot.id, title: snapshot.removedFor ? REMOVED_TITLE : snapshot.publicView.title, createdAt: snapshot.createdAt, expiresAt: snapshot.expiresAt,
       ...(await this.#status(manifest, snapshot)),
-      views: snapshot.publicView.views.map((view) => ({ id: view.id, label: view.label })),
+      // The fixed removal cause only; nothing about the deleted contribution.
+      ...(snapshot.removedFor === 'contribution-deleted' && { removedFor: 'contribution-deleted' }),
+      views: snapshot.removedFor ? [] : snapshot.publicView.views.map((view) => ({ id: view.id, label: view.label })),
     };
   }
 

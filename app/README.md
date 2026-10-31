@@ -53,7 +53,11 @@ recording stop; corrected words need a new explicit visitor preview and link.
 Owners can preview a manual change, adopt it or preserve an alternative, and
 record a separate explicit time assertion. Recordings can also be linked to a
 visitor view and object or place without changing geometry. Withdrawal blocks
-dependent uses. See the [collaboration guide](COLLABORATION.md) for grants,
+dependent uses. Providers can separately review and confirm removal of their
+whole contribution from this app's tracked local storage. Access stops first;
+file cleanup has a separate pending or completed state. Previously delivered
+copies, backups and hosted-service retention remain outside that removal.
+See the [collaboration guide](COLLABORATION.md) for grants,
 review and restoration.
 
 Recorded stories connect a permitted imported recording to an explicitly chosen

@@ -90,7 +90,7 @@ const RELATIONSHIP_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/re
 const OBJECTS_CONFIRM_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/confirm$/;
 const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
 const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/(contributions|collaboration)$/;
-const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo|recording\.wav|captions)$/;
+const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo|recording\.wav|captions|deletion|delete)$/;
 const CAPTION_REQUEST_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/captions\/requests\/([^/]+)$/;
 // A caption may hold 20,000 UTF-16 code units; even fully escaped it fits.
 const CAPTION_BODY_BYTES = 128 * 1024;
@@ -560,7 +560,7 @@ export function createAppServer({
       const current = await requireScope(draftId);
       const ownerOnly = eraMatch || fourth === 'review';
       if (ownerOnly && current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
-      const photoRead = fourth === 'photo' || fourth === 'recording.wav';
+      const photoRead = fourth === 'photo' || fourth === 'recording.wav' || fourth === 'deletion';
       const writing = !photoRead && req.method === 'POST' && (!sceneCollaboration || third === 'contributions');
       if (!((sceneCollaboration || photoRead) && reading) && !writing) throw new RequestError(405, 'Method not allowed.');
       if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
@@ -574,8 +574,17 @@ export function createAppServer({
         return;
       }
       if (!UUID.test(third)) throw new RequestError(404, eraMatch ? 'This version could not be found.' : 'This contribution could not be found.');
+      if (fourth === 'deletion') {
+        sendJson(res, 200, await collaboration.deletionPreview(draftId, jobId, current, third));
+        return;
+      }
       if (photoRead) {
         sendAsset(req, res, await (fourth === 'photo' ? collaboration.photo(draftId, jobId, current, third) : collaboration.recording(draftId, jobId, current, third)));
+        return;
+      }
+      if (fourth === 'delete') {
+        const body = strictBody(await readJsonBody(req, CAPTION_BODY_BYTES), ['requestId', 'impactSha256', 'confirmDeletion']);
+        sendJson(res, 200, await collaboration.delete(draftId, jobId, current, third, body));
         return;
       }
       if (eraMatch) {
@@ -924,7 +933,8 @@ export function createAppServer({
         sendJson(res, error.status, { error: error.message }, { connection: 'close' });
         return;
       }
-      console.error(error);
+      // A fixed category only: an unexpected error's message can quote stored content.
+      console.error('request failed: unexpected server error');
       sendJson(res, 500, { error: 'Something went wrong. Please try again.' }, { connection: 'close' });
     });
   });
