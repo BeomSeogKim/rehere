@@ -409,6 +409,50 @@ const UNKNOWN_ERA = Object.freeze({
   kind: 'unknown', label: '', start: null, end: null, statement: '', relation: null, relativeToVariantId: null, confirmed: false, assertedBy: null, assertedAt: null,
 });
 
+// The object the owner adopted or kept a recollection for, as recorded at
+// review time: a known object ID, or null whenever it is not exactly
+// established. Only two-object adopt/alternative decisions with a unique,
+// consistent candidate association count. A present field that is invalid
+// or disagrees is never repaired, and nothing is inferred from transforms,
+// labels or wording. An adoption must also agree with its unique retained
+// version receipt, which alone identifies the target of a pre-field adoption.
+const knownObject = (value) => (OBJECT_IDS.includes(value) ? value : undefined);
+
+function reviewTarget(manifest, contribution) {
+  const review = contribution?.review;
+  if (!isTwoObject(manifest) || !review || (review.decision !== 'adopt' && review.decision !== 'alternative')) return null;
+  const variants = collaborationOf(manifest).variants.filter((item) => item.id === review.variantId);
+  const linked = collaborationOf(manifest).contributions.filter((item) => item.review?.variantId === review.variantId);
+  if (typeof review.variantId !== 'string' || variants.length !== 1 || linked.length !== 1) return null;
+  const [variant] = variants;
+  if (variant.kind !== 'candidate') return null;
+  const adopt = review.decision === 'adopt';
+  // An adoption made a saved version 2 or later that still exists.
+  const current = manifest.edit?.version;
+  const validVersion = Number.isInteger(review.version) && review.version >= 2 && Number.isInteger(current) && review.version <= current;
+  if (adopt ? !(validVersion && variant.edit?.version === review.version) : (review.version !== null || variant.edit?.version !== null)) return null;
+  const found = [];
+  for (const record of [review, variant]) {
+    if (!Object.hasOwn(record, 'targetId')) continue;
+    if (!knownObject(record.targetId)) return null;
+    found.push(record.targetId);
+  }
+  if (adopt) {
+    const receipts = (manifest.edits ?? []).filter((item) => item?.kind === 'contribution' && item.contributionId === contribution.id && item.version === review.version);
+    if (receipts.length !== 1 || !knownObject(receipts[0].targetId)) return null;
+    found.push(receipts[0].targetId);
+  }
+  return found.length > 0 && found.every((id) => id === found[0]) ? found[0] : null;
+}
+
+// A candidate's target only through its unique linked review; a baseline,
+// an orphan or a candidate claimed by several reviews has none.
+function variantTarget(manifest, variant) {
+  if (variant.kind !== 'candidate') return null;
+  const linked = collaborationOf(manifest).contributions.filter((item) => item.review?.variantId === variant.id);
+  return linked.length === 1 ? reviewTarget(manifest, linked[0]) : null;
+}
+
 // The owner's review reason and conflict label are private notes: a provider
 // sees only the fixed decision, linked variant and timestamps. After withdrawal
 // the owner's free-form reason may quote the original, so it is not projected
@@ -421,7 +465,10 @@ function projectContribution(manifest, contribution, principal) {
   const withdrawn = contribution.withdrawnAt !== null;
   const review = contribution.review && {
     decision: contribution.review.decision,
-    ...(owner && { reason: withdrawn ? null : contribution.review.reason, conflict: contribution.review.conflict, captionBinding: captionBinding(contribution) }),
+    ...(owner && {
+      reason: withdrawn ? null : contribution.review.reason, conflict: contribution.review.conflict, captionBinding: captionBinding(contribution),
+      targetId: reviewTarget(manifest, contribution),
+    }),
     reviewedAt: contribution.review.reviewedAt,
     variantId: contribution.review.variantId,
     version: contribution.review.version,
@@ -533,6 +580,7 @@ function projectVariant(manifest, variant, sourceBlocked) {
     era: projectEra(variant, blocked),
     eraRevision: variant.eraRevision,
     blocked,
+    targetId: variantTarget(manifest, variant),
   };
 }
 
@@ -1230,10 +1278,14 @@ export class CollaborationStore {
         // An adoption is checked when its version is saved; an alternative is
         // never saved as a version, so it is checked here before it is stored.
         else if (twoObjects) await this.reconstructions.assertVisibleArrangement(manifest, fields);
+        // The owner's chosen object, kept with the review and its candidate
+        // in this same write (the request digest already covers it).
+        if (twoObjects) review.targetId = request.transform.targetId;
         variant = {
           id: randomUUID(),
           kind: 'candidate',
           label: `${contribution.provider.displayName}'s recollection`,
+          ...(twoObjects && { targetId: request.transform.targetId }),
           parentVersion: manifest.edit.version,
           // An alternative is not a saved main version, so it has no version number.
           edit: { version: adopt ? edit.version : null, ...fields },

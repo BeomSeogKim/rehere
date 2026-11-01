@@ -1168,6 +1168,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const storiesSection = el('section', { className: 'memory-edit story-owner' });
     const sharesSection = el('section', { className: 'memory-edit share-owner' });
     let selected = null;
+    let selectionGen = 0;
     let showingSaved = false;
     let saving = false;
     let reloading = false;
@@ -1265,6 +1266,28 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       const memory = el('div');
       evidence.append(memory);
       memoryLinkPanel = mountMemoryLink(memory, { jobUrl, draftId: draft.id, jobId, objectId: selected, name: nameOf(selected) });
+      evidence.append(otherStatements(selected));
+    }
+
+    // Deliberate jumps to this object's statements in the panels that already
+    // list them; nothing is copied here. A jump belongs to this scene, this
+    // object and the latest press, so a late answer changes nothing elsewhere.
+    let jumpSeq = 0;
+    function otherStatements(id) {
+      const jump = (panel) => {
+        const mine = ++jumpSeq;
+        const lifetime = selectionGen;
+        panel?.revealForObject(id, () => !disposed && token === panelGeneration && selected === id && selectionGen === lifetime && jumpSeq === mine);
+      };
+      const name = nameOf(id);
+      return el('section', { className: 'object-statements' }, [
+        el('h4', { textContent: `Other statements about ${name}` }),
+        el('div', { className: 'actions' }, [
+          el('button', { type: 'button', className: 'secondary', textContent: `Saved proposals for ${name}`, onclick: () => jump(memoryEdit) }),
+          el('button', { type: 'button', className: 'secondary', textContent: `Recollections used for ${name}`, onclick: () => jump(collaborationPanel) }),
+          el('button', { type: 'button', className: 'secondary', textContent: `Recorded stories about ${name}`, onclick: () => jump(storiesPanel) }),
+        ]),
+      ]);
     }
 
     function showEdit() {
@@ -1355,6 +1378,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       typing = null;
       invalid.clear();
       selected = id;
+      // Each change of selection is a new lifetime for jumps started before it.
+      selectionGen += 1;
       editMessage.textContent = '';
       renderEvidence();
       showEdit();

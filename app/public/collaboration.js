@@ -1697,6 +1697,14 @@ export function mountCollaboration(container, bridge) {
   const review = el('div', { className: 'collab-review' });
   const compare = el('div', { className: 'collab-compare' });
   const refreshButton = el('button', { type: 'button', className: 'secondary', textContent: 'Refresh', onclick: () => refresh() });
+  // Owner navigation from one object's sources: the list can be narrowed to
+  // recollections the owner adopted or kept for that object. List-only state;
+  // it never selects, previews or changes a review.
+  const objectFilter = el('div', { className: 'object-filter' });
+  let filterId = null;
+  let revealToken = 0;
+  let revealNote = '';
+  let filterHeading = null;
 
   container.replaceChildren(
     el('h4', { textContent: 'Recollections from others' }),
@@ -1708,6 +1716,7 @@ export function mountCollaboration(container, bridge) {
     el('div', { className: 'actions access-links' }, [refreshButton]),
     status,
     message,
+    objectFilter,
     list,
     review,
     el('h4', { textContent: 'Compare saved scenes' }),
@@ -1734,10 +1743,15 @@ export function mountCollaboration(container, bridge) {
   const contribution = () => state?.contributions.find((entry) => entry.id === selectedId) ?? null;
   const variantLabel = (id) => state?.variants.find((variant) => variant.id === id)?.label ?? 'another scene';
 
+  // The object the owner adopted or kept a recollection for, as recorded.
+  const usedFor = (entry) => (['adopted', 'alternative'].includes(entry.status) ? entry.review?.targetId ?? null : null);
+  const matches = (entry) => Boolean(filterId) && usedFor(entry) === filterId;
   function render() {
     if (disposed || !state) return;
+    const rows = filterId ? state.contributions.filter(matches) : state.contributions;
+    renderFilter();
     list.replaceChildren(
-      ...state.contributions.map((entry) => {
+      ...rows.map((entry) => {
         if (entry.status === 'deleted') {
           return el('li', {}, [
             el('p', { className: 'collab-status' }, [el('strong', { textContent: 'Removed contribution' }), ` · ${contributionStatusText(entry)}`]),
@@ -1758,6 +1772,16 @@ export function mountCollaboration(container, bridge) {
             : el('p', { className: 'memory-text', textContent: entry.text }),
         ]);
         if (entry.periodClaim && entry.text !== null) item.append(el('p', { className: 'hint', textContent: `Time as they remember it (their words, not checked): ${entry.periodClaim}` }));
+        // Owner-only: which object the owner's decision used it for.
+        if (bridge.targets && ['adopted', 'alternative'].includes(entry.status)) {
+          const target = usedFor(entry);
+          item.append(
+            el('p', {
+              className: 'hint',
+              textContent: target ? `You ${entry.status === 'adopted' ? 'adopted this' : 'kept this as an alternative'} for ${bridge.targets.nameOf(target)}.` : 'The object for this arrangement was not recorded.',
+            }),
+          );
+        }
         item.append(el('p', { className: 'hint', textContent: usesText(entry) }));
         if (entry.photo && entry.status !== 'withdrawn') item.append(el('p', { className: 'hint', textContent: `Photo included · ${photoUsesText(entry.photo)}` }));
         if (entry.voice && entry.status !== 'withdrawn') {
@@ -2117,6 +2141,10 @@ export function mountCollaboration(container, bridge) {
       }
       else {
         item.append(el('span', { className: 'hint', textContent: `${describeEra(variant.era, variantLabel)} · ${variant.edit?.objects && bridge.targets ? bridge.targets.describe(variant.edit) : formatTransform(variant.edit)}` }));
+        // A recollection-based alternative names the object the owner kept it for.
+        if (bridge.targets && variant.contributionIds?.length) {
+          item.append(el('span', { className: 'hint', textContent: variant.targetId ? `Kept for ${bridge.targets.nameOf(variant.targetId)}.` : 'The object for this arrangement was not recorded.' }));
+        }
         const isShown = showing?.kind === 'variant' && showing.id === variant.id;
         const view = el('button', { type: 'button', className: 'secondary', textContent: isShown ? 'Shown' : 'Show on the scene', disabled: isShown || busy || (!bridge.editor().clean && !showing) });
         view.addEventListener('click', () => {
@@ -2212,13 +2240,20 @@ export function mountCollaboration(container, bridge) {
     }
   }
 
-  async function refresh() {
+  // Resolves true for a valid fresh read, false for a failed one, and null
+  // when a newer read replaced it (that read's own promise is latestRead).
+  let latestRead = null;
+  function refresh() {
+    latestRead = readOnce();
+    return latestRead;
+  }
+  async function readOnce() {
     const token = ++readToken;
     const result = await request(`${bridge.jobUrl}/collaboration`);
-    if (disposed || token !== readToken) return;
+    if (disposed || token !== readToken) return null;
     if (!result.ok || !Array.isArray(result.body?.contributions) || !Array.isArray(result.body?.variants)) {
       status.textContent = 'Recollections could not be loaded. Try Refresh.';
-      return;
+      return false;
     }
     // Other panels (sharing) hear about a real change only: a fresh valid
     // read that differs from the last one seen, including a photo's
@@ -2240,11 +2275,86 @@ export function mountCollaboration(container, bridge) {
     }
     render();
     if (changed && !disposed) bridge.onChanged?.();
+    return true;
+  }
+
+  function renderFilter() {
+    if (!bridge.targets || (!filterId && !revealNote)) {
+      objectFilter.replaceChildren();
+      return;
+    }
+    const nodes = [];
+    filterHeading = null;
+    if (revealNote) nodes.push(el('p', { className: 'hint', role: 'status', textContent: revealNote }));
+    if (filterId && state && revealNote) {
+      // While a newer jump is reading or has failed, the list still shown is
+      // the earlier one: say so, with no fresh count or "none".
+      filterHeading = el('p', { className: 'hint', textContent: `Still showing the earlier results for ${bridge.targets.nameOf(filterId)}.` });
+      nodes.push(filterHeading);
+    } else if (filterId && state) {
+      const shown = state.contributions.filter(matches).length;
+      const unassigned = state.contributions.filter((entry) => ['adopted', 'alternative'].includes(entry.status) && !usedFor(entry)).length;
+      const name = bridge.targets.nameOf(filterId);
+      filterHeading = el('p', { className: 'hint', textContent: shown ? `Showing recollections used for ${name} (${shown}).` : `No recollection is recorded as used for ${name}.` });
+      nodes.push(
+        filterHeading,
+        ...(unassigned ? [el('p', { className: 'hint', textContent: `${unassigned} without a recorded object ${unassigned === 1 ? 'is' : 'are'} under Show all.` })] : []),
+      );
+    }
+    if (filterId || revealNote) nodes.push(el('div', { className: 'actions' }, [el('button', { type: 'button', className: 'secondary', textContent: 'Show all recollections', onclick: showAll })]));
+    objectFilter.replaceChildren(...nodes);
+  }
+
+  // Shows only recollections used for one object, after a fresh read. Nothing
+  // is declared before that read succeeds, and a late answer for a newer jump,
+  // object or scene changes nothing.
+  async function revealForObject(objectId, isCurrent) {
+    const mine = ++revealToken;
+    revealNote = `Reading recollections used for ${bridge.targets?.nameOf(objectId) ?? 'this object'}…`;
+    renderFilter();
+    // Follow only a genuinely newer read. A write that invalidated this read
+    // without starting another leaves nothing to follow: this jump ends
+    // without declaring anything, and the write's own refresh follows.
+    let read = refresh();
+    let ok = await read;
+    while (ok === null && !disposed && latestRead !== read) {
+      read = latestRead;
+      ok = await read;
+    }
+    if (disposed || mine !== revealToken) return 'stale';
+    if (ok === null || !isCurrent()) {
+      revealNote = '';
+      renderFilter();
+      return 'stale';
+    }
+    if (!ok) {
+      revealNote = `Recollections could not be read just now, so nothing is shown as used for ${bridge.targets?.nameOf(objectId) ?? 'this object'}. Try again.`;
+      renderFilter();
+      return 'failed';
+    }
+    revealNote = '';
+    filterId = objectId;
+    render();
+    const target = list.children[0] ?? filterHeading ?? objectFilter;
+    target.setAttribute?.('tabindex', '-1');
+    target.focus?.();
+    target.scrollIntoView?.({ block: 'nearest' });
+    return 'shown';
+  }
+
+  function showAll() {
+    revealToken += 1;
+    revealNote = '';
+    filterId = null;
+    if (state) render();
+    else renderFilter();
   }
 
   refresh();
   return {
     refresh,
+    revealForObject,
+    showAll,
     // Re-renders controls that depend on the manual editor's state.
     sync() {
       reviewForm?.refreshControls();

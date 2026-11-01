@@ -118,10 +118,23 @@ export function mountStories(container, bridge) {
   const message = el('p', { className: 'form-message', role: 'alert' });
   const status = el('p', { className: 'hint', role: 'status' });
   const list = el('ul', { className: 'collab-list' });
+  // Owner navigation from one object's sources: the list can be narrowed to
+  // stories about that object (story.target.id). List-only; it never plays,
+  // selects or changes the form below.
+  const objectFilter = el('div', { className: 'object-filter' });
+  let filterId = null;
+  let revealToken = 0;
+  let revealNote = '';
+  let filterHeading = null;
+  // Whether the last list read succeeded: an empty list is only "no stories"
+  // after a successful read.
+  let listRead = 'unread';
+  const nameOf = (id) => bridge.objects?.find((object) => object.id === id)?.name ?? 'this object';
   const voiceNote = el('p', { className: 'hint' });
 
-  container.replaceChildren(
-    el('details', { className: 'source-details story-panel' }, [
+  const panel = el('details', { className: 'source-details story-panel' });
+  container.replaceChildren(panel);
+  panel.append(...[
       el('summary', { textContent: 'Recorded stories' }),
       el('p', {
         className: 'hint',
@@ -143,9 +156,9 @@ export function mountStories(container, bridge) {
       el('div', { className: 'actions' }, [save, abandon]),
       message,
       status,
+      objectFilter,
       list,
-    ]),
-  );
+    ]);
 
   function addCueRow(values = { start: '', end: '', text: '' }) {
     const start = el('input', { type: 'text', value: values.start, inputMode: 'decimal' });
@@ -183,8 +196,9 @@ export function mountStories(container, bridge) {
 
   function renderList() {
     for (const player of players.splice(0)) player.dispose();
+    renderFilter();
     list.replaceChildren(
-      ...stories.map((story) => {
+      ...(filterId ? stories.filter((story) => story.target?.id === filterId) : stories).map((story) => {
         const item = el('li', {});
         if (story.status === 'withdrawn') {
           item.append(el('p', { className: 'hint', textContent: 'Withdrawn story. It is no longer played or shared; the original recording is kept.' }));
@@ -208,7 +222,7 @@ export function mountStories(container, bridge) {
         return item;
       }),
     );
-    status.textContent = stories.length ? '' : 'No recorded stories yet.';
+    status.textContent = listRead === 'failed' ? 'Recorded stories could not be read just now.' : listRead === 'ok' && !stories.length ? 'No recorded stories yet.' : '';
   }
 
   function withdrawControl(story) {
@@ -240,17 +254,100 @@ export function mountStories(container, bridge) {
     return wrap;
   }
 
-  async function load({ keepView = true } = {}) {
+  // Every read goes through load(), so latestRead is always the newest one.
+  // Resolves true or false for the stories read, or null when a newer read
+  // replaced it.
+  let latestRead = null;
+  function load(options) {
+    latestRead = readOnce(options);
+    return latestRead;
+  }
+  async function readOnce({ keepView = true } = {}) {
     const token = ++readToken;
     const [listResult, historyResult, collabResult] = await Promise.all([request(`${bridge.jobUrl}/stories`), request(`${bridge.jobUrl}/history`), request(`${bridge.jobUrl}/collaboration`)]);
-    if (disposed || token !== readToken) return;
-    stories = listResult.ok && Array.isArray(listResult.body?.stories) ? listResult.body.stories : stories;
-    choices = viewChoices({
-      history: historyResult.ok && Array.isArray(historyResult.body) ? historyResult.body : [],
-      variants: collabResult.ok && Array.isArray(collabResult.body?.variants) ? collabResult.body.variants : [],
-      currentVersion: bridge.editor().version,
-    });
-    renderViews(keepView ? viewSelect.value : null);
+    if (disposed || token !== readToken) return null;
+    const read = listResult.ok && Array.isArray(listResult.body?.stories);
+    listRead = read ? 'ok' : 'failed';
+    stories = read ? listResult.body.stories : stories;
+    // Saved-view choices change only from a complete fresh read; a failed
+    // history or recollection read keeps the earlier choices and selection.
+    if (historyResult.ok && Array.isArray(historyResult.body) && collabResult.ok && Array.isArray(collabResult.body?.variants)) {
+      choices = viewChoices({ history: historyResult.body, variants: collabResult.body.variants, currentVersion: bridge.editor().version });
+      renderViews(keepView ? viewSelect.value : null);
+    }
+    renderList();
+    return read;
+  }
+
+  function renderFilter() {
+    if (!bridge.objects || (!filterId && !revealNote)) {
+      objectFilter.replaceChildren();
+      filterHeading = null;
+      return;
+    }
+    const nodes = [];
+    filterHeading = null;
+    if (revealNote) nodes.push(el('p', { className: 'hint', role: 'status', textContent: revealNote }));
+    if (filterId && revealNote) {
+      // While a newer jump is reading or has failed, the list still shown is
+      // the earlier one: say so, with no fresh count or "none".
+      filterHeading = el('p', { className: 'hint', textContent: `Still showing the earlier results for ${nameOf(filterId)}.` });
+      nodes.push(filterHeading);
+    } else if (filterId) {
+      const shown = stories.filter((story) => story.target?.id === filterId).length;
+      const unassigned = stories.filter((story) => !bridge.objects.some((object) => object.id === story.target?.id)).length;
+      filterHeading = el('p', { className: 'hint', textContent: shown ? `Showing recorded stories about ${nameOf(filterId)} (${shown}).` : `No recorded story is about ${nameOf(filterId)}.` });
+      nodes.push(filterHeading, ...(unassigned ? [el('p', { className: 'hint', textContent: `${unassigned} without a recorded object ${unassigned === 1 ? 'is' : 'are'} under Show all.` })] : []));
+    }
+    const all = el('button', { type: 'button', className: 'secondary', textContent: 'Show all recorded stories' });
+    all.addEventListener('click', showAll);
+    nodes.push(el('div', { className: 'actions' }, [all]));
+    objectFilter.replaceChildren(...nodes);
+  }
+
+  // Shows only stories about one object, after a fresh read. Nothing is
+  // declared before that read succeeds; a failed read never becomes "none",
+  // and a late answer for a newer jump, object or scene changes nothing.
+  // Re-rendering stops playback; nothing plays or downloads until Play.
+  async function revealForObject(objectId, isCurrent) {
+    const mine = ++revealToken;
+    panel.open = true;
+    revealNote = `Reading recorded stories about ${nameOf(objectId)}…`;
+    renderFilter();
+    // Follow only a genuinely newer read. A write that invalidated this read
+    // without starting another leaves nothing to follow: this jump ends
+    // without declaring anything, and the write's own refresh follows.
+    let read = load();
+    let ok = await read;
+    while (ok === null && !disposed && latestRead !== read) {
+      read = latestRead;
+      ok = await read;
+    }
+    if (disposed || mine !== revealToken) return 'stale';
+    if (ok === null || !isCurrent()) {
+      revealNote = '';
+      renderFilter();
+      return 'stale';
+    }
+    if (!ok) {
+      revealNote = `Recorded stories could not be read just now, so nothing is shown as about ${nameOf(objectId)}. Try again.`;
+      renderFilter();
+      return 'failed';
+    }
+    revealNote = '';
+    filterId = objectId;
+    renderList();
+    const target = list.children[0] ?? filterHeading ?? objectFilter;
+    target.setAttribute?.('tabindex', '-1');
+    target.focus?.();
+    target.scrollIntoView?.({ block: 'nearest' });
+    return 'shown';
+  }
+
+  function showAll() {
+    revealToken += 1;
+    revealNote = '';
+    filterId = null;
     renderList();
   }
 
@@ -371,6 +468,8 @@ export function mountStories(container, bridge) {
   load();
   return {
     refresh: () => load(),
+    revealForObject,
+    showAll,
     dispose() {
       disposed = true;
       readToken += 1;

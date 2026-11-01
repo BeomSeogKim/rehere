@@ -3,6 +3,8 @@
 // shown as a preview and changes the saved scene only through an explicit
 // Apply that the server confirms. The browser never computes a transform.
 
+import { OBJECT_IDS } from './photo-scene.js';
+
 export const TEXT_LIMIT = 2000;
 const POLL_MS = 2000;
 const ACTIVE = new Set(['queued', 'processing']);
@@ -189,6 +191,16 @@ export function mountMemoryEdit(container, bridge) {
   const chooserSummary = el('summary', { textContent: 'Saved proposals' });
   const chooserNote = el('p', { className: 'hint' });
   const chooser = el('ul', { className: 'memory-proposals' });
+  const chooserBox = el('details', { className: 'source-details' }, [chooserSummary, chooserNote]);
+  // Owner navigation from one object's sources: the saved-proposal list can be
+  // narrowed to proposals requested for that object (the exact stored request
+  // target). List-only; it never chooses, previews or applies a proposal.
+  const objectFilter = el('div', { className: 'object-filter' });
+  chooserBox.append(objectFilter, chooser);
+  let filterId = null;
+  let revealToken = 0;
+  let revealNote = '';
+  let filterHeading = null;
   const historyList = el('ol', { className: 'memory-history', reversed: true });
 
   const label = el('label', { htmlFor: text.id, textContent: 'What do you remember about this object?' });
@@ -211,7 +223,7 @@ export function mountMemoryEdit(container, bridge) {
         ]),
     status,
     message,
-    el('details', { className: 'source-details' }, [chooserSummary, chooserNote, chooser]),
+    chooserBox,
     review,
     el('details', { className: 'source-details' }, [el('summary', { textContent: 'Saved versions' }), historyList]),
   );
@@ -302,8 +314,9 @@ export function mountMemoryEdit(container, bridge) {
   function renderChooser() {
     chooserSummary.textContent = `Saved proposals (${proposals.length})`;
     chooserNote.textContent = switchBlock(null);
+    renderFilter();
     chooser.replaceChildren(
-      ...proposals.map((proposal) => {
+      ...(filterId ? proposals.filter((proposal) => proposal.targetId === filterId) : proposals).map((proposal) => {
         const target = bridge.targets && targetOf(proposal) ? `${bridge.targets.nameOf(targetOf(proposal)) ?? 'An object'} · ` : '';
         const label = isRedacted(proposal)
           ? `${target}${timeText(proposal.createdAt)} · ${REDACTED_TEXT}`
@@ -519,10 +532,17 @@ export function mountMemoryEdit(container, bridge) {
   // A read started before a proposal action may describe the state before it,
   // so every action invalidates outstanding reads and then reads again.
   let readToken = 0;
-  async function refresh() {
+  // Resolves true when both lists were read, false otherwise, and null when a
+  // newer read replaced it (that read's own promise is latestRead).
+  let latestRead = null;
+  function refresh() {
+    latestRead = readOnce();
+    return latestRead;
+  }
+  async function readOnce() {
     const token = ++readToken;
     const [list, versions] = await Promise.all([request(`${bridge.jobUrl}/proposals`), request(`${bridge.jobUrl}/history`)]);
-    if (disposed || token !== readToken) return;
+    if (disposed || token !== readToken) return null;
     if (list.ok && Array.isArray(list.body)) {
       proposals = list.body.filter((proposal) => !removedIds.has(proposal?.id)).map(guard);
       if (current) {
@@ -545,6 +565,80 @@ export function mountMemoryEdit(container, bridge) {
     if (versions.ok && Array.isArray(versions.body)) history = versions.body;
     if (!list.ok || !versions.ok) status.textContent = 'Saved proposals or versions could not be loaded. Reload the page to try again.';
     sync();
+    return list.ok && versions.ok && Array.isArray(list.body);
+  }
+
+  const known = (id) => OBJECT_IDS.includes(id);
+  function renderFilter() {
+    if (!bridge.targets || (!filterId && !revealNote)) {
+      objectFilter.replaceChildren();
+      filterHeading = null;
+      return;
+    }
+    const nodes = [];
+    filterHeading = null;
+    if (revealNote) nodes.push(el('p', { className: 'hint', role: 'status', textContent: revealNote }));
+    if (filterId && revealNote) {
+      // While a newer jump is reading or has failed, the list still shown is
+      // the earlier one: say so, with no fresh count or "none".
+      filterHeading = el('p', { className: 'hint', textContent: `Still showing the earlier results for ${bridge.targets.nameOf(filterId)}.` });
+      nodes.push(filterHeading);
+    } else if (filterId) {
+      const shown = proposals.filter((proposal) => proposal.targetId === filterId).length;
+      const unassigned = proposals.filter((proposal) => !known(proposal.targetId)).length;
+      const name = bridge.targets.nameOf(filterId);
+      filterHeading = el('p', { className: 'hint', textContent: shown ? `Showing saved proposals for ${name} (${shown}).` : `No saved proposal is recorded for ${name}.` });
+      nodes.push(filterHeading, ...(unassigned ? [el('p', { className: 'hint', textContent: `${unassigned} without a recorded object ${unassigned === 1 ? 'is' : 'are'} under Show all.` })] : []));
+    }
+    const all = el('button', { type: 'button', className: 'secondary', textContent: 'Show all saved proposals' });
+    all.addEventListener('click', showAll);
+    nodes.push(el('div', { className: 'actions' }, [all]));
+    objectFilter.replaceChildren(...nodes);
+  }
+
+  // Shows only proposals requested for one object, after a fresh read. Nothing
+  // is declared before that read succeeds, and a late answer for a newer jump,
+  // object or scene changes nothing. The reviewed proposal stays as it is.
+  async function revealForObject(objectId, isCurrent) {
+    const mine = ++revealToken;
+    chooserBox.open = true;
+    revealNote = `Reading saved proposals for ${bridge.targets?.nameOf(objectId) ?? 'this object'}…`;
+    renderFilter();
+    // Follow only a genuinely newer read. A write that invalidated this read
+    // without starting another leaves nothing to follow: this jump ends
+    // without declaring anything, and the write's own refresh follows.
+    let read = refresh();
+    let ok = await read;
+    while (ok === null && !disposed && latestRead !== read) {
+      read = latestRead;
+      ok = await read;
+    }
+    if (disposed || mine !== revealToken) return 'stale';
+    if (ok === null || !isCurrent()) {
+      revealNote = '';
+      renderFilter();
+      return 'stale';
+    }
+    if (!ok) {
+      revealNote = `Saved proposals could not be read just now, so nothing is shown as being for ${bridge.targets?.nameOf(objectId) ?? 'this object'}. Try again.`;
+      renderFilter();
+      return 'failed';
+    }
+    revealNote = '';
+    filterId = objectId;
+    renderChooser();
+    const target = chooser.children[0] ?? filterHeading ?? objectFilter;
+    target.setAttribute?.('tabindex', '-1');
+    target.focus?.();
+    target.scrollIntoView?.({ block: 'nearest' });
+    return 'shown';
+  }
+
+  function showAll() {
+    revealToken += 1;
+    revealNote = '';
+    filterId = null;
+    renderChooser();
   }
 
   function poll(id) {
@@ -753,6 +847,8 @@ export function mountMemoryEdit(container, bridge) {
   return {
     sync,
     refresh,
+    revealForObject,
+    showAll,
     dispose() {
       disposed = true;
       stopPolling();

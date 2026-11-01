@@ -242,7 +242,7 @@ describe('review', () => {
     assert.equal(result.contribution.status, 'adopted');
     assert.deepEqual({ ...result.variant, id: null, createdAt: null, era: null }, {
       id: null, label: "Alex's recollection", parentVersion: 1, edit: { version: 2, offset: [0.5, 0, 0], yaw: 0.25 }, contributionIds: [contribution.id],
-      createdAt: null, createdBy: ctx.owner.id, era: null, eraRevision: 0, blocked: false,
+      createdAt: null, createdBy: ctx.owner.id, era: null, eraRevision: 0, blocked: false, targetId: null,
     });
     const stored = await ctx.stored();
     assert.deepEqual(stored.edit, result.edit);

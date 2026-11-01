@@ -91,6 +91,21 @@ owner chooses which named object the recollection positions; the result keeps
 the other object's transform and the current relationship rule, and a rule it
 would break blocks adoption. See [two objects](OBJECTS.md).
 
+New two-object adoptions and alternatives retain the object the owner chose.
+The owner's list names it as the subject of that decision, not an automatic
+interpretation of the contributor's words. Earlier adoptions can recover it
+only from an exact retained contribution/version receipt. An earlier
+alternative without that record keeps its object unknown; transform or text
+similarity does not establish the association. Existing records are not
+rewritten to add this information.
+
+From a chosen object's **Sources**, open its relevant recollections in this
+same list. **Show all** keeps unassigned submissions and unknown older records
+reachable. Filtering does not select a review or replace its typed fields,
+acknowledgments, prepared retry or scene preview. The target association is
+owner-only metadata; it does not change contributors' fixed outcome details
+or an issued visitor snapshot.
+
 For a photo-backed correction or alternative, the owner also explicitly
 acknowledges reviewing the contributed photo. The photo, contributor's words
 and owner's manual interpretation remain distinct. This does not automatically

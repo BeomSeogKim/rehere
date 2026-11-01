@@ -85,6 +85,14 @@ answer can repeat the exact prepared request; a conflict needs a fresh review.
 These owner-private links are excluded from model requests and visitor views.
 Whole-place removal includes their stored metadata.
 
+The same Sources disclosure can open the existing saved-proposal,
+recollection and recorded-story lists for the chosen object. Each jump
+refreshes that list before filtering it by its recorded object identifier.
+**Show all** restores the place-wide list, including records whose object
+was not recorded. An unreadable list is not reported as an empty result.
+These are reading controls: they do not choose a proposal, apply a change,
+retarget a form or start playback. Unsaved placement and typed input stay.
+
 ## Arrange and relate
 
 A saved arrangement holds a transform for each object and at most one rule.
