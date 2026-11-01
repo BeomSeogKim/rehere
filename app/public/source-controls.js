@@ -31,9 +31,12 @@ export function impactText(impacts) {
   // The owner's links between photo regions, counted whether or not they can
   // be shown now; null means that count could not be read.
   if (Number.isInteger(impacts.linkedRegions)) uses.push(plural(impacts.linkedRegions, 'linked photo region', 'linked photo regions'));
+  // Links from a scene object to the saved writing, counted when this is that
+  // writing or that scene's photo; null means they could not be counted.
+  if (Number.isInteger(impacts.linkedMemories)) uses.push(plural(impacts.linkedMemories, 'written memory link', 'written memory links'));
   uses.push(plural(impacts.snapshots ?? 0, 'shared link', 'shared links'));
   const listed = uses.length === 2 ? uses.join(' and ') : `${uses.slice(0, -1).join(', ')} and ${uses.at(-1)}`;
-  const unknown = impacts.linkedRegions === null ? ' Linked photo regions could not be counted.' : '';
+  const unknown = `${impacts.linkedRegions === null ? ' Linked photo regions could not be counted.' : ''}${impacts.linkedMemories === null ? ' Written memory links could not be counted.' : ''}`;
   return `Currently used by ${listed}, with ${plural(impacts.processing ?? 0, 'piece of work', 'pieces of work')} in progress.${unknown}`;
 }
 

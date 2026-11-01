@@ -322,7 +322,7 @@ describe('story context and restrictions', () => {
       gate.resolve();
       assert.equal((await shareOnly).status, 201);
       const impacts = (await owner.json(policyOf(place, place.voiceId))).impacts;
-      assert.deepEqual(impacts, { scenes: 0, stories: 1, snapshots: 0, processing: 0, linkedRegions: 0 });
+      assert.deepEqual(impacts, { scenes: 0, stories: 1, snapshots: 0, processing: 0, linkedRegions: 0, linkedMemories: 0 });
     } finally {
       gate.resolve();
       await app.close();

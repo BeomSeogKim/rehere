@@ -35,6 +35,7 @@ const inventory = (overrides = {}) => ({
   visitorSnapshots: 1,
   visitorPreviews: 0,
   linkedRegions: 4,
+  linkedMemories: 2,
   invitations: 1,
   intakes: 0,
   processing: 0,
@@ -65,7 +66,10 @@ const record = (draftId, requestId, impactSha256, state = 'access-stopped') => (
   inventory: inventory(),
 });
 deleted.set(ids.C, record(ids.C, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', hash(3)));
-deleted.set(ids.D, record(ids.D, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', hash(4), 'complete'));
+// A complete record accepted before written memory links were counted.
+const legacy = record(ids.D, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', hash(4), 'complete');
+delete legacy.inventory.linkedMemories;
+deleted.set(ids.D, legacy);
 receipts.set(deleted.get(ids.C).requestId, { draftId: ids.C, impactSha256: hash(3) });
 
 const take = (name) => {
@@ -195,13 +199,35 @@ describe('owner deletion of a whole place', () => {
     assert.ok(listText().includes('Bakery') && !listText().includes(ids.C));
   });
 
+  it('does not accept a current review without its written memory link count', async () => {
+    const saved = impact.get(ids.A);
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      const answer = await original(url, options);
+      if (url !== `/api/drafts/${ids.A}/deletion`) return answer;
+      const body = await answer.json();
+      delete body.inventory?.linkedMemories;
+      return json(answer.status, body);
+    };
+    try {
+      await go(`#/memories/${ids.A}`);
+      await openReview();
+      assert.match(panelText(), /Rehere could not show what deleting this place would remove\. Nothing was deleted\./);
+      assert.equal(panelButton('Delete this place permanently'), undefined);
+    } finally {
+      globalThis.fetch = original;
+      impact.set(ids.A, saved);
+      await go('');
+    }
+  });
+
   it('opening only reads; keeping the place sends nothing; the acknowledgement gates the final button', async () => {
     await go(`#/memories/${ids.A}`);
     assert.equal(details().open, false);
     assert.match(details().textContent, /^Delete this place from this computer…/);
     await openReview();
     assert.equal(requests.at(-1).url, `/api/drafts/${ids.A}/deletion`);
-    assert.match(panelText(), /Deleting removes this place and everything this app keeps for it on this computer: 2 original photos, the written memory, 1 scene, 0 recorded stories, 3 contributions from 2 contributors, 1 visitor link, 0 visitor previews, 4 linked photo regions, 1 invitation, 0 related upload records and 0 pieces of work in progress\./);
+    assert.match(panelText(), /Deleting removes this place and everything this app keeps for it on this computer: 2 original photos, the written memory, 1 scene, 0 recorded stories, 3 contributions from 2 contributors, 1 visitor link, 0 visitor previews, 4 linked photo regions, 2 written memory links, 1 invitation, 0 related upload records and 0 pieces of work in progress\./);
     assert.match(panelText(), /This is not a withdrawal made for the people who sent them/);
     assert.match(panelText(), /Unsaved changes on this screen, such as scene edits, previews or an open rename, are discarded when you confirm\./);
     assert.match(panelText(), /It is not secure erasure, and it cannot remove backups, logs, caches, downloads, screenshots/);
@@ -341,6 +367,8 @@ describe('owner deletion of a whole place', () => {
     assert.match(byId('viewer-message').textContent, /^This place was deleted from this computer\. Local cleanup finished on .* for what was recorded when deletion was requested: 2 original photos/);
     assert.match(byId('viewer-message').textContent, /0 pieces of work active when deletion was requested/, 'the frozen scope, not work still running');
     assert.doesNotMatch(byId('viewer-message').textContent, /in progress/);
+    assert.match(byId('viewer-message').textContent, /; written memory links were not counted in this older record\./, 'an older record says so, never 0');
+    assert.doesNotMatch(byId('viewer-message').textContent, /0 written memory links/);
     assert.equal(requests.filter((r) => r.url.includes(`${ids.D}/reconstructions`)).length, 0, 'no scene is opened');
     assert.equal(panel().children.length, 0, 'nothing to delete again');
     await go('#/memories/99999999-9999-4999-8999-999999999999');

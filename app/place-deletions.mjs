@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { RequestError } from './drafts.mjs';
 import { OUTPUTS } from './reconstructions.mjs';
 import { PLAYBACK_NAME, REVIEW_NAME, VOICE_ORIGINAL_NAMES } from './contribution-photos.mjs';
+import { MEMORY_LINKS_BYTES, MEMORY_LINKS_FILE, storedMemoryLinks, validMemoryLinks } from './memory-links.mjs';
 
 // Owner removal of one saved place from this app's tracked local storage.
 // A permanent, content-free barrier in data/place-deletions/<draftId>.json is
@@ -36,7 +38,11 @@ export const INVENTORY_NUMBERS = Object.freeze([
   'photos', 'scenes', 'recordedStories', 'contributions', 'contributionProviders', 'visitorSnapshots', 'visitorPreviews',
   'linkedRegions', 'invitations', 'intakes', 'processing',
 ]);
+// Schema 1 records (before written memory links) keep their exact 13-key
+// inventory; schema 2 records, written by every new deletion, require the
+// written memory link count too. A count is never synthesized for schema 1.
 const INVENTORY_KEYS = [...INVENTORY_NUMBERS, 'writtenMemory', 'recording'];
+const INVENTORY_KEYS_V2 = [...INVENTORY_KEYS, 'linkedMemories'];
 const RECORD_KEYS = ['schemaVersion', 'draftId', 'requestId', 'impactSha256', 'state', 'requestedAt', 'completedAt', 'inventory', 'jobIds', 'intakeIds', 'retiredVerifiers', 'steps'];
 
 function exactKeys(value, keys) {
@@ -44,8 +50,8 @@ function exactKeys(value, keys) {
     && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
-const validInventory = (inventory) => exactKeys(inventory, INVENTORY_KEYS)
-  && INVENTORY_NUMBERS.every((key) => Number.isSafeInteger(inventory[key]) && inventory[key] >= 0)
+const validInventory = (inventory, schemaVersion) => exactKeys(inventory, schemaVersion === 2 ? INVENTORY_KEYS_V2 : INVENTORY_KEYS)
+  && [...INVENTORY_NUMBERS, ...(schemaVersion === 2 ? ['linkedMemories'] : [])].every((key) => Number.isSafeInteger(inventory[key]) && inventory[key] >= 0)
   && typeof inventory.writtenMemory === 'boolean' && typeof inventory.recording === 'boolean';
 
 // A canonical ISO timestamp, as written by toISOString().
@@ -54,13 +60,13 @@ const isTime = (value) => typeof value === 'string' && Number.isFinite(Date.pars
 // Fails closed on any inconsistency: a complete record needs every earlier
 // step done and a completion time no earlier than its request.
 function validRecord(record, draftId) {
-  return exactKeys(record, RECORD_KEYS) && record.schemaVersion === 1 && record.draftId === draftId && isId(record.requestId)
+  return exactKeys(record, RECORD_KEYS) && (record.schemaVersion === 1 || record.schemaVersion === 2) && record.draftId === draftId && isId(record.requestId)
     && isSha(record.impactSha256) && (record.state === 'access-stopped' || record.state === 'complete') && isTime(record.requestedAt)
     && (record.state === 'complete'
       ? isTime(record.completedAt) && Date.parse(record.completedAt) >= Date.parse(record.requestedAt)
         && record.steps?.intakesConsumed === true && record.steps?.invitationsRevoked === true
       : record.completedAt === null)
-    && validInventory(record.inventory)
+    && validInventory(record.inventory, record.schemaVersion)
     && Array.isArray(record.jobIds) && record.jobIds.every(isId) && Array.isArray(record.intakeIds) && record.intakeIds.every(isId)
     && Array.isArray(record.retiredVerifiers) && record.retiredVerifiers.every(isSha)
     && exactKeys(record.steps, ['intakesConsumed', 'invitationsRevoked'])
@@ -73,8 +79,8 @@ export const publicRecord = (record) => ({
 });
 
 // Reads at most `limit + 1` bytes through one handle; throws on any read error.
-async function readCapped(file, limit) {
-  const handle = await open(file, 'r');
+async function readCapped(file, limit, flags = 'r') {
+  const handle = await open(file, flags);
   try {
     const buffer = Buffer.alloc(limit + 1);
     let total = 0;
@@ -275,7 +281,7 @@ const temp = (name) => new RegExp(`^${name.replace(/\./g, '\\.')}\\.${UUID_SOURC
 const DRAFT_FILES = [/^draft\.json$/, /^intake-receipt\.json$/, /^policy\.json$/, /^place\.json$/, temp('policy.json'), temp('place.json'),
   /^photo-[1-9][0-9]?\.(jpg|png)$/, /^voice\.(webm|ogg|m4a)$/];
 const MEDIA = new Set(['original.jpg', 'original.png', REVIEW_NAME, PLAYBACK_NAME, ...Object.values(VOICE_ORIGINAL_NAMES)]);
-const JOB_FILES = [/^manifest\.json$/, /^region-links\.json$/, temp('manifest.json'), temp('region-links.json')];
+const JOB_FILES = [/^manifest\.json$/, /^region-links\.json$/, /^memory-links\.json$/, temp('manifest.json'), temp('region-links.json'), temp('memory-links.json')];
 const WAV = new RegExp(`^${UUID_SOURCE}\\.wav$`);
 const CONTRIBUTION_DIR = new RegExp(`^(${UUID_SOURCE}|\\.staging-${UUID_SOURCE}-${UUID_SOURCE})$`);
 const PART_FILE = new RegExp(`^${UUID_SOURCE}(\\.bin|\\.${UUID_SOURCE}\\.tmp)$`);
@@ -373,6 +379,7 @@ export class PlaceDeletionService {
     const inventory = {
       photos: draft.photos.length, writtenMemory: draft.text !== '', recording: Boolean(draft.voice), scenes: 0, recordedStories: 0,
       contributions: 0, contributionProviders: 0, visitorSnapshots: 0, visitorPreviews: 0, linkedRegions: 0, invitations: 0, intakes: 0, processing: 0,
+      linkedMemories: 0,
     };
     const providers = new Set();
     const jobs = [];
@@ -424,7 +431,27 @@ export class PlaceDeletionService {
           inventory.linkedRegions += entry.links.length;
         }
       }
-      jobs.push({ id: jobId, manifest: manifestFile.sha, links: linksFile.missing ? null : linksFile.sha });
+      // Written memory links: the exact bytes, read to their own cap and
+      // validated strictly; anything else refuses the review.
+      let memories = null;
+      try {
+        // A regular file only, never read through a link.
+        const memoriesFile = path.join(jobDir, MEMORY_LINKS_FILE);
+        if (!(await lstat(memoriesFile)).isFile()) throw fail(503, UNREVIEWABLE);
+        const bytes = await readCapped(memoriesFile, MEMORY_LINKS_BYTES, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        let state = null;
+        try {
+          state = JSON.parse(bytes.toString('utf8'));
+        } catch {
+          state = null;
+        }
+        if (!validMemoryLinks(state)) throw fail(503, UNREVIEWABLE);
+        inventory.linkedMemories += storedMemoryLinks(state);
+        memories = sha256(bytes);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw fail(503, UNREVIEWABLE);
+      }
+      jobs.push({ id: jobId, manifest: manifestFile.sha, links: linksFile.missing ? null : linksFile.sha, memories });
     }
     inventory.contributionProviders = providers.size;
 
@@ -507,7 +534,7 @@ export class PlaceDeletionService {
       const review = await this.#review(draftId);
       if (review.impactSha256 !== request.impactSha256) throw fail(409, STALE);
       return this.places.write({
-        schemaVersion: 1, draftId, requestId: request.requestId, impactSha256: review.impactSha256, state: 'access-stopped',
+        schemaVersion: 2, draftId, requestId: request.requestId, impactSha256: review.impactSha256, state: 'access-stopped',
         requestedAt: new Date().toISOString(), completedAt: null, inventory: review.inventory, jobIds: review.jobIds,
         intakeIds: review.intakeIds, retiredVerifiers: review.retiredVerifiers, steps: { intakesConsumed: false, invitationsRevoked: false },
       });

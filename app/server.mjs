@@ -57,6 +57,7 @@ const STATIC_FILES = new Map([
   ['/visible-surfaces.js', ['visible-surfaces.js', 'text/javascript; charset=utf-8']],
   ['/region-links.js', ['region-links.js', 'text/javascript; charset=utf-8']],
   ['/place-removal.js', ['place-removal.js', 'text/javascript; charset=utf-8']],
+  ['/memory-link.js', ['memory-link.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // The account-free visitor listener serves only the visit page and the exact
@@ -137,6 +138,7 @@ const RELATIONSHIP_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/re
 const OBJECTS_CONFIRM_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/confirm$/;
 const REGION_LINKS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/([^/]+)\/region-links$/;
 const REGION_REFERENCE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/region-reference\/([^/]+)$/;
+const MEMORY_LINK_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/([^/]+)\/memory-link$/;
 const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
 const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/(contributions|collaboration)$/;
 const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo|recording\.wav|captions|deletion|delete)$/;
@@ -886,6 +888,23 @@ export function createAppServer({
       }
       if (regionLinksMatch && req.method === 'POST') {
         sendJson(res, 200, await reconstructions.changeRegionLink(draftId, jobId, third, await readJsonBody(req)));
+        return;
+      }
+      throw new RequestError(405, 'Method not allowed.');
+    }
+    // Owner link from the place's saved written memory to one object. IDs
+    // and the object are checked before any storage is read.
+    const memoryLinkMatch = MEMORY_LINK_PATH.exec(pathname);
+    if (memoryLinkMatch) {
+      const [, draftId, jobId, objectId] = memoryLinkMatch;
+      if (!UUID_PATTERN.test(draftId) || !UUID_PATTERN.test(jobId)) throw new RequestError(404, NOT_FOUND);
+      if (!OBJECT_IDS.includes(objectId)) throw new RequestError(404, 'This object could not be found.');
+      if (reading) {
+        sendJson(res, 200, await reconstructions.memoryLink(draftId, jobId, objectId));
+        return;
+      }
+      if (req.method === 'POST') {
+        sendJson(res, 200, await reconstructions.changeMemoryLink(draftId, jobId, objectId, await readJsonBody(req)));
         return;
       }
       throw new RequestError(405, 'Method not allowed.');

@@ -17,13 +17,20 @@ requiring model use. It records the owner's judgment and does not process the
 photo with a model, align it or change an arrangement. Removing place use hides
 that reference region while retaining the link record and original.
 
+Linking the whole saved written memory to a confirmed object also needs only
+place use. It records the owner's judgment without sending words to a model
+or sharing them. Removing place use hides the linked writing and retains
+its link record and original.
+
 ## Stop using material
 
 **Stop using material** requires a second confirmation and shows the current
-local scene, recorded-story, snapshot, linked-region and processing counts.
+local scene, recorded-story, snapshot, linked-region, written-memory-link
+and processing counts.
 Linked regions count stored references, including ones currently hidden. If
 their optional metadata cannot be read, that count is explicitly unknown;
-source restriction still works. Stopping use is irreversible in
+source restriction still works. Written-memory links use the same stored-use
+counting and unknown-count behavior. Stopping use is irreversible in
 this interface. It removes the material from new archive responses and blocks
 its dependent uses; it does not delete the retained original. A stopped photo
 blocks every scene version and alternative derived from it. Restoring an older

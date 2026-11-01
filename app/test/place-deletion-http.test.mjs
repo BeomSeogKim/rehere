@@ -21,7 +21,7 @@ const tempDirs = [];
 after(() => Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true }))));
 const NOT_FOUND = { error: 'This memory could not be found.' };
 const VISIT_UNAVAILABLE = 'This shared place is not available.';
-const INVENTORY_KEYS = ['contributionProviders', 'contributions', 'intakes', 'invitations', 'linkedRegions', 'photos', 'processing', 'recordedStories',
+const INVENTORY_KEYS = ['contributionProviders', 'contributions', 'intakes', 'invitations', 'linkedMemories', 'linkedRegions', 'photos', 'processing', 'recordedStories',
   'recording', 'scenes', 'visitorPreviews', 'visitorSnapshots', 'writtenMemory'];
 
 function deferred() {
@@ -169,7 +169,7 @@ describe('owner place deletion', () => {
       assert.deepEqual(Object.keys(state.inventory).sort(), INVENTORY_KEYS);
       assert.deepEqual(state.inventory, {
         photos: 1, writtenMemory: false, recording: false, scenes: 1, recordedStories: 0, contributions: 1, contributionProviders: 1,
-        visitorSnapshots: 1, visitorPreviews: 1, linkedRegions: 0, invitations: 2, intakes: 0, processing: 0,
+        visitorSnapshots: 1, visitorPreviews: 1, linkedRegions: 0, invitations: 2, intakes: 0, processing: 0, linkedMemories: 0,
       });
       assert.equal((await owner.request(`/api/drafts/${place.draft.id}/deletion`, { method: 'HEAD' })).status, 200);
       assert.deepEqual(await hashTree(dataDir), before, 'reviewing writes nothing');

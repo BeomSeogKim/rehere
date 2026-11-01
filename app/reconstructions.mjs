@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -17,6 +18,10 @@ import {
 } from './arrangements.mjs';
 import { objectSurfaceMeshes } from './public/photo-scene.js';
 import { checkRelationship } from './public/scene-relations.js';
+import {
+  MEMORY_LINKS_BYTES, MEMORY_LINKS_FILE, MEMORY_RECEIPTS_MAX, emptyMemoryEntry, memoryLinkView, memoryRequestDigest, parseMemoryLinkRequest,
+  validMemoryLinks, writtenSourceView,
+} from './memory-links.mjs';
 import { SourcePolicies, allows } from './source-policies.mjs';
 import { sha256 } from './sources.mjs';
 
@@ -282,8 +287,8 @@ async function writeJsonAtomic(file, value) {
 // Reads at most `limit + 1` bytes through one file handle, so a file that
 // grew after any check is never read in full. Throws on a missing or
 // unreadable file.
-async function readUpTo(file, limit) {
-  const handle = await open(file, 'r');
+async function readUpTo(file, limit, flags = 'r') {
+  const handle = await open(file, flags);
   try {
     const buffer = Buffer.alloc(limit + 1);
     let total = 0;
@@ -322,6 +327,7 @@ const REGION_NOT_READY = 'Link photo regions after both objects are confirmed.';
 const REGION_UNAVAILABLE = 'Photo region links are unavailable right now. Nothing was changed.';
 const REGION_UNREADABLE = 'The photo region link could not be read.';
 const CHECKSUM_MESSAGE = 'The saved photo no longer matches its recorded checksum, so it cannot be used.';
+const MEMORY_UNAVAILABLE = 'Written memory links are unavailable right now. Nothing was changed.';
 const regionBoxValid = (box, [width, height]) => Array.isArray(box) && box.length === 4 && box.every(finite)
   && box[0] >= 0 && box[1] >= 0 && box[2] > box[0] && box[3] > box[1] && box[2] <= width && box[3] <= height;
 const positiveInt = (value) => Number.isInteger(value) && value > 0;
@@ -1651,12 +1657,119 @@ export class ReconstructionStore {
     });
   }
 
+  // The stored written memory links of one scene, empty when there is no
+  // file. A larger, unreadable or invalid file, or an unsafe job folder,
+  // throws a fixed 503; it never reads as empty.
+  async #readMemoryLinks(draftId, jobId) {
+    const jobDir = this.jobDir(draftId, jobId);
+    if (!(await safeJobDirectory(jobDir, this.rootDir).catch(() => false))) throw new RequestError(503, MEMORY_UNAVAILABLE);
+    // Only a regular file is read, and never through a link: a symlinked,
+    // special or swapped entry is unavailable, not empty.
+    const file = path.join(jobDir, MEMORY_LINKS_FILE);
+    let bytes;
+    try {
+      if (!(await lstat(file)).isFile()) throw new RequestError(503, MEMORY_UNAVAILABLE);
+      bytes = await readUpTo(file, MEMORY_LINKS_BYTES, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    } catch (error) {
+      if (error.code === 'ENOENT') return { schemaVersion: 1, objects: {} };
+      throw new RequestError(503, MEMORY_UNAVAILABLE);
+    }
+    let state = null;
+    try {
+      if (bytes.length <= MEMORY_LINKS_BYTES) state = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      state = null;
+    }
+    if (!validMemoryLinks(state)) throw new RequestError(503, MEMORY_UNAVAILABLE);
+    return state;
+  }
+
+  // Callers hold the mutex. The current written source is read fresh from
+  // the saved draft with its current place use; the words appear only while
+  // available, and the link never carries them.
+  async #memoryView(draft, manifest, objectId, entry) {
+    const placeAllowed = Boolean(draft?.textSourceId) && (await this.sourcePolicies.canUse(draft, draft.textSourceId, 'place'));
+    const written = writtenSourceView(draft, placeAllowed);
+    const link = memoryLinkView(entry.link, written);
+    // While a stored link's binding is unavailable, no current words are shown
+    // for it, even ones that would validate against changed metadata.
+    const source = written && link && !link.available
+      ? { sourceId: written.view.sourceId, available: false, reason: link.reason, text: null }
+      : written && { ...written.view };
+    return {
+      draftId: manifest.draftId, jobId: manifest.id, objectId, label: manifest.objects.find((item) => item.id === objectId).label,
+      revision: entry.revision, updatedAt: entry.updatedAt, source, link,
+    };
+  }
+
+  async memoryLink(draftId, jobId, objectId) {
+    if (!OBJECT_IDS.includes(objectId)) throw new RequestError(404, 'This object could not be found.');
+    await this.recover();
+    return this.serialize(async () => {
+      const { manifest, draft } = await this.#linkScene(draftId, jobId);
+      const state = await this.#readMemoryLinks(draftId, jobId);
+      return this.#memoryView(draft, manifest, objectId, state.objects[objectId] ?? emptyMemoryEntry());
+    });
+  }
+
+  // One explicit set or remove for one object, in the same order as photo
+  // region links: exact replay first (never reapplied), then the receipt
+  // cap, then the revision. Every success, a no-op included, keeps a receipt.
+  async changeMemoryLink(draftId, jobId, objectId, body) {
+    if (!OBJECT_IDS.includes(objectId)) throw new RequestError(404, 'This object could not be found.');
+    const request = parseMemoryLinkRequest(body);
+    await this.recover();
+    return this.serialize(async () => {
+      const { manifest, draft } = await this.#linkScene(draftId, jobId);
+      const state = await this.#readMemoryLinks(draftId, jobId);
+      const entry = state.objects[objectId] ?? emptyMemoryEntry();
+      const digest = memoryRequestDigest(request);
+      const receipt = entry.receipts.find((item) => item.requestId === request.requestId);
+      if (receipt) {
+        if (receipt.digest !== digest) throw new RequestError(409, 'This request was already used with different values.');
+        return { ...(await this.#memoryView(draft, manifest, objectId, entry)), changed: false, replayed: true, appliedRevision: receipt.revision };
+      }
+      if (entry.receipts.length >= MEMORY_RECEIPTS_MAX) throw new RequestError(409, 'This written memory link cannot be changed again.');
+      if (request.baseRevision !== entry.revision) throw new RequestError(409, 'This written memory link changed elsewhere. Reload it before saving.');
+      let link = entry.link;
+      if (request.action === 'remove') {
+        // A link to words that are no longer available can still be removed.
+        if (!entry.link) throw new RequestError(404, 'There is no written memory link to remove.');
+        if (entry.link.sourceId !== request.sourceId) throw new RequestError(409, 'This written memory link refers to different words. Reload it before removing.');
+        link = null;
+      } else {
+        const placeAllowed = Boolean(draft?.textSourceId) && (await this.sourcePolicies.canUse(draft, draft.textSourceId, 'place'));
+        const written = writtenSourceView(draft, placeAllowed);
+        if (!written || written.view.sourceId !== request.sourceId || written.view.reason === 'unreadable') {
+          throw new RequestError(400, 'This place has no saved written memory that can be linked.');
+        }
+        if (written.view.reason === 'source') throw new RequestError(403, 'This written memory does not currently have permission for place use.');
+        if (written.view.reason === 'checksum') throw new RequestError(409, 'The saved written memory no longer matches its recorded checksum, so it cannot be linked.');
+        const same = entry.link && entry.link.sourceId === request.sourceId && entry.link.sourceSha256 === written.sha256;
+        if (!same) link = { sourceId: request.sourceId, sourceSha256: written.sha256, linkedAt: new Date().toISOString() };
+      }
+      const changed = link !== entry.link;
+      const revision = changed ? entry.revision + 1 : entry.revision;
+      const next = { revision, updatedAt: changed ? new Date().toISOString() : entry.updatedAt, link, receipts: [...entry.receipts, { requestId: request.requestId, digest, revision }] };
+      const file = path.join(this.jobDir(draftId, jobId), MEMORY_LINKS_FILE);
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify({ schemaVersion: 1, objects: { ...state.objects, [objectId]: next } }, null, 2), { flag: 'wx', mode: 0o600 });
+        await rename(temporary, file);
+      } catch {
+        await rm(temporary, { force: true }).catch(() => {});
+        throw new RequestError(503, 'The written memory link could not be saved. Nothing was changed.');
+      }
+      return { ...(await this.#memoryView(draft, manifest, objectId, next)), changed, replayed: false, appliedRevision: revision };
+    });
+  }
+
   // Local current uses of a source: scenes built from it, live shared
   // snapshots of those scenes, and model work still running for them.
   // Counts saved uses of a photo or recording: a scene built from the photo,
   // its stories, and stories that use the recording. Each snapshot counts once.
   async sourceImpacts(draftId, sourceId) {
-    const impacts = { scenes: 0, stories: 0, snapshots: 0, processing: 0, linkedRegions: 0 };
+    const impacts = { scenes: 0, stories: 0, snapshots: 0, processing: 0, linkedRegions: 0, linkedMemories: 0 };
     if (!UUID_PATTERN.test(draftId)) return impacts;
     const now = Date.now();
     for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
@@ -1674,6 +1787,17 @@ export class ReconstructionStore {
             impacts.linkedRegions += entry.links.filter((link) => link.sourceId === sourceId || manifest.sourceId === sourceId).length;
           }
         }
+      }
+      // Written memory links the same way: each stored link once, when it
+      // refers to this source or its scene's base photo is this source.
+      if (impacts.linkedMemories !== null) {
+        const links = await this.#readMemoryLinks(draftId, jobId).catch(() => undefined);
+        const stored = links ? Object.values(links.objects).filter((entry) => entry.link !== null) : [];
+        // The base photo is trusted only from this exact scene's own record.
+        const baseKnown = Boolean(manifest) && manifest.id === jobId && manifest.draftId === draftId
+          && typeof manifest.sourceId === 'string' && UUID_PATTERN.test(manifest.sourceId);
+        if (links === undefined || (!baseKnown && stored.length > 0)) impacts.linkedMemories = null;
+        else if (baseKnown) impacts.linkedMemories += stored.filter((entry) => entry.link.sourceId === sourceId || manifest.sourceId === sourceId).length;
       }
       if (!manifest) continue;
       const photo = manifest.sourceId === sourceId;

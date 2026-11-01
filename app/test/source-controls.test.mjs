@@ -73,6 +73,15 @@ describe('source control helpers', () => {
     assert.match(impactText(null), /could not count/);
     assert.equal(impactText({ scenes: 2, stories: 1, snapshots: 3, processing: 0 }), 'Currently used by 2 scenes, 1 recorded story and 3 shared links, with 0 pieces of work in progress.');
     assert.equal(
+      impactText({ scenes: 1, linkedRegions: 0, linkedMemories: 2, snapshots: 0, processing: 0 }),
+      'Currently used by 1 scene, 0 linked photo regions, 2 written memory links and 0 shared links, with 0 pieces of work in progress.',
+    );
+    assert.equal(
+      impactText({ scenes: 1, linkedMemories: null, snapshots: 0, processing: 0 }),
+      'Currently used by 1 scene and 0 shared links, with 0 pieces of work in progress. Written memory links could not be counted.',
+      'unknown, never zero, other counts kept',
+    );
+    assert.equal(
       impactText({ scenes: 1, stories: 0, linkedRegions: 2, snapshots: 0, processing: 0 }),
       'Currently used by 1 scene, 0 recorded stories, 2 linked photo regions and 0 shared links, with 0 pieces of work in progress.',
     );

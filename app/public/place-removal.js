@@ -37,10 +37,16 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const when = (iso) => new Date(iso).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 
 // Exactly the stored counts the server reports; anything else is not a review.
-export function validInventory(inventory) {
+// A current review always counts written memory links; only a record accepted
+// before that count existed may lack it (legacy), and it is then not counted,
+// never zero.
+const BASE_KEYS = [...NUMBERS, ...FLAGS].sort().join();
+const CURRENT_KEYS = [...NUMBERS, ...FLAGS, 'linkedMemories'].sort().join();
+export function validInventory(inventory, { legacy = false } = {}) {
   if (!inventory || typeof inventory !== 'object') return false;
-  const keys = Object.keys(inventory).sort();
-  if (keys.join() !== [...NUMBERS, ...FLAGS].sort().join()) return false;
+  const keys = Object.keys(inventory).sort().join();
+  if (keys !== CURRENT_KEYS && !(legacy && keys === BASE_KEYS)) return false;
+  if (keys === CURRENT_KEYS && !(Number.isInteger(inventory.linkedMemories) && inventory.linkedMemories >= 0)) return false;
   return NUMBERS.every((key) => Number.isInteger(inventory[key]) && inventory[key] >= 0) && FLAGS.every((key) => typeof inventory[key] === 'boolean');
 }
 
@@ -54,7 +60,7 @@ export function validRecord(record, draftId, attempt = null) {
     Number.isFinite(Date.parse(record.requestedAt)) &&
     // A finished cleanup has its time; one still pending has none.
     ((record.state === 'access-stopped' && record.completedAt === null) || (record.state === 'complete' && typeof record.completedAt === 'string' && Number.isFinite(Date.parse(record.completedAt)))) &&
-    validInventory(record.inventory) &&
+    validInventory(record.inventory, { legacy: true }) &&
     (!attempt || (record.requestId === attempt.requestId && record.impactSha256 === attempt.impactSha256))
   );
 }
@@ -73,13 +79,15 @@ export function inventoryText(inventory, { receipt = false } = {}) {
     plural(inventory.visitorSnapshots, 'visitor link', 'visitor links'),
     plural(inventory.visitorPreviews, 'visitor preview', 'visitor previews'),
     plural(inventory.linkedRegions, 'linked photo region', 'linked photo regions'),
+    Number.isInteger(inventory.linkedMemories) ? plural(inventory.linkedMemories, 'written memory link', 'written memory links') : null,
     plural(inventory.invitations, 'invitation', 'invitations'),
     plural(inventory.intakes, 'related upload record', 'related upload records'),
     receipt
       ? `${plural(inventory.processing, 'piece of work', 'pieces of work')} active when deletion was requested`
       : plural(inventory.processing, 'piece of work in progress', 'pieces of work in progress'),
   ].filter(Boolean);
-  return `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+  const listed = `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+  return Number.isInteger(inventory.linkedMemories) ? listed : `${listed}; written memory links were not counted in this older record`;
 }
 
 // The state of an accepted removal, content-free.

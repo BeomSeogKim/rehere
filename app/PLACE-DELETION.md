@@ -17,6 +17,7 @@ The scope is the whole saved place, including:
 
 - Its original photographs, writing, recording, attribution and place name.
 - Every scene and arrangement, inferred asset, saved proposal, region link,
+  original-written-memory link,
   recorded story, listening copy and caption history stored for that place.
 - The workspace's copies of contributions received for that place, including
   their originals and derived inspection or listening files.
@@ -26,6 +27,9 @@ The scope is the whole saved place, including:
 The review includes retained and stopped material, rather than just what is
 currently displayed. Receipt counts describe the accepted removal scope,
 including work active when requested; they are not live remaining-file counts.
+New reviews count written-memory links separately. Earlier deletion receipts
+keep their original inventory and explain when those links were not counted;
+an absent older count is not reported as zero.
 Confirmation discards unsaved scene edits and previews
 on that screen. Other saved places and independent compose input stay intact.
 The action grants no new use, changes no public-origin restriction and makes

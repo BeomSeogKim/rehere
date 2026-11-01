@@ -31,7 +31,7 @@ with different boxes; it is never corrected automatically.
 
 ## Link regions from other photos
 
-After confirming both objects, choose one and open its **Photo evidence**.
+After confirming both objects, choose one and open its **Sources**.
 The object's box in the scene photo can be compared with regions you mark in
 other original photos of this same place. Draw a box, inspect both photos,
 and explicitly confirm that they show the same object. If unsure, leave
@@ -62,6 +62,28 @@ Contributors, visitors and model requests receive no link data. A missing
 sidecar means no links; an unreadable one reports unavailable without
 disabling the ordinary scene. This uses one process and atomic file writes,
 without fsync or multiple-process locking.
+
+## Link the original written memory
+
+In the selected object's **Sources**, review the saved written memory and
+confirm that its words are about this object. This links the entire original
+writing; it does not edit the words or create a new model proposal. Both
+objects may be linked to the same writing. The link is your judgment, not
+automatic recognition, a time assertion or a change to the arrangement.
+
+The writing needs current place use, without model or sharing permission.
+The server checks the original text's checksum before showing it here.
+Stopped, restricted or changed writing leaves an unavailable link without
+its words. The link can still be removed while the scene remains usable.
+Removing the link keeps the original writing. Missing source details cannot
+be replaced by invented grants.
+
+Links reopen from a separate `memory-links.json` beside the scene manifest.
+Each object has its own revision and request receipts. Saving a link keeps
+the scene, unsaved placement and original materials unchanged. An uncertain
+answer can repeat the exact prepared request; a conflict needs a fresh review.
+These owner-private links are excluded from model requests and visitor views.
+Whole-place removal includes their stored metadata.
 
 ## Arrange and relate
 
@@ -135,6 +157,8 @@ authority, source-use and contribution checks.
 | `GET /<job>/objects/<object>/region-links` | Current owner links and their availability |
 | `POST /<job>/objects/<object>/region-links` | `requestId`, `baseRevision`, `action` (`set` or `remove`), `sourceId`, `box` (or `null` for removal), `confirmed: true` |
 | `GET /<job>/region-reference/<source>` | Place-permitted reference dimensions in stored pixel order |
+| `GET /<job>/objects/<object>/memory-link` | Current owner link to the whole saved writing, with permitted words and availability |
+| `POST /<job>/objects/<object>/memory-link` | `requestId`, `baseRevision`, `action` (`set` or `remove`), `sourceId`, `confirmed: true` |
 
 Recollection review transforms and new stories add `targetId` the same way.
 One-foreground scenes keep their original request shapes and return their

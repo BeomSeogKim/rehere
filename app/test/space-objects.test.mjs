@@ -210,7 +210,7 @@ describe('two-object scene', () => {
     await openScene(ui);
     ui.button('A: Counter').dispatch('click');
     assert.equal(stopped, 1, 'choosing an object stops playing audio');
-    assert.ok(ui.find((node) => node.tag === 'summary' && node.textContent === 'Photo evidence for A: Counter').length, 'the collapsed evidence names the chosen object');
+    assert.ok(ui.find((node) => node.tag === 'summary' && node.textContent === 'Sources for A: Counter').length, 'the collapsed sources name the chosen object');
     const x = ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === 'Left / right')[0];
     x.value = '0.2';
     x.dispatch('input');

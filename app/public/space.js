@@ -16,6 +16,7 @@ import { stopAll } from './playback.js';
 import { mountShares } from './shares.js';
 import { mountStories } from './stories.js';
 import { mountRegionLinks } from './region-links.js';
+import { mountMemoryLink } from './memory-link.js';
 
 const POLL_MS = 2000;
 const SOURCE_BLOCKED_TEXT = 'Its photo is no longer allowed to be used for reconstructing this place, or its use was stopped. Every saved version depends on that photo, so none can be restored. The original photo is kept, not deleted.';
@@ -132,6 +133,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   // The selected object's links to regions in other photos, inside its photo
   // evidence; replaced on every object choice.
   let regionLinksPanel = null;
+  // The selected object's link to the saved written memory, beside it.
+  let memoryLinkPanel = null;
   // Bumped whenever the panel is closed or replaced; a response for an older
   // selection or scene must not change the panel that replaced it.
   let panelGeneration = 0;
@@ -205,6 +208,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     blockedPanel = null;
     regionLinksPanel?.dispose();
     regionLinksPanel = null;
+    memoryLinkPanel?.dispose();
+    memoryLinkPanel = null;
     viewer?.dispose();
     viewer = null;
     panel.replaceChildren();
@@ -1232,9 +1237,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     function renderEvidence() {
       regionLinksPanel?.dispose();
       regionLinksPanel = null;
-      evidenceSummary.textContent = selected ? `Photo evidence for ${nameOf(selected)}` : 'Photo evidence (choose an object)';
+      memoryLinkPanel?.dispose();
+      memoryLinkPanel = null;
+      // Its sources: the photo box, linked photo regions and the written memory.
+      evidenceSummary.textContent = selected ? `Sources for ${nameOf(selected)}` : 'Sources (choose an object)';
       if (!selected) {
-        evidence.replaceChildren(el('p', { className: 'hint', textContent: 'Choose an object to see the box you drew for it in the photo.' }));
+        evidence.replaceChildren(el('p', { className: 'hint', textContent: 'Choose an object to see its sources: the box you drew for it in the photo, and any photo regions or written memory you linked to it.' }));
         return;
       }
       const object = objects.find((entry) => entry.id === selected);
@@ -1254,6 +1262,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         sourceFor,
         scenePhoto: { sourceId: job.sourceId, box: object.box, size: [imageWidth, imageHeight], url: assetUrl(jobId, 'texture.jpg'), number },
       });
+      const memory = el('div');
+      evidence.append(memory);
+      memoryLinkPanel = mountMemoryLink(memory, { jobUrl, draftId: draft.id, jobId, objectId: selected, name: nameOf(selected) });
     }
 
     function showEdit() {

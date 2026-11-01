@@ -155,7 +155,7 @@ describe('source policy records', () => {
   it('starts from the recorded grants and only narrows, with replay that never restores grants', async () => {
     const ctx = await setup();
     assert.deepEqual({ ...(await ctx.policy()), sourceId: null }, {
-      sourceId: null, revision: 0, permissions: grants, stopped: false, updatedAt: null, changedBy: null, impacts: { scenes: 0, stories: 0, snapshots: 0, processing: 0, linkedRegions: 0 },
+      sourceId: null, revision: 0, permissions: grants, stopped: false, updatedAt: null, changedBy: null, impacts: { scenes: 0, stories: 0, snapshots: 0, processing: 0, linkedRegions: 0, linkedMemories: 0 },
     });
     const before = await fileHashes(ctx.draftDir);
     const requestId = randomUUID();
@@ -236,7 +236,7 @@ describe('restricted photo uses', () => {
     const before = await fileHashes(ctx.draftDir);
 
     const saved = await ctx.restrict({ stopUse: true });
-    assert.deepEqual(saved.impacts, { scenes: 1, stories: 0, snapshots: 2, processing: 0, linkedRegions: 0 });
+    assert.deepEqual(saved.impacts, { scenes: 1, stories: 0, snapshots: 2, processing: 0, linkedRegions: 0, linkedMemories: 0 });
     const scene = await ctx.reconstructions.get(ctx.draftId, job.id);
     assert.deepEqual([scene.usageBlocked, scene.modelBlocked, scene.blockedReason], [true, true, 'source']);
     await assert.rejects(ctx.reconstructions.asset(ctx.draftId, job.id, 'texture.jpg'), status(409));
