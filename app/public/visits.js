@@ -96,6 +96,22 @@ const SIDE_MISSING = (name, label) => `“${label}” has no usable saved placem
 
 // `summary` (the saved arrangement differences) follows the time assertion,
 // before the photo, provider and recollection text.
+// How the shown saved arrangement was recorded, from the link's own fixed
+// field: the most recent saved change, never a claim about the whole
+// arrangement, its full history or the past. Anything not exactly one of
+// these values, including links issued before the field existed, is unknown.
+const ARRANGEMENT_TEXT = Object.freeze({
+  initial: 'Arrangement: the initial placement in this photo-derived reconstruction. It is an estimate, not verified history.',
+  manual: 'Arrangement: its most recent saved change was a placement change the owner made by hand. This does not establish how the place was in the past.',
+  relationship: "Arrangement: its most recent saved change was the owner's change to an object relationship rule. This does not establish how the place was in the past.",
+  memory: "Arrangement: its most recent saved change was a placement change the owner approved from a model's proposal based on written memory. The memory's words are not included here.",
+  recollection: 'Arrangement: its most recent saved change was a placement change the owner adopted from a contributed recollection. This is separate from the photo-derived shape estimate.',
+  restored: 'Arrangement: its most recent saved change returned it to an earlier saved arrangement. Its full change history is not included here.',
+  alternative: 'Arrangement: the owner retained a recollection-based arrangement as a comparison choice. This does not establish a different time or verified history.',
+  unknown: 'How this arrangement was made is not recorded in this link.',
+});
+const arrangementText = (value) => (typeof value === 'string' && Object.hasOwn(ARRANGEMENT_TEXT, value) ? ARRANGEMENT_TEXT[value] : ARRANGEMENT_TEXT.unknown);
+
 function viewDetails(view, labelOf, summary = []) {
   const nodes = [el('h3', { textContent: view.label })];
   nodes.push(el('p', { textContent: eraText(view.era, labelOf) }));
@@ -112,6 +128,7 @@ function viewDetails(view, labelOf, summary = []) {
       }),
     );
   }
+  nodes.push(el('p', { className: 'hint', textContent: arrangementText(view.evidence?.arrangement) }));
   for (const support of view.evidence?.support ?? []) {
     if (support?.kind !== 'human_recollection') continue;
     nodes.push(

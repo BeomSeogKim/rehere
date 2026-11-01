@@ -39,6 +39,15 @@ relates one alternative to another, both must be selected. A disagreement does
 not establish an earlier or later era. Photo evidence, inferred geometry and
 human recollection remain separately labeled; none is verified history.
 
+New previews also identify each arrangement's most recent saved operation:
+the initial photo-derived placement, a manual change, a relationship rule,
+an approved model proposal based on written memory, an adopted recollection,
+or a return to an earlier version. Recollection-based comparison choices are
+labelled separately. This describes one saved operation, not every object's
+complete history. It shares no private memory wording or unselected history.
+The same line appears in the preview and the issued link. Older saved links
+keep their original content and say when this information was not recorded.
+
 The photo and every supporting recollection need both place-construction and
 visitor-sharing permission. Omitting a quotation does not remove the spatial
 result's dependencies or bypass those grants. Recollections that allow manual

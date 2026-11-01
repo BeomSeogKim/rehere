@@ -725,3 +725,98 @@ describe('saved arrangement differences for visitors', () => {
     legacy.view.dispose();
   });
 });
+
+describe('how each shared arrangement was recorded', () => {
+  const LINES = {
+    initial: 'Arrangement: the initial placement in this photo-derived reconstruction. It is an estimate, not verified history.',
+    manual: 'Arrangement: its most recent saved change was a placement change the owner made by hand. This does not establish how the place was in the past.',
+    relationship: "Arrangement: its most recent saved change was the owner's change to an object relationship rule. This does not establish how the place was in the past.",
+    memory: "Arrangement: its most recent saved change was a placement change the owner approved from a model's proposal based on written memory. The memory's words are not included here.",
+    recollection: 'Arrangement: its most recent saved change was a placement change the owner adopted from a contributed recollection. This is separate from the photo-derived shape estimate.',
+    restored: 'Arrangement: its most recent saved change returned it to an earlier saved arrangement. Its full change history is not included here.',
+    alternative: 'Arrangement: the owner retained a recollection-based arrangement as a comparison choice. This does not establish a different time or verified history.',
+  };
+  const UNKNOWN = 'How this arrangement was made is not recorded in this link.';
+  const id = (n) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const base = manifest().views[0];
+  const viewWith = (n, label, arrangement, { evidence = {} } = {}) => ({
+    ...structuredClone(base),
+    id: id(n),
+    label,
+    evidence: { ...structuredClone(base.evidence), ...evidence, ...(arrangement === undefined ? {} : { arrangement }) },
+  });
+  const values = Object.keys(LINES);
+  const hostile = ['<b>initial</b>', {}, '__proto__', 'constructor', 'toString', null, 3, 'Initial'];
+  const data = () => {
+    const views = [
+      ...values.map((value, i) => viewWith(i + 1, `View ${value}`, value)),
+      viewWith(20, 'Older link', undefined),
+      ...hostile.map((value, i) => viewWith(30 + i, `Odd ${i}`, value)),
+      viewWith(50, 'With support', 'recollection', { evidence: { support: [{ kind: 'human_recollection', providerLabel: 'Mina', status: 'owner-selected' }] } }),
+    ];
+    return { ...manifest(), startViewId: views[0].id, views };
+  };
+  const details = (v) => v.find((node) => node.className === 'visit-details')[0].textContent;
+  const lines = (v) => v.find((node) => node.tag === 'p' && (/^Arrangement: (the initial|its most recent|the owner retained)/.test(node.textContent) || node.textContent === UNKNOWN)).map((node) => node.textContent);
+
+  it('shows the fixed line for each recorded operation, changing with the selected view', async () => {
+    const v = open(source({ manifest: () => Promise.resolve(data()) }));
+    await flush();
+    assert.equal(v.states.at(-1), '3d');
+    assert.deepEqual(lines(v), [LINES.initial], 'the start view');
+    for (const value of values) {
+      v.button(`View ${value}`).dispatch('click');
+      assert.deepEqual(lines(v), [LINES[value]], value);
+    }
+    v.view.dispose();
+  });
+
+  it('says unknown for a link without the field and for anything not exactly a known value, as text only', async () => {
+    const v = open(source({ manifest: () => Promise.resolve(data()) }));
+    await flush();
+    v.button('Older link').dispatch('click');
+    assert.deepEqual(lines(v), [UNKNOWN], 'never silently initial or manual');
+    hostile.forEach((value, i) => {
+      v.button(`Odd ${i}`).dispatch('click');
+      assert.deepEqual(lines(v), [UNKNOWN], JSON.stringify(value));
+    });
+    assert.equal(v.find((node) => node.tag === 'b').length, 0, 'no raw HTML');
+    v.view.dispose();
+  });
+
+  it('places the line after the photo evidence and before the recollection support, and keeps the existing notes', async () => {
+    const v = open(source({ manifest: () => Promise.resolve(data()) }));
+    await flush();
+    v.button('With support').dispatch('click');
+    const text = details(v);
+    const order = ['Photo: provided by', LINES.recollection, 'Arrangement: based on a recollection by Mina', 'None of this is verified history'].map((part) => text.indexOf(part));
+    assert.ok(order.every((index) => index >= 0), String(order));
+    assert.deepEqual([...order].sort((a, b) => a - b), order);
+    assert.match(text, /Time unknown/);
+    assert.match(v.container.textContent, /Shape and depth: a model estimate from this one photo/);
+    v.view.dispose();
+  });
+
+  it('shows the line in the 2D fallback, and nothing of it after closing or a failed check', async () => {
+    globalThis.viewerFail = 'webgl';
+    const flat = open(source({ manifest: () => Promise.resolve(data()) }));
+    await flush();
+    assert.equal(flat.states.at(-1), '2d');
+    assert.deepEqual(lines(flat), [LINES.initial]);
+    flat.button('View memory').dispatch('click');
+    assert.deepEqual(lines(flat), [LINES.memory]);
+    flat.view.dispose();
+    assert.equal(flat.container.children.length, 0);
+    globalThis.viewerFail = null;
+
+    let allowed = true;
+    const live = open(source({ manifest: () => Promise.resolve(data()), check: () => Promise.resolve(allowed) }));
+    await flush();
+    allowed = false;
+    mock.timers.tick(HEARTBEAT_MS);
+    await flush();
+    assert.equal(live.states.at(-1), 'unavailable');
+    assert.doesNotMatch(live.container.textContent, /Arrangement|How this arrangement/);
+    live.view.dispose();
+  });
+});

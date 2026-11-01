@@ -208,6 +208,42 @@ export function savedView(manifest, view) {
   };
 }
 
+// How a shared arrangement was recorded, as one content-free word: how this
+// exact saved version or comparison arrangement came about, never the
+// origin of each object, a full history, a date or the true past. Only the
+// selected version's own receipt is read, never the latest edit.
+const RECEIPT_ORIGINS = Object.freeze({ manual: 'manual', relationship: 'relationship', proposal: 'memory', contribution: 'recollection', undo: 'restored' });
+
+function versionOrigin(manifest, version) {
+  if (version === 1) return 'initial';
+  const receipt = manifest.edits.find((item) => item.version === version);
+  if (!receipt) return 'unknown';
+  // Single-object manual edits record no kind; every two-object writer does.
+  if (receipt.kind === undefined) return isTwoObject(manifest) ? 'unknown' : 'manual';
+  return typeof receipt.kind === 'string' && Object.hasOwn(RECEIPT_ORIGINS, receipt.kind) ? RECEIPT_ORIGINS[receipt.kind] : 'unknown';
+}
+
+// Used only when a preview is built; stored previews and snapshots are never
+// rewritten or enriched from current history.
+export function arrangementOrigin(manifest, view) {
+  try {
+    if (view.kind === 'version') return versionOrigin(manifest, view.version);
+    const variant = variantsOf(manifest).find((item) => item.id === view.variantId);
+    if (variant?.kind === 'candidate') return 'alternative';
+    if (variant?.kind !== 'baseline') return 'unknown';
+    // A baseline counts as its parent version only when it is exactly that
+    // version: the same number, transforms and rule.
+    const parent = variant.parentVersion;
+    if (!Number.isInteger(parent) || parent < 1 || parent > manifest.edit.version || variant.edit?.version !== parent) return 'unknown';
+    const parentEdit = parent === 1 ? initialEdit(manifest) : manifest.edits.find((item) => item.version === parent);
+    if (!parentEdit) return 'unknown';
+    const same = JSON.stringify(editFields(manifest, parentEdit)) === JSON.stringify(editFields(manifest, variant.edit));
+    return same ? versionOrigin(manifest, parent) : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 // Visitor-facing content excludes the snapshot ID and time, so the digest
 // binds exactly what the owner previewed.
 const contentDigest = (publicView) => {
@@ -391,6 +427,7 @@ export class ShareStore {
         edit: structuredClone(edit),
         era: publicEra,
         evidence: {
+          arrangement: arrangementOrigin(manifest, view),
           photo: { providerLabel: source.provider || null, attributedCaptureDate: source.dates?.capturedOn ?? null },
           geometry: 'model estimate',
           support,

@@ -7,7 +7,7 @@ import { after, describe, it } from 'node:test';
 import { CollaborationStore } from '../collaboration.mjs';
 import { DraftStore, RequestError, parseDraft } from '../drafts.mjs';
 import { ReconstructionStore } from '../reconstructions.mjs';
-import { SHARE_LIMITS, ShareStore, UNAVAILABLE } from '../shares.mjs';
+import { SHARE_LIMITS, ShareStore, UNAVAILABLE, arrangementOrigin } from '../shares.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -242,7 +242,7 @@ describe('share store issue and visit', () => {
     assert.deepEqual(view.camera, { position: [0, 0.5, 1], target: [0, 0, -3] });
     for (const item of view.views) {
       assert.deepEqual(Object.keys(item).sort(), ['edit', 'era', 'evidence', 'id', 'label']);
-      assert.deepEqual(Object.keys(item.evidence).sort(), ['geometry', 'photo', 'recollections', 'support']);
+      assert.deepEqual(Object.keys(item.evidence).sort(), ['arrangement', 'geometry', 'photo', 'recollections', 'support']);
       assert.deepEqual(item.evidence.photo, { providerLabel: 'Synthetic archive', attributedCaptureDate: '1936-07-01' });
       assert.equal(item.evidence.geometry, 'model estimate');
     }
@@ -459,5 +459,128 @@ describe('share store issue and visit', () => {
     assert.equal((await ctx.shares.revoke(ctx.draftId, ctx.jobId, ctx.owner, receipt.id, { requestId: randomUUID() })).status, 'revoked');
     await assert.rejects(ctx.shares.revoke(ctx.draftId, ctx.jobId, ctx.owner, randomUUID(), { requestId }), status(409));
     await assert.rejects(ctx.shares.revoke(ctx.draftId, ctx.jobId, ctx.alex, receipt.id, { requestId: randomUUID() }), status(403));
+  });
+});
+
+describe('shared arrangement origin', () => {
+  const ORIGINS = ['initial', 'manual', 'relationship', 'memory', 'recollection', 'restored', 'alternative', 'unknown'];
+  const single = (edits, variants = []) => ({ edit: { version: edits.length + 1, offset: [0, 0, 0], yaw: 0 }, edits, collaboration: { variants } });
+  const pair = (edits, variants = []) => ({
+    objects: [{ id: 'object-1', label: 'A', box: [0, 0, 1, 1], pivot: [0, 0, 0] }, { id: 'object-2', label: 'B', box: [1, 1, 2, 2], pivot: [1, 0, 0] }],
+    edit: { version: edits.length + 1, objects: [{ id: 'object-1', offset: [0, 0, 0], yaw: 0 }, { id: 'object-2', offset: [0, 0, 0], yaw: 0 }], relationship: null },
+    edits, collaboration: { variants },
+  });
+  const flat = (version, kind, offset = [0, 0, 0]) => ({ version, offset, yaw: 0, ...(kind !== undefined && { kind }) });
+  const twin = (version, kind, offset = [0, 0, 0]) => ({
+    version, objects: [{ id: 'object-1', offset, yaw: 0 }, { id: 'object-2', offset: [0, 0, 0], yaw: 0 }], relationship: null, ...(kind !== undefined && { kind }),
+  });
+  const version = (v) => ({ kind: 'version', version: v, variantId: null });
+  const variant = (id) => ({ kind: 'variant', version: null, variantId: id });
+
+  it('maps each exact saved version by its own receipt, for both scene shapes', () => {
+    for (const [build, receipt] of [[single, flat], [pair, twin]]) {
+      const kinds = ['manual', 'relationship', 'proposal', 'contribution', 'undo', 'other', '__proto__', 7];
+      const manifest = build(kinds.map((kind, index) => receipt(index + 2, kind, [index, 0, 0])));
+      assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8, 9].map((v) => arrangementOrigin(manifest, version(v))),
+        ['initial', 'manual', 'relationship', 'memory', 'recollection', 'restored', 'unknown', 'unknown', 'unknown']);
+      assert.equal(arrangementOrigin(manifest, version(42)), 'unknown', 'a version without a receipt');
+    }
+    // A receipt without a kind is a manual edit only on a single-object scene.
+    assert.equal(arrangementOrigin(single([flat(2)]), version(2)), 'manual');
+    assert.equal(arrangementOrigin(pair([twin(2)]), version(2)), 'unknown');
+    // An older version keeps its own origin after newer edits.
+    const later = single([flat(2, 'manual'), flat(3, 'undo'), flat(4, 'contribution')]);
+    assert.equal(arrangementOrigin(later, version(2)), 'manual');
+  });
+
+  it('marks candidates as alternatives and baselines only as their exact parent version', () => {
+    const edits = [flat(2, 'proposal', [0.5, 0, 0])];
+    const baseline = (change = {}) => ({ id: 'b', kind: 'baseline', parentVersion: 2, edit: { version: 2, offset: [0.5, 0, 0], yaw: 0 }, ...change });
+    const candidate = (change = {}) => ({ id: 'c', kind: 'candidate', parentVersion: 2, edit: { version: null, offset: [1, 0, 0], yaw: 0 }, ...change });
+    assert.equal(arrangementOrigin(single(edits, [baseline()]), variant('b')), 'memory');
+    assert.equal(arrangementOrigin(single([], [baseline({ parentVersion: 1, edit: { version: 1, offset: [0, 0, 0], yaw: 0 } })]), variant('b')), 'initial');
+    for (const change of [{ edit: { version: 2, offset: [0.6, 0, 0], yaw: 0 } }, { edit: { version: 3, offset: [0.5, 0, 0], yaw: 0 } }, { parentVersion: 9 }, { parentVersion: 'x' }, { edit: null }]) {
+      assert.equal(arrangementOrigin(single(edits, [baseline(change)]), variant('b')), 'unknown', JSON.stringify(change));
+    }
+    assert.equal(arrangementOrigin(single([], [baseline()]), variant('b')), 'unknown', 'parent receipt missing');
+    assert.equal(arrangementOrigin(single(edits, [candidate()]), variant('c')), 'alternative');
+    assert.equal(arrangementOrigin(single(edits, [candidate({ edit: { version: 2, offset: [0.5, 0, 0], yaw: 0 } })]), variant('c')), 'alternative', 'adopted too');
+    assert.equal(arrangementOrigin(single(edits, [{ id: 'z', kind: 'other' }]), variant('z')), 'unknown');
+    assert.equal(arrangementOrigin(single(edits), variant('missing')), 'unknown');
+    // The pair baseline compares the whole arrangement including the rule.
+    const pairEdits = [twin(2, 'relationship')];
+    const pairBaseline = { id: 'b', kind: 'baseline', parentVersion: 2, edit: { version: 2, objects: pairEdits[0].objects, relationship: null } };
+    assert.equal(arrangementOrigin(pair(pairEdits, [pairBaseline]), variant('b')), 'relationship');
+    const ruled = { ...pairBaseline, edit: { ...pairBaseline.edit, relationship: { kind: 'left_of', leftId: 'object-1', rightId: 'object-2', frame: 'original-photo' } } };
+    assert.equal(arrangementOrigin(pair(pairEdits, [ruled]), variant('b')), 'unknown');
+  });
+
+  it('puts the origin of real saved operations in each built view, bound into the digest', async () => {
+    const ctx = await setup();
+    await ctx.edit(1);
+    const contribution = await ctx.submit();
+    await ctx.review(contribution, { baseVersion: 2 });
+    await ctx.reconstructions.undo(ctx.draftId, ctx.jobId, { requestId: randomUUID(), baseVersion: 3, targetVersion: 1 });
+    const variants = await ctx.variants();
+    const views = [1, 2, 3, 4].map((v) => ctx.versionView(v)).concat(variants.map((item) => ctx.variantView(item.id)));
+    const preview = await ctx.preview(views);
+    const origins = preview.publicView.views.map((item) => item.evidence.arrangement);
+    assert.deepEqual(origins.slice(0, 4), ['initial', 'manual', 'recollection', 'restored']);
+    // The baseline is exactly version 2, a manual edit; the adopted candidate is an alternative.
+    assert.deepEqual([...origins.slice(4)].sort(), ['alternative', 'manual']);
+    assert.ok(origins.every((origin) => ORIGINS.includes(origin)));
+    const text = JSON.stringify(preview.publicView.views.map((item) => item.evidence));
+    for (const hidden of [contribution.id, 'Private owner note.']) assert.ok(!text.includes(hidden), hidden);
+    // The field is inside the digest the owner previewed and the snapshot binds.
+    const { id, createdAt, ...content } = preview.publicView;
+    assert.equal(preview.digest, createHash('sha256').update(JSON.stringify(content)).digest('hex'));
+    const changed = structuredClone(content);
+    changed.views[0].evidence.arrangement = 'manual';
+    assert.notEqual(createHash('sha256').update(JSON.stringify(changed)).digest('hex'), preview.digest);
+    const token = visitToken();
+    await ctx.issue(preview, { token });
+    assert.deepEqual((await ctx.shares.visit(token)).views.map((item) => item.evidence.arrangement), origins);
+  });
+
+  it('issues, replays and serves a consistent preview made before the field existed, never enriching it', async () => {
+    const ctx = await setup();
+    await ctx.edit(1);
+    const fresh = await ctx.preview([ctx.versionView(2)]);
+    // Make it a consistent pre-field preview: no field, and the digest the
+    // store computes over exactly that content.
+    const manifest = JSON.parse(await ctx.disk());
+    const stored = manifest.shares.previews.find((item) => item.id === fresh.id);
+    for (const view of stored.publicView.views) delete view.evidence.arrangement;
+    const { id, createdAt, ...content } = stored.publicView;
+    stored.digest = createHash('sha256').update(JSON.stringify(content)).digest('hex');
+    await writeFile(ctx.manifestFile, JSON.stringify(manifest, null, 2));
+    const legacyView = structuredClone(stored.publicView.views);
+
+    const token = visitToken();
+    const request = { requestId: randomUUID(), previewId: fresh.id, previewDigest: stored.digest, token, consent: true };
+    const receipt = await ctx.shares.issue(ctx.draftId, ctx.jobId, ctx.owner, request);
+    assert.equal(receipt.status, 'active');
+    assert.equal(receipt.digest, stored.digest, 'issued from the legacy digest');
+    const afterIssue = JSON.stringify(JSON.parse(await ctx.disk()).shares);
+    assert.deepEqual(await ctx.shares.issue(ctx.draftId, ctx.jobId, ctx.owner, request), receipt, 'an exact replay returns the same receipt');
+    const visited = await ctx.shares.visit(token);
+    assert.deepEqual(visited.views, legacyView, 'served exactly as stored, without the field');
+    const reopened = open(ctx.dataDir, ctx.now);
+    assert.deepEqual(await reopened.shares.issue(ctx.draftId, ctx.jobId, ctx.owner, request), receipt, 'the replay holds after a restart');
+    assert.deepEqual((await reopened.shares.visit(token)).views, legacyView, 'and so does the visit');
+    assert.equal(JSON.stringify(JSON.parse(await ctx.disk()).shares), afterIssue, 'replay, visits and restart change no stored byte');
+    const snapshot = JSON.parse(afterIssue).snapshots.find((item) => item.id === receipt.id);
+    assert.ok(snapshot.publicView.views.every((view) => !('arrangement' in view.evidence)), 'the snapshot was not enriched');
+  });
+
+  it('keeps current rights: a stopped source still blocks the view whatever its origin', async () => {
+    const ctx = await setup();
+    await ctx.edit(1);
+    const { token } = await shared(ctx, [ctx.versionView(2)]);
+    assert.equal((await ctx.shares.visit(token)).views[0].evidence.arrangement, 'manual');
+    const { revision } = await ctx.reconstructions.sourcePolicy(ctx.draftId, ctx.sourceId, ctx.owner);
+    await ctx.reconstructions.restrictSource(ctx.draftId, ctx.sourceId, ctx.owner, { requestId: randomUUID(), baseRevision: revision, permissions: { place: false, model: false, share: false }, stopUse: true });
+    await assert.rejects(ctx.shares.visit(token), unavailable);
+    await assert.rejects(ctx.preview([ctx.versionView(2)]), (error) => error instanceof RequestError && error.status >= 400);
   });
 });
