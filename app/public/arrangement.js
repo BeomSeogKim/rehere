@@ -2,12 +2,14 @@
 // arrangement, the local preview of one object at a time, and the state of a
 // save in flight. It holds no spatial math; relation checks belong to the
 // shared scene-relations module and the server.
+import { copyArrangement as copyWholeArrangement, copyPose, isComposition } from './composition-scene.js';
 
-const copyObject = ({ id, offset, yaw }) => ({ id, offset: [...offset], yaw });
-const copyRule = (rule) => (rule ? { kind: rule.kind, leftId: rule.leftId, rightId: rule.rightId, frame: rule.frame } : null);
-export const copyArrangement = (edit) => ({ version: edit.version, objects: edit.objects.map(copyObject), relationship: copyRule(edit.relationship) });
+const copyObject = (object) => object.position ? { id: object.id, ...copyPose(object) } : { id: object.id, offset: [...object.offset], yaw: object.yaw };
+export const copyArrangement = copyWholeArrangement;
 
-const sameObject = (a, b) => a.id === b.id && a.yaw === b.yaw && a.offset.every((value, index) => value === b.offset[index]);
+const sameObject = (a, b) => a.id === b.id && (a.position
+  ? b.position && a.scale === b.scale && a.position.every((n, i) => n === b.position[i]) && a.quaternion.every((n, i) => n === b.quaternion[i])
+  : a.yaw === b.yaw && a.offset.every((value, index) => value === b.offset[index]));
 
 export function objectState(arrangement, id) {
   return arrangement.objects.find((object) => object.id === id) ?? null;
@@ -15,13 +17,14 @@ export function objectState(arrangement, id) {
 
 // The arrangement with one object's transform replaced: what a preview of
 // that object shows, everything else as saved.
-export function withObject(arrangement, id, { offset, yaw }) {
-  return { ...copyArrangement(arrangement), objects: arrangement.objects.map((object) => (object.id === id ? { id, offset: [...offset], yaw } : copyObject(object))) };
+export function withObject(arrangement, id, transform) {
+  return { ...copyArrangement(arrangement), objects: arrangement.objects.map((object) => (object.id === id ? copyObject({ id, ...transform }) : copyObject(object))) };
 }
 
 // A retry of the same unsaved change reuses its request ID; a lost response
 // leaves the session uncertain until a confirmed save or a reload settles it.
-export function createArrangementSession(saved, newRequestId) {
+export function createArrangementSession(saved, newRequestId, initialArrangement = saved) {
+  const initial = copyArrangement(initialArrangement);
   let current = copyArrangement(saved);
   let preview = copyArrangement(saved);
   let attempt = null;
@@ -49,7 +52,7 @@ export function createArrangementSession(saved, newRequestId) {
       preview = copyArrangement(current);
     },
     resetObject(id) {
-      preview = withObject(preview, id, { offset: [0, 0, 0], yaw: 0 });
+      preview = withObject(preview, id, isComposition(preview) ? objectState(initial, id) : { offset: [0, 0, 0], yaw: 0 });
     },
     markUncertain() {
       uncertain = true;
@@ -59,7 +62,9 @@ export function createArrangementSession(saved, newRequestId) {
       if (!attempt || attempt.targetId !== targetId || !sameObject(attempt.object, target) || attempt.baseVersion !== current.version) {
         attempt = { targetId, object: copyObject(target), baseVersion: current.version, requestId: newRequestId() };
       }
-      return { requestId: attempt.requestId, baseVersion: attempt.baseVersion, targetId, offset: [...attempt.object.offset], yaw: attempt.object.yaw };
+      return isComposition(current)
+        ? { requestId: attempt.requestId, baseVersion: attempt.baseVersion, targetId, pose: copyPose(attempt.object) }
+        : { requestId: attempt.requestId, baseVersion: attempt.baseVersion, targetId, offset: [...attempt.object.offset], yaw: attempt.object.yaw };
     },
     // Adopts a whole arrangement the server confirmed. Other objects' unsaved
     // previews, and a target changed since the request was sent, stay.
@@ -96,10 +101,13 @@ export function objectNames(objects) {
   };
 }
 
-export const ruleText = (rule, nameOf) => (rule ? `${nameOf(rule.leftId)} stays left of ${nameOf(rule.rightId)} from the original photo` : 'No rule');
+export const ruleText = (rule, nameOf) => !rule ? 'No rule' : rule.kind === 'faces'
+  ? `${nameOf(rule.subjectId)} faces ${nameOf(rule.targetId)} using the owner-confirmed photographed side`
+  : `${nameOf(rule.leftId)} stays left of ${nameOf(rule.rightId)} ${rule.frame === 'owner-composition' ? 'in the owner composition frame' : 'from the original photo'}`;
 
-const placeText = ({ offset, yaw }) =>
-  `left/right ${offset[0].toFixed(2)}, down/up ${offset[1].toFixed(2)}, away/toward ${offset[2].toFixed(2)}, turn ${Math.round((yaw * 180) / Math.PI)}°`;
+const placeText = (pose) => pose.position
+  ? `owner position ${pose.position.map((n) => n.toFixed(2)).join(', ')}, orientation ${pose.quaternion.map((n) => n.toFixed(3)).join(', ')}, assumed relative scale ${pose.scale.toFixed(2)}`
+  : `left/right ${pose.offset[0].toFixed(2)}, down/up ${pose.offset[1].toFixed(2)}, away/toward ${pose.offset[2].toFixed(2)}, turn ${Math.round((pose.yaw * 180) / Math.PI)}°`;
 
 // The whole arrangement in words: both objects and the rule.
 export function describeArrangement(arrangement, nameOf) {

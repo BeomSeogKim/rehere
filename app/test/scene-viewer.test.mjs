@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { FakeElement } from './fake-dom.mjs';
 import { currentCamera, installViewerShim, rendererState, visitorSurface } from './viewer-shim.mjs';
 import * as photoScene from '../public/photo-scene.js';
+import { COMPOSITION_REPRESENTATION, quaternionFromEuler, rotateVector } from '../public/composition-scene.js';
 
 // Every ResizeObserver callback the viewer registers, so a test can report a
 // changed viewport size the way a browser would.
@@ -31,7 +32,74 @@ after(() => {
 beforeEach(() => {
   globalThis.viewerLog = [];
   globalThis.viewerFail = null;
+  delete globalThis.viewerTextureWait;
   observers.length = 0;
+});
+
+function compositionSurface() {
+  return {
+    schema_version: 3, representation: COMPOSITION_REPRESENTATION,
+    components: [visitorSurface(), surfaceWithSize(400, 600)].map((surface, index) => ({
+      id: `object-${index + 1}`, label: `Object ${index + 1}`, texture: `texture-${index + 1}.jpg`, selectedObjectId: 'selected-foreground', surface,
+    })),
+    context: { kind: 'photographed-background', componentId: 'object-1', bounds: null, pose: { position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: 1 } },
+  };
+}
+const textureUrls = { 'texture-1.jpg': 'blob:one', 'texture-2.jpg': 'blob:two' };
+
+describe('two-photo composition viewer', () => {
+  it('loads both textures, uses a common camera and releases both without claiming one original view', async () => {
+    const viewport = viewportOf(800, 600), surface = compositionSurface();
+    const viewer = await createViewer(viewport, surface, textureUrls, 'Composition');
+    assert.deepEqual(globalThis.viewerLog.filter((n) => n.startsWith('texture ')), ['texture blob:one', 'texture blob:two']);
+    assert.deepEqual(currentCamera(), { position: [0, 0, 5], target: [0, 0, 0] });
+    assert.equal(viewer.originalView(), false);
+    assert.equal(viewer.setPhotoFraming(true), false);
+    const pose = { position: [-1, 0.2, 0], quaternion: quaternionFromEuler([0.1, 0.8, -0.2]), scale: 0.8 };
+    viewer.applyArrangement({ frame: 'owner-composition', objects: [{ id: 'object-1', ...pose }, { id: 'object-2', position: [1, 0, 0], quaternion: [0, 0, 0, 1], scale: 1 }], relationship: null });
+    assert.equal(viewer.projectCentres().length, 2);
+    const pivot = photoScene.objectSurfaceMeshes(surface).objects[0].sourcePivot;
+    const ray = rotateVector(pivot.map((n) => -n * pose.scale), pose.quaternion);
+    assert.equal(viewer.viewPhotographedSide(pose, 'object-1'), true);
+    assert.deepEqual(currentCamera(), { position: pose.position.map((n, i) => n + ray[i]), target: pose.position });
+    const inspected = viewer.getCamera(), camera = globalThis.viewerCamera.camera;
+    assert.equal(camera.fov, 55, 'the photographed-side vantage keeps the common composition projection');
+    const projection = [...camera.projectionMatrix.elements];
+    viewer.setCamera(inspected);
+    assert.deepEqual(viewer.getCamera(), inspected);
+    assert.deepEqual(camera.projectionMatrix.elements, projection, 'saving and restoring the vectors preserves the projection');
+    const target = pose.position.map((n, i) => n + rotateVector([0, 0, 1], pose.quaternion)[i]);
+    assert.equal(viewer.showGuide(pose, target, 'object-1').aligned, true);
+    viewer.setCamera({ position: [0, 0, 5], target: [0, 0, 0] });
+    assert.equal(globalThis.viewerCamera.camera.fov, 55);
+    viewer.dispose(); viewer.dispose();
+    assert.equal(globalThis.viewerLog.filter((n) => n === 'texture.dispose').length, 2);
+    assert.equal(globalThis.viewerLog.filter((n) => n === 'renderer.dispose').length, 1);
+    assert.equal(viewport.children.length, 0);
+  });
+
+  it('cleans the first texture and renderer when the second texture fails late', async () => {
+    let rejectSecond;
+    globalThis.viewerTextureWait = { 'blob:two': new Promise((_, reject) => { rejectSecond = reject; }) };
+    const viewport = viewportOf(800, 600);
+    const pending = createViewer(viewport, compositionSurface(), textureUrls, 'Composition');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(globalThis.viewerLog.filter((n) => n.startsWith('texture ')), ['texture blob:one']);
+    rejectSecond(new Error('late failure'));
+    await assert.rejects(pending, /texture/);
+    assert.equal(globalThis.viewerLog.filter((n) => n === 'texture.dispose').length, 1);
+    assert.equal(globalThis.viewerLog.filter((n) => n === 'renderer.dispose').length, 1);
+    assert.equal(viewport.children.length, 0);
+  });
+
+  it('releases both textures on malformed geometry after loading and permits explicit context-off', async () => {
+    const invalid = compositionSurface(); invalid.components[1].selectedObjectId = 'missing';
+    await assert.rejects(createViewer(viewportOf(800, 600), invalid, textureUrls, 'Composition'));
+    assert.equal(globalThis.viewerLog.filter((n) => n === 'texture.dispose').length, 2);
+    const source = compositionSurface(); source.context = null;
+    const viewer = await createViewer(viewportOf(800, 600), source, textureUrls, 'Two observed surfaces');
+    viewer.dispose();
+  });
 });
 
 const close = (actual, expected, label) => assert.ok(Math.abs(actual - expected) < 1e-6, `${label}: ${actual} != ${expected}`);
@@ -80,6 +148,19 @@ function drawnAt(viewport, point) {
 const LANDMARKS = (width, height) => [[width * 0.1, height * 0.1], [width * 0.9, height * 0.9], [width / 2, height / 2], [width * 0.75, height * 0.2], [0, height], [width, 0]];
 
 describe('photo framing', () => {
+  it('keeps the legacy photo projection through photographed-side camera roundtrips', async () => {
+    const surface = visitorSurface(), viewport = viewportOf(800, 600);
+    const viewer = await createViewer(viewport, surface, 'blob:texture', 'Legacy scene');
+    const camera = globalThis.viewerCamera.camera, fov = camera.fov;
+    assert.notEqual(fov, 55);
+    assert.equal(viewer.viewPhotographedSide({ offset: [0.1, 0, 0], yaw: 0.3 }), true);
+    const inspected = viewer.getCamera(), projection = [...camera.projectionMatrix.elements];
+    viewer.setCamera(inspected);
+    assert.deepEqual(viewer.getCamera(), inspected);
+    assert.equal(camera.fov, fov);
+    assert.deepEqual(camera.projectionMatrix.elements, projection);
+    viewer.dispose();
+  });
   for (const [label, source, viewportSize] of [
     ['wide viewport, landscape photo', [600, 500], [1000, 400]],
     ['narrow viewport, landscape photo', [600, 500], [300, 800]],

@@ -10,6 +10,7 @@ import {
   PHOTO_BUSY, PHOTO_PREPARE_FAILED, PLAYBACK_NAME, REVIEW_NAME, VOICE_ORIGINAL_NAMES, contributionsDir, parsePhotoFacts, photoAttested, photoDir,
   readPlayback, readReviewPhoto, reviewJpegInfo,
 } from './contribution-photos.mjs';
+import { canonicalPose, copyPose, isComposition } from './public/composition-scene.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // Plain text: tab, newline and carriage return are the only control characters allowed.
@@ -286,7 +287,14 @@ function parseSubmit(body) {
 
 // A two-object candidate names the one object it moves; the rest of the
 // arrangement and its rule come from the saved scene, never from the request.
-function parseTransform(transform, twoObjects) {
+function parseTransform(transform, twoObjects, composition = false) {
+  if (composition) {
+    if (!exactKeys(transform, ['targetId', 'pose']) || !OBJECT_IDS.includes(transform.targetId) || !exactKeys(transform.pose, ['position', 'quaternion'])) return null;
+    try {
+      const { position, quaternion } = canonicalPose({ ...transform.pose, scale: 1 });
+      return { targetId: transform.targetId, pose: { position, quaternion } };
+    } catch { return null; }
+  }
   if (!exactKeys(transform, twoObjects ? ['targetId', 'offset', 'yaw'] : ['offset', 'yaw'])) return null;
   const { offset, yaw } = transform;
   const valid = Array.isArray(offset) && offset.length === 3 && offset.every((value) => finite(value) && Math.abs(value) <= OFFSET_LIMIT)
@@ -301,7 +309,7 @@ const editFields = (edit) => (Array.isArray(edit.objects) ? arrangementOf(edit) 
 // photoReviewed and voiceReviewed are accepted only as extra keys; whether
 // each is required or refused depends on the contribution, checked by the caller.
 const ACKNOWLEDGMENTS = ['photoReviewed', 'voiceReviewed'];
-function parseReview(body, twoObjects) {
+function parseReview(body, twoObjects, composition = false) {
   const keys = ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'];
   const extra = body !== null && typeof body === 'object' ? ACKNOWLEDGMENTS.filter((key) => Object.hasOwn(body, key)) : [];
   if (!exactKeys(body, [...keys, ...extra])) throw fail(400, UNREADABLE);
@@ -310,7 +318,7 @@ function parseReview(body, twoObjects) {
     && Object.hasOwn(DECISIONS, decision) && plain(reason, COLLABORATION_LIMITS.reason) && CONFLICTS.has(conflict);
   if (!valid) throw fail(400, UNREADABLE);
   const geometry = decision === 'adopt' || decision === 'alternative';
-  const transform = body.transform === null ? null : parseTransform(body.transform, twoObjects);
+  const transform = body.transform === null ? null : parseTransform(body.transform, twoObjects, composition);
   if (geometry ? !transform : body.transform !== null) throw fail(400, 'The candidate position and turn could not be read.');
   const request = { requestId, baseVersion, baseRevision, decision, reason, conflict, transform };
   for (const key of extra) request[key] = body[key];
@@ -723,7 +731,7 @@ export class CollaborationStore {
     this.#ready(manifest);
     const collaboration = collaborationOf(manifest);
     const owner = principal.role === 'owner';
-    const uses = await this.reconstructions.sourceUses(draftId, manifest.sourceId);
+    const uses = await this.reconstructions.sceneSourceUses(manifest);
     const contributionBlocked = usageBlocked(manifest);
     // Contributors' own testimony stays theirs and is projected as before;
     // only spatial use follows the photo's current restrictions.
@@ -1225,7 +1233,8 @@ export class CollaborationStore {
     return this.reconstructions.serialize(async () => {
       const manifest = await this.#scene(draftId, jobId);
       const twoObjects = isTwoObject(manifest);
-      const request = parseReview(body, twoObjects);
+      const request = parseReview(body, twoObjects, isComposition(manifest));
+      if (isComposition(manifest)) await this.reconstructions.assertSceneSources(manifest);
       const collaboration = collaborationOf(manifest);
       const contribution = collaboration.contributions.find((item) => item.id === contributionId);
       if (!contribution) throw fail(404, CONTRIBUTION_NOT_FOUND);
@@ -1261,7 +1270,7 @@ export class CollaborationStore {
         this.#ready(manifest);
         if (!contributionAllows(contribution, 'place')) throw fail(403, 'This contribution was not shared with permission to change the place.');
         if (!photoAttested(manifest, contribution)) throw fail(409, contribution.voice ? UNAVAILABLE_MATERIAL : UNAVAILABLE_PHOTO);
-        await this.reconstructions.permittedPhoto(draftId, manifest.sourceId);
+        await this.reconstructions.assertSceneSources(manifest);
         if (request.baseVersion !== manifest.edit.version) throw fail(409, 'The scene was changed elsewhere. Reload the saved version before deciding.');
         const parent = currentDependencies(manifest);
         assertDependencies(manifest, parent);
@@ -1271,7 +1280,8 @@ export class CollaborationStore {
         if (twoObjects) {
           assertObjectsConfirmed(manifest);
           // Only the named object changes; a contribution can never clear the rule.
-          fields = withTarget(arrangementOf(manifest.edit), request.transform.targetId, request.transform);
+          const transform = isComposition(manifest) ? { ...copyPose(manifest.edit.objects.find((item) => item.id === request.transform.targetId)), ...request.transform.pose } : request.transform;
+          fields = withTarget(arrangementOf(manifest.edit), request.transform.targetId, transform);
           assertRelationship(manifest, fields);
         }
         if (adopt) edit = { version: manifest.edit.version + 1, ...fields };
@@ -1321,7 +1331,7 @@ export class CollaborationStore {
   }
 
   async #sourceBlocked(manifest) {
-    return !(await this.reconstructions.sourceUses(manifest.draftId, manifest.sourceId)).place;
+    return !(await this.reconstructions.sceneSourceUses(manifest)).place;
   }
 
   #reviewResult(manifest, collaboration, contributionId, receipt, sourceBlocked, principal) {
@@ -1332,7 +1342,7 @@ export class CollaborationStore {
       contribution: projectContribution(manifest, contribution, principal),
       variant: variant ? projectVariant(manifest, variant, sourceBlocked) : null,
       // The adopted geometry is withheld while that version cannot be used.
-      edit: edit && !dependencyIssue(manifest, versionDependencies(manifest, edit.version)) ? { version: edit.version, ...editFields(edit) } : null,
+      edit: edit && !sourceBlocked && !dependencyIssue(manifest, versionDependencies(manifest, edit.version)) ? { version: edit.version, ...editFields(edit) } : null,
     };
   }
 

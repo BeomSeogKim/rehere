@@ -1,4 +1,4 @@
-# Two objects and one relationship
+# Two objects and their relationships
 
 A scene can be built from one photograph with exactly two named objects
 instead of one selected foreground. Each object can then be moved and turned
@@ -7,7 +7,56 @@ between them. This is manual arrangement of model-inferred visible surfaces
 from a single viewpoint, not a scene graph or recovered
 historical layout. Scenes built with one foreground box are unchanged.
 
-## Build and confirm
+## Compose objects from two photos
+
+Under **Build or choose another scene**, choose **Compose objects from two
+photos**. Select exactly two saved objects from different photos of this
+place: a ready foreground, or a confirmed object from a ready two-object
+scene. A composition cannot be used as another composition's input. Give
+the objects distinct names, then preview their position, full orientation
+and assumed relative scale before saving.
+
+Each object keeps its own photographed texture and nonplanar visible mesh.
+Position, orientation and relative size are your assumptions, not measured
+dimensions, automatic photo alignment or a recovered historical layout.
+The first photo's observed background is kept by default, fixed at the first
+object's initial placement. An optional source-pixel rectangle excludes
+unwanted background margins without cropping either object. The second
+photo's background is not imported. With context off, only the two observed
+surfaces are shown; there is no reconstructed room behind them.
+
+Saving creates a separate scene without copying parent edits, recollections,
+stories or links. Inspect the source surfaces and explicitly confirm both
+their identity and your assumed layout. Each object can then move, tilt,
+turn, roll and change relative scale independently. Reset returns it to its
+recorded initial pose. Saved versions, restoration, recollection alternatives,
+eras, stories and visitor views retain both complete poses and any rule.
+Later movement of the first object never moves the fixed background.
+
+Coordinates belong to one owner composition frame, independent of either
+source camera and the camera used to explore. A left/right rule compares
+centres on that frame's X axis. To point one photographed side toward the
+other object, preview the direction and explicitly choose that side as the
+face to point; the app does not identify a semantic front automatically.
+Saving a persistent facing rule is a separate explicit action. Coincident
+centres or a direction without a stable upright orientation are refused.
+
+The same named-surface overlap check applies. Deterministic reuse requires
+current place use for both original photos, without model permission.
+Fresh hosted proposals require both model grants and send both permitted
+photo contexts. Model plans may translate, turn around the common vertical
+axis, point at the other object or ask a question; they preserve relative
+scale. Recollection review also preserves scale. Only a manual edit changes it.
+
+Source inspection is object-specific: each object has its own photo, box
+and attribution. There is no combined original photograph to compare with.
+A photographed-side view is an inspection vantage, not an exact photo
+projection. Visitors receive both permitted textures and the selected saved
+poses, with each photo's evidence kept separate. Restricting either source
+blocks the whole dependent scene and its visitor snapshots, even if that
+object is offscreen. Originals and earlier scenes remain unchanged.
+
+## Build and confirm two objects from one photo
 
 Draw two boxes on a permitted photo and give each a name of 1 to 80
 characters. Names are your labels, not model identification, and must differ
@@ -144,7 +193,8 @@ background and the source files stay as they were. Every save, rule change and
 restoration creates a new whole-arrangement version, so history, comparison,
 undo and visitor views keep both transforms and the rule together.
 
-The only rule is "keep A left of B from the original photo". It compares the
+For a scene built from one photo, the rule is "keep A left of B from the
+original photo". It compares the
 centres of the two visible surfaces, after each object's own move, as seen
 from the original camera position. Turning an object about its own centre
 does not change the check. A centre too close to or behind the original
@@ -175,7 +225,8 @@ A memory proposal names one confirmed object. The planner sees both objects
 and any rule as context, but its answer may only change the named object; the
 server refuses a plan for any other object. The planner is instructed to ask a
 clarifying question when the memory names the other object, is ambiguous, or
-asks to face the other object. A facing direction must point at background in
+asks to face the other object in a single-photo scene. In that representation,
+a facing direction must point at background in
 the photo, not at either object or an unassigned pixel. The server merges the
 plan into the whole arrangement and checks the rule and named surfaces before offering it and
 again before applying it. Changing the selected object never retargets an
@@ -200,9 +251,12 @@ authority, source-use and contribution checks.
 | Request | Body |
 |---|---|
 | `POST` (build) | `requestId`, `sourceId`, `objects: [{label, box}, {label, box}]` |
+| `POST` (compose) | `kind: "two-photo-composition"`, `requestId`, two `objects` with `label`, `component: {jobId, objectId, surfaceSha256}` and `pose`, `context: {keep, bounds}`, `confirmed: true`, `scaleBasis: "owner-assumed-relative"` |
 | `POST /<job>/objects/confirm` | `requestId`, `objectIds: ["object-1", "object-2"]` |
+| `POST /<composition>/objects/confirm` | `requestId`, both `objectIds`, `surfaceIdentityConfirmed: true`, `layoutConfirmed: true`, `scaleBasis: "owner-assumed-relative"` |
 | `POST /<job>/outline-corrections` | `requestId`, `sourceSurfaceSha256`, `targetId`, `regions`, `confirmed: true` |
 | `POST /<job>/edit` | `requestId`, `baseVersion`, `targetId`, `offset`, `yaw` |
+| `POST /<composition>/edit` | `requestId`, `baseVersion`, `targetId`, `pose: {position, quaternion, scale}` |
 | `POST /<job>/relationship` | `requestId`, `baseVersion`, `relationship` (rule or `null`), `confirmed: true` |
 | `POST /<job>/undo` | `requestId`, `baseVersion`, `targetVersion`, `ruleChangeConfirmed` |
 | `POST /<job>/proposals` | the existing fields plus `targetId` |
@@ -227,6 +281,13 @@ the request ID with different input returns 409. Corrected owner manifests,
 surfaces and public packets add `outline: {kind: "owner-corrected"}`; legacy
 scenes omit it. Private parent identifiers and replay digests stay private.
 
-This covers exactly two objects in one photograph and one left/right rule.
-More objects, other rules, physical collision, reconstruction from multiple
-viewpoints and automatic object identification are not implemented.
+Compositions use surface schema 3 and exactly `surface.json`, `texture-1.jpg`
+and `texture-2.jpg`. Their whole arrangements record `frame:
+"owner-composition"` and each object's position, unit quaternion and relative
+scale. The initial arrangement is stored explicitly. Public packets use
+object-specific `sourceIndex` and `evidence.photos`, without private source or
+parent identifiers. Single-photo representations keep their existing shapes.
+
+These representations cover exactly two named objects. More objects, physical
+solid collision, automatic multi-view alignment and automatic object identity
+confirmation are not implemented. Neither representation establishes history.

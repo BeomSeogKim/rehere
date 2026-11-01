@@ -3,6 +3,7 @@
 // shown as a preview and changes the saved scene only through an explicit
 // Apply that the server confirms. The browser never computes a transform.
 
+import { isComposition } from './composition-scene.js';
 import { OBJECT_IDS } from './photo-scene.js';
 
 export const TEXT_LIMIT = 2000;
@@ -26,7 +27,9 @@ export function proposalBlockedReason(source) {
 // target, or the plan's own when only that is given.
 const targetOf = (proposal) => proposal?.targetId ?? proposal?.result?.targetId ?? null;
 
-export function formatTransform({ offset, yaw }) {
+export function formatTransform(transform) {
+  if (transform.position) return `owner position ${transform.position.map((n) => n.toFixed(2)).join(', ')}, orientation ${transform.quaternion.map((n) => n.toFixed(3)).join(', ')}, assumed relative scale ${transform.scale.toFixed(2)}`;
+  const { offset, yaw } = transform;
   const [x, y, z] = offset.map((value) => value.toFixed(2));
   return `left/right ${x}, down/up ${y}, away/toward ${z}, turn ${Math.round((yaw * 180) / Math.PI)}°`;
 }
@@ -37,6 +40,8 @@ export function proposalTitle(result) {
       return 'Move the selected object';
     case 'rotate':
       return 'Turn the selected object';
+    case 'face_object':
+      return 'Turn the chosen photographed side toward the other object in the owner composition';
     case 'face_anchor':
       return `Turn the side of the selected object seen in the photo toward “${result.anchor?.label ?? ''}”`;
     default:
@@ -97,7 +102,7 @@ function excerpt(text) {
 }
 
 export function historyLabel(entry) {
-  if (entry.kind === 'initial') return 'Original position';
+  if (entry.kind === 'initial') return isComposition(entry) ? 'Initial owner-assumed layout' : 'Original position';
   if (entry.kind === 'manual') return 'Manual change';
   if (entry.kind === 'proposal') return 'Change from a memory';
   if (entry.kind === 'contribution') return 'Change from a recollection';
@@ -174,7 +179,9 @@ export function mountMemoryEdit(container, bridge) {
   const hidden = (id) => redactedIds.has(id) || removedIds.has(id);
   // updatedAt only moves forward; an older answer never replaces a newer one.
   const older = (next, than) => Boolean(than) && String(next.updatedAt ?? '') < String(than.updatedAt ?? '');
-  const blocked = proposalBlockedReason(bridge.source);
+  const composition = isComposition(bridge);
+  const sources = bridge.geometrySources;
+  const blocked = composition ? (!Array.isArray(sources) || sources.length !== 2 ? 'Both photo source records are required before planning.' : sources.map(proposalBlockedReason).find(Boolean)) : proposalBlockedReason(bridge.source);
 
   const text = el('textarea', { rows: 3, maxLength: TEXT_LIMIT });
   text.id = `memory-text-${Math.random().toString(36).slice(2)}`;
@@ -209,7 +216,7 @@ export function mountMemoryEdit(container, bridge) {
     el('p', {
       className: 'hint',
       textContent:
-        'Use only public or synthetic material in this development version. When you press Plan, your message and a small copy of this photo without file metadata are sent to Meta, which proposes one change to the selected object. Nothing changes until you apply it.',
+        composition ? 'Use only public or synthetic material in this development version. Plan sends your message and metadata-free copies of both source photos to Meta. It may propose one object pose change; relative scale stays as saved. Nothing changes until you apply it.' : 'Use only public or synthetic material in this development version. When you press Plan, your message and a small copy of this photo without file metadata are sent to Meta, which proposes one change to the selected object. Nothing changes until you apply it.',
     }),
     ...(blocked
       ? [el('p', { className: 'hint', textContent: blocked })]
@@ -217,7 +224,7 @@ export function mountMemoryEdit(container, bridge) {
           label,
           text,
           el('p', { className: 'hint' }, [count, ` / ${TEXT_LIMIT.toLocaleString('en-US')} characters`]),
-          el('label', { className: 'memory-consent' }, [consent, ' Send this message and the photo to Meta to propose a change']),
+          el('label', { className: 'memory-consent' }, [consent, composition ? ' Send this message and both source photos to Meta to propose a change' : ' Send this message and the photo to Meta to propose a change']),
           el('div', { className: 'actions' }, [plan]),
           hint,
         ]),
@@ -232,7 +239,7 @@ export function mountMemoryEdit(container, bridge) {
 
   function setPreview(on) {
     previewing = on;
-    const anchor = on && current.result.action === 'face_anchor' ? current.result.anchor.point : null;
+    const anchor = on && current.result.action === 'face_object' ? current.result.faceObjectId : on && current.result.action === 'face_anchor' ? current.result.anchor.point : null;
     guide = bridge.showTransform(on ? current.result.transform : null, anchor, targetOf(current)) ?? null;
     if (!on) frontChecked = false;
     bridge.setLocked(on || busy);
@@ -458,7 +465,14 @@ export function mountMemoryEdit(container, bridge) {
           }
         }
       }
-      const needsFront = result.action === 'face_anchor';
+      if (result.action === 'face_object') {
+        nodes.push(el('p', { className: 'hint', textContent: 'This points the photographed side toward the other object in your assumed layout. It does not identify the object’s semantic front, infer alignment, or change relative scale.' }));
+        if (previewing && guide?.readable && guide?.aligned) {
+          front = el('input', { type: 'checkbox', checked: frontChecked });
+          nodes.push(el('label', {}, [front, ' I choose this photographed side as the face to point, and checked the direction in the preview']));
+        } else if (previewing) nodes.push(el('p', { className: 'form-message', textContent: 'A usable, aligned direction and 3D preview are required before applying this turn.' }));
+      }
+      const needsFront = ['face_anchor', 'face_object'].includes(result.action);
       if (current.baseVersion !== editor.version) {
         nodes.push(el('p', { className: 'hint', textContent: `This proposal was made for version ${current.baseVersion}, but the saved position is now version ${editor.version}. Plan again to use it.` }));
       } else {

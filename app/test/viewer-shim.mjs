@@ -28,7 +28,8 @@ export class WebGLRenderer {
 }
 export class TextureLoader {
   async loadAsync(url) {
-    if (globalThis.viewerFail === 'texture') throw new Error('404');
+    if (globalThis.viewerTextureWait?.[url]) await globalThis.viewerTextureWait[url];
+    if (globalThis.viewerFail === 'texture' || globalThis.viewerFail === 'texture:' + url) throw new Error('404');
     const texture = new T.Texture();
     texture.dispose = () => log('texture.dispose');
     log('texture ' + url);

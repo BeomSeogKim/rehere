@@ -112,6 +112,27 @@ async function twoObjectScene(owner, { confirm = true, expect = 'ready' } = {}) 
 const LEFT_OF = { kind: 'left_of', leftId: 'object-1', rightId: 'object-2', frame: 'original-photo' };
 const editBody = (baseVersion, targetId, offset, yaw = 0) => ({ requestId: randomUUID(), baseVersion, targetId, offset, yaw });
 
+it('refuses a legacy relationship replay after an inherited contribution is withdrawn', async () => {
+  const { app, owner } = await workspace();
+  try {
+    const { scene } = await twoObjectScene(owner);
+    const submitted = await owner.post(`${scene}/contributions`, { requestId: randomUUID(), text: 'Synthetic remembered location', permissions: { place: true, model: false, share: true }, periodClaim: '' });
+    assert.equal(submitted.status, 200);
+    const contribution = await submitted.json();
+    const adopted = await owner.post(`${scene}/contributions/${contribution.id}/review`, {
+      requestId: randomUUID(), baseVersion: 1, baseRevision: 1, decision: 'adopt', reason: '', conflict: 'unknown', transform: { targetId: 'object-1', offset: [-0.1, 0, 0], yaw: 0 },
+    });
+    assert.equal(adopted.status, 200, JSON.stringify(await adopted.clone().json()));
+    const relationship = { requestId: randomUUID(), baseVersion: 2, relationship: LEFT_OF, confirmed: true };
+    assert.equal((await owner.post(`${scene}/relationship`, relationship)).status, 200);
+    assert.equal((await owner.post(`${scene}/contributions/${contribution.id}/withdraw`, { requestId: randomUUID() })).status, 200);
+    const replayed = await owner.post(`${scene}/relationship`, relationship);
+    assert.equal(replayed.status, 409);
+    assert.match((await replayed.json()).error, /withdrawn/i);
+    assert.equal((await owner.json(scene)).edit.version, 3);
+  } finally { await app.close(); }
+});
+
 describe('two-object builds', () => {
   it('admits two named boxes, sends them to the worker and stores renderer pivots once', async () => {
     const { app, owner } = await workspace();

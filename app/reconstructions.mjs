@@ -25,6 +25,9 @@ import {
 } from './memory-links.mjs';
 import { SourcePolicies, allows } from './source-policies.mjs';
 import { sha256 } from './sources.mjs';
+import { geometrySources } from './geometry-sources.mjs';
+import { COMPOSITION_OUTPUTS, parseCompositionPose, parseCompositionRequest, verifiedAsset } from './composition-assets.mjs';
+import { COMPOSITION_REPRESENTATION, canonicalPose, copyPose, isComposition } from './public/composition-scene.js';
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const RECONSTRUCTION_TIMEOUT_MS = 180_000;
@@ -197,6 +200,7 @@ function parseObjects(objects) {
 }
 
 export function parseBuildRequest(body) {
+  if (body?.kind === 'two-photo-composition') return parseCompositionRequest(body);
   const twoObjects = exactKeys(body, ['requestId', 'sourceId', 'objects']);
   if (!twoObjects && !exactKeys(body, ['requestId', 'sourceId', 'box'])) throw new RequestError(400, 'The build request could not be read.');
   const { requestId, sourceId } = body;
@@ -251,6 +255,10 @@ const transformValid = (offset, yaw) => Array.isArray(offset) && offset.length =
   && finite(yaw) && yaw >= -Math.PI && yaw <= Math.PI;
 
 export function parseObjectEditRequest(body) {
+  if (exactKeys(body, ['requestId', 'baseVersion', 'targetId', 'pose'])) {
+    if (typeof body.requestId !== 'string' || !UUID_PATTERN.test(body.requestId) || !Number.isInteger(body.baseVersion) || body.baseVersion < 1 || !OBJECT_IDS.includes(body.targetId)) throw new RequestError(400, 'The edit could not be read.');
+    return { requestId: body.requestId, baseVersion: body.baseVersion, targetId: body.targetId, pose: parseCompositionPose(body.pose) };
+  }
   if (!exactKeys(body, ['requestId', 'baseVersion', 'targetId', 'offset', 'yaw'])) throw new RequestError(400, 'The edit could not be read.');
   const { requestId, baseVersion, targetId, offset, yaw } = body;
   const valid = typeof requestId === 'string' && UUID_PATTERN.test(requestId) && Number.isInteger(baseVersion) && baseVersion >= 1
@@ -259,26 +267,34 @@ export function parseObjectEditRequest(body) {
   return { requestId, baseVersion, targetId, offset: [...offset], yaw };
 }
 
-function parseRule(rule) {
+function parseRule(rule, composition = false) {
   if (rule === null) return null;
+  if (composition) {
+    if (exactKeys(rule, ['kind', 'leftId', 'rightId', 'frame']) && rule.kind === 'left_of' && rule.frame === 'owner-composition'
+      && OBJECT_IDS.includes(rule.leftId) && OBJECT_IDS.includes(rule.rightId) && rule.leftId !== rule.rightId) return { ...rule };
+    if (exactKeys(rule, ['kind', 'subjectId', 'targetId', 'frame', 'frontBasis']) && rule.kind === 'faces' && rule.frame === 'owner-composition'
+      && rule.frontBasis === 'owner-confirmed-photographed-side' && OBJECT_IDS.includes(rule.subjectId) && OBJECT_IDS.includes(rule.targetId) && rule.subjectId !== rule.targetId) return { ...rule };
+    throw new RequestError(400, 'The relationship could not be read.');
+  }
   const valid = exactKeys(rule, ['kind', 'leftId', 'rightId', 'frame']) && rule.kind === 'left_of' && rule.frame === 'original-photo'
     && OBJECT_IDS.includes(rule.leftId) && OBJECT_IDS.includes(rule.rightId) && rule.leftId !== rule.rightId;
   if (!valid) throw new RequestError(400, 'The relationship could not be read.');
   return { kind: 'left_of', leftId: rule.leftId, rightId: rule.rightId, frame: 'original-photo' };
 }
 
-export function parseRelationshipRequest(body) {
+export function parseRelationshipRequest(body, composition = false) {
   if (!exactKeys(body, ['requestId', 'baseVersion', 'relationship', 'confirmed'])) throw new RequestError(400, 'The relationship could not be read.');
   const { requestId, baseVersion, confirmed } = body;
   if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId) || !Number.isInteger(baseVersion) || baseVersion < 1) {
     throw new RequestError(400, 'The relationship could not be read.');
   }
   if (confirmed !== true) throw new RequestError(400, 'Confirm the relationship change before saving it.');
-  return { requestId, baseVersion, relationship: parseRule(body.relationship) };
+  return { requestId, baseVersion, relationship: parseRule(body.relationship, composition) };
 }
 
-function parseConfirmRequest(body) {
-  const valid = exactKeys(body, ['requestId', 'objectIds']) && typeof body.requestId === 'string' && UUID_PATTERN.test(body.requestId)
+function parseConfirmRequest(body, composition = false) {
+  const keys = ['requestId', 'objectIds', ...(composition ? ['surfaceIdentityConfirmed', 'layoutConfirmed', 'scaleBasis'] : [])];
+  const valid = exactKeys(body, keys) && (!composition || (body.surfaceIdentityConfirmed === true && body.layoutConfirmed === true && body.scaleBasis === 'owner-assumed-relative')) && typeof body.requestId === 'string' && UUID_PATTERN.test(body.requestId)
     && Array.isArray(body.objectIds) && body.objectIds.length === OBJECT_IDS.length && new Set(body.objectIds).size === OBJECT_IDS.length
     && body.objectIds.every((id) => OBJECT_IDS.includes(id));
   if (!valid) throw new RequestError(400, 'The confirmation could not be read.');
@@ -309,7 +325,7 @@ const SOURCE_REDACTED_PROPOSAL = 'This proposal used a photo that is no longer a
 // the manifest contract plus whether the photo's current uses or withdrawn or
 // ungranted contributions block use. `source` is the photo's current uses.
 export function publicManifest(manifest, source = { place: true, model: true }) {
-  const { edits, proposals, collaboration, shares, stories, outlineCorrection, ...rest } = manifest;
+  const { edits, proposals, collaboration, shares, stories, outlineCorrection, compositionCreation, ...rest } = manifest;
   const ready = manifest.status === 'ready';
   const sourceBlocked = ready && !source.place;
   const contributionBlocked = usageBlocked(manifest);
@@ -318,8 +334,9 @@ export function publicManifest(manifest, source = { place: true, model: true }) 
     // Labels are the owner's text about the photo; without its place use only
     // fixed markers are shown. The stored labels are kept on disk.
     ...(isTwoObject(manifest) && {
-      objects: manifest.objects.map(({ id, label, box, pivot }) => ({
+      objects: manifest.objects.map(({ id, label, box, pivot, sourceId }) => ({
         id, label: source.place ? label : objectMarker(id), box: [...box], pivot: pivot ? [...pivot] : null,
+        ...(isComposition(manifest) && { sourceId }),
       })),
       objectsConfirmed: Boolean(manifest.objectsConfirmed),
     }),
@@ -601,6 +618,7 @@ export class ReconstructionStore {
     this.outlineRunner = outlineRunner;
     this.outlineTimeoutMs = outlineTimeoutMs;
     this.activeOutline = null;
+    this.activeComposition = null;
     this.timeoutMs = timeoutMs;
     this.proposalModel = proposalModel;
     this.prepareImage = prepareImage;
@@ -709,10 +727,156 @@ export class ReconstructionStore {
     return { place: use('place'), model: use('model'), share: use('share') };
   }
 
+  async sceneSourceUses(manifest) {
+    const bindings = geometrySources(manifest);
+    const uses = await Promise.all(bindings.map(({ sourceId }) => this.sourceUses(manifest.draftId, sourceId)));
+    return Object.fromEntries(['place', 'model', 'share'].map((purpose) => [purpose, uses.length > 0 && uses.every((entry) => entry[purpose])]));
+  }
+
+  async assertSceneSources(manifest, purpose = 'place') {
+    const photos = [];
+    for (const binding of geometrySources(manifest)) {
+      if (!isComposition(manifest)) {
+        photos.push(await this.permittedPhoto(manifest.draftId, binding.sourceId, purpose));
+        continue;
+      }
+      const photo = await this.verifiedOriginal(manifest.draftId, binding.sourceId, purpose);
+      if (photo.source.sha256 !== binding.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
+      photos.push(photo);
+    }
+    return photos;
+  }
+
+  async compositionAssets(manifest) {
+    const folder = path.join(this.jobDir(manifest.draftId, manifest.id), 'assets');
+    if (!(await safeJobDirectory(folder, this.rootDir)) || manifest.derivedAssets?.length !== 3) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+    const files = {};
+    for (const [name, spec] of Object.entries(COMPOSITION_OUTPUTS)) {
+      const entry = manifest.derivedAssets.find((item) => item.name === name);
+      if (entry?.type !== spec.type || entry.role !== 'derived') throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+      files[name] = await verifiedAsset(path.join(folder, name), entry, spec);
+    }
+    return files;
+  }
+
+  async #compositionParent(draftId, reference) {
+    const manifest = await this.editableScene(draftId, reference.jobId);
+    if (manifest.status !== 'ready' || isComposition(manifest)) throw new RequestError(409, 'Select an object from a finished single-photo scene.');
+    if (isTwoObject(manifest)) assertObjectsConfirmed(manifest);
+    assertSceneUsable(manifest, 'place');
+    const original = await this.verifiedOriginal(draftId, manifest.sourceId, 'place');
+    if (original.source.sha256 !== manifest.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
+    const assets = path.join(this.jobDir(draftId, reference.jobId), 'assets');
+    if (!(await safeJobDirectory(assets, this.rootDir))) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+    const files = {};
+    for (const name of Object.keys(OUTPUTS)) files[name] = await verifiedAsset(path.join(assets, name), manifest.derivedAssets.find((entry) => entry.name === name), OUTPUTS[name]);
+    if (sha256(files['surface.json']) !== reference.surfaceSha256) throw new RequestError(409, 'The selected surface changed. Reopen it before composing.');
+    const surface = JSON.parse(files['surface.json'].toString('utf8'));
+    const verified = await this.verifyOutputs(assets, manifest, original.size);
+    if (!verified || (isTwoObject(manifest) && !sameValues(verified.pivots, objectPivots(manifest)))) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+    const selected = objectSurfaceMeshes(surface).objects.find((item) => item.id === reference.objectId);
+    if (!selected) throw new RequestError(400, 'This source object could not be found.');
+    const box = isTwoObject(manifest) ? manifest.objects.find((item) => item.id === reference.objectId)?.box : manifest.box;
+    return { manifest, surface, texture: files['texture.jpg'], selected, box, original };
+  }
+
+  async createComposition(draftId, body) {
+    const request = parseCompositionRequest(body);
+    if (!UUID_PATTERN.test(draftId)) throw new RequestError(404, 'This memory could not be found.');
+    await this.recover();
+    const digest = sha256(JSON.stringify([draftId, request]));
+    const admitted = await this.serialize(async () => {
+      const existing = await this.findRequest(request.requestId);
+      if (existing) {
+        if (existing.compositionCreation?.requestDigest !== digest) throw new RequestError(409, 'This request was already used with different values.');
+        await this.assertSceneSources(existing);
+        return { status: 200, manifest: existing };
+      }
+      if (this.activeComposition) {
+        if (this.activeComposition.requestId !== request.requestId) throw new RequestError(409, 'Another composition is being saved.');
+        if (this.activeComposition.digest !== digest) throw new RequestError(409, 'This request was already used with different values.');
+        return { status: 200, operation: this.activeComposition };
+      }
+      if (this.activeOutline?.requestId === request.requestId) throw new RequestError(409, 'This request was already used with different values.');
+      const parents = [];
+      for (const object of request.objects) parents.push(await this.#compositionParent(draftId, object.component));
+      if (parents[0].manifest.sourceId === parents[1].manifest.sourceId) throw new RequestError(400, 'Select objects from two different photos of this place.');
+      if (this.closed) throw new RequestError(503, 'The app is shutting down.');
+      const operation = { id: randomUUID(), draftId, requestId: request.requestId, digest, sourceIds: parents.map((parent) => parent.manifest.sourceId), controller: new AbortController(), done: null };
+      this.activeComposition = operation;
+      operation.done = this.#runComposition(operation, request, parents);
+      return { status: 201, operation };
+    });
+    const saved = admitted.manifest ?? await admitted.operation.done;
+    const current = await this.editableScene(draftId, saved.id);
+    await this.assertSceneSources(current);
+    return { status: admitted.status, manifest: publicManifest(current, await this.sceneSourceUses(current)) };
+  }
+
+  async #runComposition(operation, request, parents) {
+    const { id, draftId } = operation;
+    const staging = path.join(this.stagingDir, id), child = path.join(staging, 'child');
+    const assets = path.join(child, 'assets');
+    const stopped = async () => {
+      if (this.closed || operation.controller.signal.aborted) throw new RequestError(503, 'The composition stopped before saving. Retry the same request to check its result.');
+      if (await this.placeDeleted(draftId)) throw new RequestError(404, 'This place could not be found.');
+    };
+    try {
+      const components = request.objects.map((object, index) => ({ id: OBJECT_IDS[index], label: object.label, selectedObjectId: object.component.objectId, texture: `texture-${index + 1}.jpg`, surface: parents[index].surface }));
+      const surface = { schema_version: 3, representation: COMPOSITION_REPRESENTATION, components, context: request.context.keep
+        ? { kind: 'photographed-background', componentId: 'object-1', bounds: request.context.bounds, pose: copyPose(request.objects[0].pose) } : null };
+      // The shared builder validates the actual selected meshes and context crop.
+      try { objectSurfaceMeshes(surface); } catch {
+        throw new RequestError(400, 'The selected context must contain an observed background surface inside the first photo.');
+      }
+      const initialArrangement = { version: 1, frame: 'owner-composition', objects: request.objects.map((object, index) => ({ id: OBJECT_IDS[index], ...copyPose(object.pose) })), relationship: null };
+      const now = new Date().toISOString();
+      const files = { 'surface.json': Buffer.from(JSON.stringify(surface)), 'texture-1.jpg': parents[0].texture, 'texture-2.jpg': parents[1].texture };
+      const sourceBindings = parents.map((parent, index) => ({ sourceId: parent.manifest.sourceId, sourceSha256: parent.manifest.sourceSha256, objectIds: [OBJECT_IDS[index]] }));
+      const manifest = { id, draftId, representation: COMPOSITION_REPRESENTATION, scaleBasis: 'owner-assumed-relative', sourceBindings, requestId: request.requestId,
+        compositionCreation: { requestDigest: operation.digest }, status: 'ready', createdAt: now, updatedAt: now, error: null,
+        objects: request.objects.map((object, index) => ({ id: OBJECT_IDS[index], label: object.label, sourceId: sourceBindings[index].sourceId, box: [...parents[index].box], pivot: [0, 0, 0],
+          component: { parentJobId: object.component.jobId, parentObjectId: object.component.objectId, parentSurfaceSha256: object.component.surfaceSha256, sourcePivot: [...parents[index].selected.pivot] } })),
+        objectsConfirmed: false, initialArrangement, edit: structuredClone(initialArrangement), edits: [],
+        derivedAssets: Object.entries(files).map(([name, bytes]) => ({ name, type: COMPOSITION_OUTPUTS[name].type, size: bytes.length, sha256: sha256(bytes), role: 'derived', parentSourceIds: sourceBindings.filter((_, index) => name === 'surface.json' || name === `texture-${index + 1}.jpg`).map(({ sourceId }) => sourceId) })),
+      };
+      await stopped();
+      await mkdir(assets, { recursive: true, mode: 0o700 });
+      for (const [name, bytes] of Object.entries(files)) {
+        if (bytes.length > COMPOSITION_OUTPUTS[name].maxBytes) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+        await writeFile(path.join(assets, name), bytes, { mode: 0o600, flag: 'wx' });
+      }
+      // The creation itself is a new arrangement and must pass the real mesh gate.
+      const { THREE, MeshBVH, prepareVisibleGeometry, checkVisibleArrangement, visibleSurfaceProblem } = await loadVisibleGate();
+      const problem = visibleSurfaceProblem(checkVisibleArrangement(prepareVisibleGeometry(THREE, MeshBVH, surface), initialArrangement, this.visibleSurfaceLimits));
+      if (problem) throw new RequestError(409, problem);
+      await writeJsonAtomic(path.join(child, 'manifest.json'), manifest);
+      return await this.serialize(async () => {
+        const publish = async () => {
+          await stopped();
+          for (const object of request.objects) await this.#compositionParent(draftId, object.component);
+          await this.assertSceneSources(manifest);
+          for (const entry of manifest.derivedAssets) await verifiedAsset(path.join(assets, entry.name), entry, COMPOSITION_OUTPUTS[entry.name]);
+          await mkdir(path.join(this.rootDir, draftId), { recursive: true });
+          await stopped();
+          await rename(child, this.jobDir(draftId, id));
+          return manifest;
+        };
+        return this.placeDeletions ? this.placeDeletions.commit(publish) : publish();
+      });
+    } catch (error) {
+      if (error instanceof RequestError) throw error;
+      throw new RequestError(503, 'The composition could not be saved. Retry the same request to check its result.');
+    } finally {
+      await rm(staging, { recursive: true, force: true }).catch(() => {});
+      if (this.activeComposition === operation) this.activeComposition = null;
+    }
+  }
+
   async get(draftId, jobId) {
     await this.recover();
     const manifest = await this.readManifest(draftId, jobId);
-    return manifest && publicManifest(manifest, await this.sourceUses(draftId, manifest.sourceId));
+    return manifest && publicManifest(manifest, await this.sceneSourceUses(manifest));
   }
 
   async list(draftId) {
@@ -721,7 +885,7 @@ export class ReconstructionStore {
     const manifests = [];
     for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
       const manifest = await this.readManifest(draftId, jobId).catch(() => null);
-      if (manifest) manifests.push(publicManifest(manifest, await this.sourceUses(draftId, manifest.sourceId)));
+      if (manifest) manifests.push(publicManifest(manifest, await this.sceneSourceUses(manifest)));
     }
     return manifests.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
@@ -741,7 +905,7 @@ export class ReconstructionStore {
   // Requests cancellation of this place's running work. Only called once its
   // deletion barrier is durable; nothing is awaited and no data is recalled.
   abortPlace(draftId) {
-    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline]) {
+    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition]) {
       if (item?.draftId !== draftId) continue;
       try {
         item.controller.abort();
@@ -757,20 +921,28 @@ export class ReconstructionStore {
     const builds = new Set();
     if (this.active?.draftId === draftId) builds.add(this.active.id);
     for (const [jobId, runner] of this.runners) if (runner.draftId === draftId) builds.add(jobId);
-    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline].filter((item) => item?.draftId === draftId).length;
+    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition].filter((item) => item?.draftId === draftId).length;
   }
 
   async asset(draftId, jobId, name) {
     await this.recover();
     const raw = await this.readManifest(draftId, jobId);
-    const manifest = raw && publicManifest(raw, await this.sourceUses(draftId, raw.sourceId));
-    if (manifest?.status !== 'ready' || !Object.hasOwn(OUTPUTS, name)) return null;
+    const manifest = raw && publicManifest(raw, await this.sceneSourceUses(raw));
+    if (manifest?.status !== 'ready' || !Object.hasOwn(isComposition(raw) ? COMPOSITION_OUTPUTS : OUTPUTS, name)) return null;
     // Derived pixels and surfaces reproduce the blocked transform's scene.
     if (manifest.usageBlocked) {
       throw new RequestError(409, manifest.blockedReason === 'source' ? SOURCE_BLOCKED_MESSAGE : issueMessage(dependencyIssue(raw, currentDependencies(raw))));
     }
     const entry = manifest.derivedAssets.find((item) => item.name === name);
-    return entry ? { ...entry, file: path.join(this.jobDir(draftId, jobId), 'assets', name) } : null;
+    if (!entry) return null;
+    if (isComposition(raw)) {
+      await this.assertSceneSources(raw);
+      await this.compositionAssets(raw);
+      const assets = path.join(this.jobDir(draftId, jobId), 'assets');
+      if (!(await safeJobDirectory(assets, this.rootDir))) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+      return { ...entry, body: await verifiedAsset(path.join(assets, name), entry, COMPOSITION_OUTPUTS[name]) };
+    }
+    return { ...entry, file: path.join(this.jobDir(draftId, jobId), 'assets', name) };
   }
 
   async findRequest(requestId) {
@@ -823,6 +995,7 @@ export class ReconstructionStore {
   }
 
   async create(draftId, request) {
+    if (request.kind === 'two-photo-composition') return this.createComposition(draftId, request);
     await this.recover();
     if (!UUID_PATTERN.test(draftId)) throw new RequestError(404, 'This memory could not be found.');
     const accepted = await this.serialize(async () => {
@@ -837,6 +1010,7 @@ export class ReconstructionStore {
         return { manifest: existing, start: false };
       }
       if (this.activeOutline?.requestId === request.requestId) throw new RequestError(409, OUTLINE_MESSAGES.changed);
+      if (this.activeComposition?.requestId === request.requestId) throw new RequestError(409, 'This request is already being used for a composition.');
       const { source, imagePath, size } = await this.verifiedOriginal(draftId, request.sourceId);
       for (const [, , x2, y2] of request.objects ? request.objects.map((item) => item.box) : [request.box]) {
         if (x2 > size.width || y2 > size.height) {
@@ -874,7 +1048,7 @@ export class ReconstructionStore {
     if (accepted.start) {
       this.active.done = this.run(accepted.manifest, accepted.imagePath, accepted.size);
     }
-    return publicManifest(accepted.manifest, await this.sourceUses(draftId, accepted.manifest.sourceId));
+    return publicManifest(accepted.manifest, await this.sceneSourceUses(accepted.manifest));
   }
 
   // Callers hold the mutex, so no manifest write is in progress. Removes the
@@ -920,7 +1094,7 @@ export class ReconstructionStore {
       controller.abort();
     }, this.timeoutMs);
     try {
-      const permitted = () => this.sourceUses(manifest.draftId, manifest.sourceId).then((uses) => uses.model);
+      const permitted = () => this.sceneSourceUses(manifest).then((uses) => uses.model);
       // The grant is checked again when work starts and inside the publish slot.
       const started = await this.serialize(async () => {
         if (!(await permitted())) {
@@ -1057,7 +1231,7 @@ export class ReconstructionStore {
 
   async #outlineParent(draftId, jobId, surfaceSha256) {
     const manifest = await this.editableScene(draftId, jobId);
-    if (manifest.status !== 'ready' || !isTwoObject(manifest)) throw new RequestError(409, 'Only a finished two-object scene can have its outline corrected.');
+    if (manifest.status !== 'ready' || !isTwoObject(manifest) || isComposition(manifest)) throw new RequestError(409, 'Only a finished single-photo two-object scene can have its outline corrected.');
     assertSceneUsable(manifest, 'place');
     const { source, size } = await this.verifiedOriginal(draftId, manifest.sourceId, 'place');
     if (source.sha256 !== manifest.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
@@ -1092,6 +1266,7 @@ export class ReconstructionStore {
         if (existing.outlineCorrection?.requestDigest !== digest) throw new RequestError(409, OUTLINE_MESSAGES.changed);
         return { status: 200, manifest: existing };
       }
+      if (this.activeComposition?.requestId === request.requestId) throw new RequestError(409, OUTLINE_MESSAGES.changed);
       if (this.activeOutline) {
         if (this.activeOutline.requestId === request.requestId) {
           if (this.activeOutline.digest !== digest) throw new RequestError(409, OUTLINE_MESSAGES.changed);
@@ -1114,7 +1289,7 @@ export class ReconstructionStore {
     // A concurrent exact replay may have waited while the child was edited.
     const current = await this.readManifest(draftId, manifest.id);
     if (!current) throw new RequestError(404, 'This scene could not be found.');
-    return { status: accepted.status, manifest: publicManifest(current, await this.sourceUses(draftId, current.sourceId)) };
+    return { status: accepted.status, manifest: publicManifest(current, await this.sceneSourceUses(current)) };
   }
 
   async #runOutline(operation, parentJobId, request, parent, objects) {
@@ -1206,7 +1381,7 @@ export class ReconstructionStore {
         return { version: previous.version, offset: previous.offset, yaw: previous.yaw };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
-      await this.permittedPhoto(draftId, manifest.sourceId);
+      await this.assertSceneSources(manifest);
       if (request.baseVersion !== manifest.edit.version) {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before applying this edit.');
       }
@@ -1220,7 +1395,7 @@ export class ReconstructionStore {
   // Callers hold the mutex. Common checks before a new two-object version.
   async #objectVersionAllowed(manifest, baseVersion) {
     if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
-    await this.permittedPhoto(manifest.draftId, manifest.sourceId);
+    await this.assertSceneSources(manifest);
     if (baseVersion !== manifest.edit.version) {
       throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before applying this edit.');
     }
@@ -1231,20 +1406,23 @@ export class ReconstructionStore {
   // Moves or turns one object. The server starts from the whole saved
   // arrangement, so the other object and the rule cannot be changed here.
   async #editObject(manifest, request) {
+    if (isComposition(manifest) !== Boolean(request.pose)) throw new RequestError(400, 'The edit could not be read.');
+    if (isComposition(manifest)) await this.assertSceneSources(manifest);
+    const requested = request.pose ? { pose: request.pose } : { offset: request.offset, yaw: request.yaw };
     const previous = manifest.edits.find((item) => item.requestId === request.requestId);
     if (previous) {
       const same = previous.kind === 'manual' && previous.baseVersion === request.baseVersion && previous.targetId === request.targetId
-        && sameValues(previous.request, { offset: request.offset, yaw: request.yaw });
+        && sameValues(previous.request, requested);
       if (!same) throw new RequestError(409, 'This edit request was already used with different values.');
       assertReplayUsable(manifest, previous.version);
       return { version: previous.version, ...arrangementOf(previous) };
     }
     await this.#objectVersionAllowed(manifest, request.baseVersion);
-    const arrangement = withTarget(arrangementOf(manifest.edit), request.targetId, request);
+    const arrangement = withTarget(arrangementOf(manifest.edit), request.targetId, request.pose ?? request);
     assertRelationship(manifest, arrangement);
     const edit = { version: manifest.edit.version + 1, ...arrangement };
     await this.saveVersion(manifest, edit, {
-      requestId: request.requestId, kind: 'manual', targetId: request.targetId, request: { offset: request.offset, yaw: request.yaw },
+      requestId: request.requestId, kind: 'manual', targetId: request.targetId, request: requested,
       baseVersion: request.baseVersion, ...edit, dependencies: currentDependencies(manifest),
     });
     return edit;
@@ -1257,12 +1435,14 @@ export class ReconstructionStore {
     return this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
       if (!isTwoObject(manifest)) throw new RequestError(409, 'This scene has one object, so it has no relationship to set.');
-      const request = parseRelationshipRequest(body);
+      const request = parseRelationshipRequest(body, isComposition(manifest));
+      if (isComposition(manifest)) await this.assertSceneSources(manifest);
       const previous = manifest.edits.find((item) => item.requestId === request.requestId);
       if (previous) {
         if (previous.kind !== 'relationship' || previous.baseVersion !== request.baseVersion || !sameValues(previous.relationship, request.relationship)) {
           throw new RequestError(409, 'This request was already used with different values.');
         }
+        assertReplayUsable(manifest, previous.version);
         return { version: previous.version, ...arrangementOf(previous) };
       }
       await this.#objectVersionAllowed(manifest, request.baseVersion);
@@ -1283,15 +1463,15 @@ export class ReconstructionStore {
     return this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
       if (!isTwoObject(manifest)) throw new RequestError(409, 'This scene has one object, so there is nothing to confirm.');
-      const { requestId } = parseConfirmRequest(body);
+      const { requestId } = parseConfirmRequest(body, isComposition(manifest));
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be confirmed.');
-      await this.permittedPhoto(draftId, manifest.sourceId);
+      await this.assertSceneSources(manifest);
       let current = manifest;
       if (!manifest.objectsConfirmed) {
-        if (!(await this.sourceUses(draftId, manifest.sourceId)).place) throw new RequestError(403, SOURCE_BLOCKED_MESSAGE);
+        if (!(await this.sceneSourceUses(manifest)).place) throw new RequestError(403, SOURCE_BLOCKED_MESSAGE);
         current = await this.update(manifest, { objectsConfirmed: { requestId, confirmedAt: new Date().toISOString() } });
       }
-      const { objects, objectsConfirmed } = publicManifest(current, await this.sourceUses(draftId, manifest.sourceId));
+      const { objects, objectsConfirmed } = publicManifest(current, await this.sceneSourceUses(manifest));
       return { objects, objectsConfirmed };
     });
   }
@@ -1301,6 +1481,12 @@ export class ReconstructionStore {
   // Every receipt names the contributions its transform depends on.
   // Every new main version passes the visible-surface gate before anything is written.
   async saveVersion(manifest, edit, receipt, proposals = manifest.proposals ?? [], extra = {}) {
+    if (isComposition(manifest)) {
+      await this.assertSceneSources(manifest);
+      if (edit.frame !== 'owner-composition' || edit.objects.length !== 2 || edit.objects.some((item, index) => item.id !== OBJECT_IDS[index])) throw new RequestError(400, 'The arrangement could not be read.');
+      for (const object of edit.objects) canonicalPose(object);
+      assertRelationship(manifest, edit);
+    }
     await this.assertVisibleArrangement(manifest, edit);
     const changes = { ...extra, edit, edits: [...manifest.edits, receipt] };
     if (manifest.proposals || proposals.length > 0) changes.proposals = staleProposals(proposals, edit.version, new Date().toISOString());
@@ -1313,6 +1499,7 @@ export class ReconstructionStore {
   // job and must match its recorded size and checksum on every call.
   async assertVisibleArrangement(manifest, arrangement) {
     if (!isTwoObject(manifest)) return;
+    if (isComposition(manifest)) await this.compositionAssets(manifest);
     let result;
     try {
       const { checkVisibleArrangement, visibleSurfaceProblem } = await loadVisibleGate();
@@ -1331,7 +1518,7 @@ export class ReconstructionStore {
   // null when the file is missing, changed, oversized or not the scene's own.
   async #visibleGeometry(manifest) {
     const entry = manifest.derivedAssets?.find((item) => item.name === 'surface.json');
-    if (!entry || !Number.isInteger(entry.size) || entry.size <= 0 || entry.size > OUTPUTS['surface.json'].maxBytes) return null;
+    if (!entry || !Number.isInteger(entry.size) || entry.size <= 0 || entry.size > (isComposition(manifest) ? COMPOSITION_OUTPUTS : OUTPUTS)['surface.json'].maxBytes) return null;
     const assets = path.join(this.jobDir(manifest.draftId, manifest.id), 'assets');
     // Every folder from the data root to the assets folder must be real, and
     // the file's own size is checked before any bytes are allocated.
@@ -1379,7 +1566,7 @@ export class ReconstructionStore {
   // Every proposal leaving the server: a photo without place use hides the
   // message and plan of every proposal of its scenes; disk records stay intact.
   async projectProposals(manifest, proposals) {
-    const { place } = await this.sourceUses(manifest.draftId, manifest.sourceId);
+    const { place } = await this.sceneSourceUses(manifest);
     return proposals.map((item) => (place ? projectProposal(manifest, item) : {
       ...item, statement: { ...item.statement, text: null }, result: null, question: null, status: 'stale', error: SOURCE_REDACTED_PROPOSAL, redacted: true,
     }));
@@ -1398,8 +1585,9 @@ export class ReconstructionStore {
   async history(draftId, jobId) {
     await this.recover();
     const manifest = await this.editableScene(draftId, jobId);
+    if (isComposition(manifest)) await this.assertSceneSources(manifest);
     // Owner-only audit: whether restoring each version is still allowed.
-    const { place } = await this.sourceUses(draftId, manifest.sourceId);
+    const { place } = await this.sceneSourceUses(manifest);
     return editHistory(manifest).map((entry) => {
       const dependencies = versionDependencies(manifest, entry.version);
       return { ...entry, dependencies: [...dependencies], blocked: !place || dependenciesBlocked(manifest, dependencies) };
@@ -1411,6 +1599,7 @@ export class ReconstructionStore {
     const accepted = await this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
       const twoObjects = isTwoObject(manifest);
+      if (isComposition(manifest)) await this.assertSceneSources(manifest);
       const request = parseProposalRequest(body, { targetIds: twoObjects ? [...OBJECT_IDS] : null });
       const proposals = manifest.proposals ?? [];
       const existing = proposals.find((item) => item.requestId === request.requestId);
@@ -1421,6 +1610,7 @@ export class ReconstructionStore {
         return { proposal: await this.projectProposal(manifest, existing), start: false };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
+      if (isComposition(manifest)) return this.#compositionProposal(manifest, request, proposals);
       const { source, imagePath, size } = await this.verifiedOriginal(draftId, manifest.sourceId);
       if (source.origin?.kind !== 'public') {
         throw new RequestError(403, 'During development, only photos marked as public material can be sent to the hosted model.');
@@ -1457,6 +1647,30 @@ export class ReconstructionStore {
     return accepted.proposal;
   }
 
+  async #compositionProposal(manifest, request, proposals) {
+    const photos = await this.assertSceneSources(manifest, 'model');
+    await this.compositionAssets(manifest);
+    if (photos.some(({ source }) => source.origin?.kind !== 'public')) throw new RequestError(403, 'Only public photos can be sent to the hosted model.');
+    if (request.baseVersion !== manifest.edit.version) throw new RequestError(409, 'The scene changed. Reload it before asking for a proposal.');
+    assertObjectsConfirmed(manifest);
+    assertSceneUsable(manifest, 'model');
+    if (!this.proposalModel) throw new RequestError(503, 'Memory-based editing with the hosted model is not set up on this computer.');
+    if (this.closed) throw new RequestError(503, 'The app is shutting down.');
+    if (this.activeProposal) throw new RequestError(409, 'Another proposal is being prepared right now.');
+    const proposal = newProposal({ id: randomUUID(), statementId: randomUUID(), now: new Date().toISOString(), ...request });
+    const stored = await this.update(manifest, { proposals: [...proposals, proposal] });
+    if (this.closed) {
+      const interrupted = { ...proposal, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
+      await this.update(stored, { proposals: [...proposals, interrupted] });
+      return { proposal: interrupted, start: false };
+    }
+    const sourceIds = geometrySources(manifest).map(({ sourceId }) => sourceId);
+    this.activeProposal = { id: proposal.id, draftId: manifest.draftId, jobId: manifest.id, sourceIds, controller: new AbortController(), done: null };
+    const objects = manifest.objects.map(({ id, label, sourceId, box }) => ({ id, label, sourceId, box: [...box], pose: copyPose(manifest.edit.objects.find((item) => item.id === id)) }));
+    return { proposal, start: true, photos: photos.map((photo, index) => ({ ...photo, box: objects[index].box })), saved: copyPose(manifest.edit.objects.find((item) => item.id === request.targetId)),
+      context: { representation: COMPOSITION_REPRESENTATION, sourceIds, targetId: request.targetId, objects, arrangement: { version: manifest.edit.version, ...arrangementOf(manifest.edit) }, relationship: manifest.edit.relationship && { ...manifest.edit.relationship } } };
+  }
+
   // Applies `change(proposal, manifest)` under the caller's mutex slot and
   // returns the stored proposal; null changes leave the manifest untouched.
   async changeProposal(draftId, jobId, proposalId, change) {
@@ -1473,12 +1687,19 @@ export class ReconstructionStore {
 
   // The model runs outside the manifest mutex. Its result is committed only if
   // the proposal is still processing and the saved version is unchanged.
-  async runProposal(draftId, jobId, { proposal, imagePath, selection, box, sourceId, saved, context }) {
+  async runProposal(draftId, jobId, { proposal, imagePath, selection, box, sourceId, saved, context, photos }) {
     const { controller } = this.activeProposal;
     const { signal } = controller;
     const finish = (changes) => this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current) => (current.status === 'processing' ? changes : null)));
     try {
-      const modelAllowed = () => this.sourceUses(draftId, sourceId).then((uses) => uses.model);
+      const modelAllowed = async () => {
+        if (!photos) return this.sourceUses(draftId, sourceId).then((uses) => uses.model);
+        try {
+          const scene = await this.editableScene(draftId, jobId);
+          const originals = await this.assertSceneSources(scene, 'model');
+          return originals.every(({ source }) => source.origin?.kind === 'public');
+        } catch { return false; }
+      };
       // Grants are checked again at dispatch: a withdrawal may have arrived since creation.
       const started = await this.serialize(async () => { const allowed = await modelAllowed(); return this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
         if (current.status !== 'queued') return null;
@@ -1488,10 +1709,19 @@ export class ReconstructionStore {
         return { status: 'processing' };
       }); });
       if (started.status !== 'processing') return;
-      const surface = JSON.parse(await readFile(path.join(this.jobDir(draftId, jobId), 'assets', 'surface.json'), 'utf8'));
+      const scene = await this.editableScene(draftId, jobId);
+      const surface = JSON.parse((photos ? (await this.compositionAssets(scene))['surface.json'] : await readFile(path.join(this.jobDir(draftId, jobId), 'assets', 'surface.json'))).toString('utf8'));
       let image;
+      let images;
       try {
-        image = await this.prepareImage({ imagePath, box, signal });
+        if (photos) {
+          images = [];
+          for (const photo of photos) {
+            if (!(await modelAllowed()) || signal.aborted || this.closed) throw new Error('Source unavailable');
+            images.push({ sourceId: photo.source.id, image: await this.prepareImage({ imagePath: photo.imagePath, box: photo.box, signal }),
+              selection: [...photo.box] });
+          }
+        } else image = await this.prepareImage({ imagePath, box, signal });
       } catch (error) {
         console.error(`proposal ${proposal.id} image preparation failed: ${String(error?.message ?? 'error').slice(0, 300)}`);
         await finish(signal.aborted ? { status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted } : { status: 'failed', error: PROPOSAL_MESSAGES.image });
@@ -1502,6 +1732,7 @@ export class ReconstructionStore {
       // The call starts inside the slot but is awaited outside it.
       const dispatched = await this.serialize(async () => {
         const manifest = await this.editableScene(draftId, jobId);
+        if (photos) await this.compositionAssets(manifest);
         const current = (manifest.proposals ?? []).find((item) => item.id === proposal.id);
         if (current?.status !== 'processing') return null;
         if (!(await modelAllowed())) {
@@ -1524,9 +1755,10 @@ export class ReconstructionStore {
           const scene = await this.editableScene(draftId, jobId);
           const now = (scene.proposals ?? []).find((item) => item.id === proposal.id);
           if (now?.status !== 'processing' || dependencyIssue(scene, currentDependencies(scene), 'model')) return null;
+          if (photos) await this.compositionAssets(scene);
           return { value: start() };
         });
-        return { call: this.proposalModel({ text: proposal.statement.text, image, selection, sourceId, baseVersion: proposal.baseVersion, saved, signal, admit, ...context }) };
+        return { call: this.proposalModel({ text: proposal.statement.text, ...(photos ? { images } : { image, selection, sourceId }), baseVersion: proposal.baseVersion, saved, signal, admit, ...context }) };
       });
       if (!dispatched) return;
       const outcome = await dispatched.call;
@@ -1547,7 +1779,7 @@ export class ReconstructionStore {
         const twoObjects = isTwoObject(manifest);
         const targetSaved = twoObjects ? manifest.edit.objects.find((item) => item.id === current.targetId) : manifest.edit;
         const checked = validatePlan(outcome.plan, {
-          sourceId, baseVersion: current.baseVersion, saved: targetSaved, surface, ...(twoObjects && { targetId: current.targetId }),
+          ...(photos ? { sourceIds: context.sourceIds, arrangement: manifest.edit } : { sourceId }), baseVersion: current.baseVersion, saved: targetSaved, surface, ...(twoObjects && { targetId: current.targetId }),
         });
         if (checked.error) {
           console.error(`proposal ${current.id} plan rejected: ${checked.code}`);
@@ -1606,6 +1838,7 @@ export class ReconstructionStore {
     await this.recover();
     return this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
+      if (isComposition(manifest)) await this.assertSceneSources(manifest);
       const proposals = manifest.proposals ?? [];
       const proposal = proposals.find((item) => item.id === proposalId);
       if (!proposal) throw new RequestError(404, 'This proposal could not be found.');
@@ -1619,7 +1852,7 @@ export class ReconstructionStore {
         return { edit: replayed, proposal: await this.projectProposal(manifest, proposal) };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
-      await this.permittedPhoto(draftId, manifest.sourceId);
+      await this.assertSceneSources(manifest);
       if (proposal.status === 'applied') throw new RequestError(409, 'This proposal was already applied.');
       if (proposal.status === 'stale' || (proposal.status === 'ready' && proposal.baseVersion !== manifest.edit.version)) {
         throw new RequestError(409, 'The scene changed after this proposal was made. Ask for a new proposal.');
@@ -1628,7 +1861,7 @@ export class ReconstructionStore {
       if (request.baseVersion !== manifest.edit.version) {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before applying this proposal.');
       }
-      if (proposal.result.action === 'face_anchor' && request.frontConfirmed !== true) {
+      if (['face_anchor', 'face_object'].includes(proposal.result.action) && request.frontConfirmed !== true) {
         throw new RequestError(409, 'Confirm that the visible side of the object is its front before applying this turn.');
       }
       assertSceneUsable(manifest, 'model');
@@ -1636,7 +1869,7 @@ export class ReconstructionStore {
       const { offset, yaw } = proposal.result.transform;
       let edit;
       if (isTwoObject(manifest)) {
-        const arrangement = withTarget(arrangementOf(manifest.edit), proposal.targetId, { offset, yaw });
+        const arrangement = withTarget(arrangementOf(manifest.edit), proposal.targetId, isComposition(manifest) ? proposal.result.transform : { offset, yaw });
         assertRelationship(manifest, arrangement);
         edit = { version: manifest.edit.version + 1, ...arrangement };
       } else {
@@ -1657,6 +1890,7 @@ export class ReconstructionStore {
     await this.recover();
     return this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
+      if (isComposition(manifest)) await this.assertSceneSources(manifest);
       const twoObjects = isTwoObject(manifest);
       const request = parseUndoRequest(body, { twoObjects });
       const previous = manifest.edits.find((item) => item.requestId === request.requestId);
@@ -1669,7 +1903,7 @@ export class ReconstructionStore {
         return twoObjects ? { version: previous.version, ...arrangementOf(previous) } : { version: previous.version, offset: previous.offset, yaw: previous.yaw };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
-      await this.permittedPhoto(draftId, manifest.sourceId);
+      await this.assertSceneSources(manifest);
       assertObjectsConfirmed(manifest);
       if (request.baseVersion !== manifest.edit.version) {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before undoing.');
@@ -1735,10 +1969,13 @@ export class ReconstructionStore {
     const manifest = await this.readManifest(draftId, jobId);
     if (!manifest) throw new RequestError(404, 'This scene could not be found.');
     if (manifest.status !== 'ready' || !isTwoObject(manifest) || !manifest.objectsConfirmed) throw new RequestError(409, REGION_NOT_READY);
-    if (!(await this.sourceUses(draftId, manifest.sourceId)).place) throw new RequestError(409, SOURCE_BLOCKED_MESSAGE);
+    if (!(await this.sceneSourceUses(manifest)).place) throw new RequestError(409, SOURCE_BLOCKED_MESSAGE);
     assertSceneUsable(manifest, 'place');
-    const { source } = await this.verifiedOriginal(draftId, manifest.sourceId, 'place');
-    if (source.sha256 !== manifest.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
+    if (isComposition(manifest)) await this.assertSceneSources(manifest);
+    else {
+      const { source } = await this.verifiedOriginal(draftId, manifest.sourceId, 'place');
+      if (source.sha256 !== manifest.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
+    }
     return { manifest, draft: await this.drafts.get(draftId) };
   }
 
@@ -1746,7 +1983,7 @@ export class ReconstructionStore {
   // place use (never model use) and verified bytes; returns its stored size.
   async #admitReference(draft, manifest, sourceId) {
     const source = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === sourceId) : null;
-    if (!source || source.kind !== 'photo' || sourceId === manifest.sourceId) throw new RequestError(400, 'Link a region in a different photo of this memory.');
+    if (!source || source.kind !== 'photo' || geometrySources(manifest).some((entry) => entry.sourceId === sourceId)) throw new RequestError(400, 'Link a region in a different photo of this memory.');
     const { size } = await this.verifiedOriginal(draft.id, sourceId, 'place');
     return { source, size };
   }
@@ -1780,7 +2017,7 @@ export class ReconstructionStore {
     for (const link of entry.links) links.push(await this.#projectRegionLink(draft, link));
     return {
       draftId: manifest.draftId, jobId: manifest.id, objectId, label: object.label,
-      scenePhoto: { sourceId: manifest.sourceId, box: [...object.box] }, revision: entry.revision, updatedAt: entry.updatedAt, links,
+      scenePhoto: { sourceId: isComposition(manifest) ? object.sourceId : manifest.sourceId, box: [...object.box] }, revision: entry.revision, updatedAt: entry.updatedAt, links,
     };
   }
 
@@ -1988,7 +2225,7 @@ export class ReconstructionStore {
         if (links === undefined || (!manifest && entries.some((entry) => entry.links.length > 0))) impacts.linkedRegions = null;
         else if (manifest) {
           for (const entry of entries) {
-            impacts.linkedRegions += entry.links.filter((link) => link.sourceId === sourceId || manifest.sourceId === sourceId).length;
+            impacts.linkedRegions += entry.links.filter((link) => link.sourceId === sourceId || geometrySources(manifest).some((entry) => entry.sourceId === sourceId)).length;
           }
         }
       }
@@ -1999,12 +2236,12 @@ export class ReconstructionStore {
         const stored = links ? Object.values(links.objects).filter((entry) => entry.link !== null) : [];
         // The base photo is trusted only from this exact scene's own record.
         const baseKnown = Boolean(manifest) && manifest.id === jobId && manifest.draftId === draftId
-          && typeof manifest.sourceId === 'string' && UUID_PATTERN.test(manifest.sourceId);
+          && geometrySources(manifest).every((entry) => UUID_PATTERN.test(entry.sourceId));
         if (links === undefined || (!baseKnown && stored.length > 0)) impacts.linkedMemories = null;
-        else if (baseKnown) impacts.linkedMemories += stored.filter((entry) => entry.link.sourceId === sourceId || manifest.sourceId === sourceId).length;
+        else if (baseKnown) impacts.linkedMemories += stored.filter((entry) => entry.link.sourceId === sourceId || geometrySources(manifest).some((entry) => entry.sourceId === sourceId)).length;
       }
       if (!manifest) continue;
-      const photo = manifest.sourceId === sourceId;
+      const photo = geometrySources(manifest).some((entry) => entry.sourceId === sourceId);
       const storyIds = (manifest.stories?.items ?? [])
         .filter((story) => story.status === 'ready' && (photo || story.context.voice.sourceId === sourceId)).map((story) => story.id);
       if (!photo && storyIds.length === 0) continue;
@@ -2017,6 +2254,7 @@ export class ReconstructionStore {
     }
     if (this.activeStory?.draftId === draftId && this.activeStory.sourceIds.includes(sourceId)) impacts.processing += 1;
     if (this.activeOutline?.draftId === draftId && this.activeOutline.sourceId === sourceId) impacts.processing += 1;
+    if (this.activeComposition?.draftId === draftId && this.activeComposition.sourceIds.includes(sourceId)) impacts.processing += 1;
     return impacts;
   }
 
@@ -2040,7 +2278,7 @@ export class ReconstructionStore {
       // allows is asked to stop again, and the answer reflects that attempt.
       // Story decoding and outline correction need only place use, so a
       // model- or share-only reduction leaves that local work running.
-      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, 'place'], [this.activeOutline, 'place']];
+      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, 'place'], [this.activeOutline, 'place'], [this.activeComposition, 'place']];
       const running = work.filter(([item, purpose]) => item?.draftId === draftId
         && (item.sourceIds ?? [item.sourceId]).includes(sourceId) && !allows(policy, purpose)).map(([item]) => item);
       if (running.length > 0) {
@@ -2067,7 +2305,8 @@ export class ReconstructionStore {
     this.activeStory?.controller.abort();
     this.activeContributionMedia?.controller.abort();
     this.activeOutline?.controller.abort();
+    this.activeComposition?.controller.abort();
     await this.serialize(() => {});
-    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done, this.activeOutline?.done.catch(() => {})]);
+    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done, this.activeOutline?.done.catch(() => {}), this.activeComposition?.done.catch(() => {})]);
   }
 }

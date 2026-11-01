@@ -1,6 +1,7 @@
 import { RequestError } from './drafts.mjs';
 import { PROPOSAL_MESSAGES } from './memory-proposals.mjs';
 import { checkRelationship } from './public/scene-relations.js';
+import { copyArrangement, copyPose, isComposition } from './public/composition-scene.js';
 
 // Two-object scenes. IDs follow the request order. Labels are the owner's
 // names for the boxes, kept apart only by their text, not identities found by a model.
@@ -10,20 +11,31 @@ export const isTwoObject = (manifest) => Array.isArray(manifest?.objects);
 export const objectMarker = (id) => `Object ${OBJECT_IDS.indexOf(id) + 1}`;
 
 // Both transforms and the one optional rule, copied from an edit or receipt.
-export const arrangementOf = (edit) => ({
-  objects: edit.objects.map(({ id, offset, yaw }) => ({ id, offset: [...offset], yaw })),
-  relationship: edit.relationship ? { ...edit.relationship } : null,
-});
-export const objectPivots = (manifest) => manifest.objects.map(({ id, pivot }) => ({ id, pivot: [...pivot] }));
-export const withTarget = (arrangement, targetId, { offset, yaw }) => ({
+export const arrangementOf = (edit) => {
+  if (isComposition(edit)) {
+    const { version, ...fields } = copyArrangement(edit);
+    return fields;
+  }
+  return {
+    objects: edit.objects.map(({ id, offset, yaw }) => ({ id, offset: [...offset], yaw })),
+    relationship: edit.relationship ? { ...edit.relationship } : null,
+  };
+};
+export const objectPivots = (manifest) => manifest.objects.map(({ id, pivot }) => ({ id, pivot: isComposition(manifest) ? [0, 0, 0] : [...pivot] }));
+export const withTarget = (arrangement, targetId, transform) => isComposition(arrangement) ? {
   ...arrangement,
-  objects: arrangement.objects.map((item) => (item.id === targetId ? { id: item.id, offset: [...offset], yaw } : item)),
+  objects: arrangement.objects.map((item) => item.id === targetId ? { id: item.id, ...copyPose(transform) } : item),
+} : ({
+  ...arrangement,
+  objects: arrangement.objects.map((item) => (item.id === targetId ? { id: item.id, offset: [...transform.offset], yaw: transform.yaw } : item)),
 });
 
 const RELATION_MESSAGES = {
   invalid: 'The relationship refers to objects this scene does not have.',
   front: 'An object would no longer be in front of the original camera, so the relationship could not be kept. Nothing was changed.',
   order: PROPOSAL_MESSAGES.relationship,
+  facing: 'The photographed side must face the other object before this relationship can be kept. Nothing was changed.',
+  direction: 'The objects are too close to define a facing direction. Nothing was changed.',
 };
 
 // Throws unless the arrangement keeps its own rule from the original camera.

@@ -2,6 +2,8 @@
 // is passed in rather than imported, so the same code runs in the browser
 // (local vendor module) and in Node tests (the pinned package).
 
+import { compositionSurfaceMeshes, createCompositionSceneObjects, validateCompositionSurface } from './composition-scene.js';
+
 export const OFFSET_LIMIT = 2;
 export const MAX_GRID_CELLS = 262_144;
 export const ACTIVE_STATUSES = new Set(['queued', 'processing']);
@@ -84,6 +86,7 @@ function validObject(object, id, [imageWidth, imageHeight]) {
 // two-object surface may omit source.selected_objects; when present it must
 // match objects exactly.
 export function validateSurface(surface) {
+  if (surface?.schema_version === 3) return validateCompositionSurface(surface, validateSurface);
   validateCommon(surface ?? {});
   if (surface.schema_version === undefined) {
     const { foreground, depth } = surface;
@@ -175,6 +178,7 @@ const verticalFov = (surface, tangent) => {
 // silently flattens it into one foreground.
 export function surfaceMeshes(surface) {
   validateSurface(surface);
+  if (surface.schema_version === 3) throw new Error('This is a composition; use objectSurfaceMeshes.');
   if (surface.schema_version === 2) throw new Error('This scene has two objects; use objectSurfaceMeshes.');
   const tangent = tangentOf(surface);
   const regionOf = (index) => surface.foreground[index];
@@ -189,6 +193,7 @@ export function surfaceMeshes(surface) {
 // label and pivot. A legacy surface yields its single selected foreground.
 export function objectSurfaceMeshes(surface) {
   validateSurface(surface);
+  if (surface.schema_version === 3) return compositionSurfaceMeshes(surface, objectSurfaceMeshes);
   const tangent = tangentOf(surface);
   const twoObjects = surface.schema_version === 2;
   const regionOf = twoObjects ? (index) => surface.regions[index] : (index) => surface.foreground[index];
@@ -270,6 +275,7 @@ export function createSceneObjects(THREE, surface, texture = null) {
 // a whole arrangement and needs exactly one transform for every object.
 export function createObjectSceneObjects(THREE, surface, texture = null) {
   const parts = objectSurfaceMeshes(surface);
+  if (surface.schema_version === 3) return createCompositionSceneObjects(THREE, surface, texture, parts);
   const scene = new THREE.Scene();
   const mesh = ({ positions, uvs, indices }, name, userData) => {
     const geometry = new THREE.BufferGeometry();

@@ -6,6 +6,8 @@ import { OBJECT_IDS, assertObjectsConfirmed, isTwoObject, objectMarker } from '.
 import { contributionAllows, dependenciesBlocked } from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
 import { savedView } from './shares.mjs';
+import { geometrySources } from './geometry-sources.mjs';
+import { isComposition } from './public/composition-scene.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // Plain text: tab and newline are allowed in cues, nothing else below space.
@@ -153,10 +155,12 @@ export class StoryStore {
     const r = this.reconstructions;
     const draft = await r.drafts.get(manifest.draftId);
     const sources = Array.isArray(draft?.sources) ? draft.sources : [];
-    const photo = sources.find((item) => item.id === manifest.sourceId);
-    if (!photo || photo.sha256 !== manifest.sourceSha256 || !(await r.sourcePolicies.canUse(draft, photo.id, 'place'))) {
-      throw fail(403, BLOCKED.photo);
+    const bindings = geometrySources(manifest);
+    const photos = bindings.map(({ sourceId }) => sources.find((item) => item.id === sourceId));
+    for (const [index, photo] of photos.entries()) {
+      if (!photo || photo.sha256 !== bindings[index].sourceSha256 || !(await r.sourcePolicies.canUse(draft, photo.id, 'place'))) throw fail(403, BLOCKED.photo);
     }
+    if (isComposition(manifest)) await r.assertSceneSources(manifest);
     const voice = sources.find((item) => item.id === request.voiceSourceId && item.kind === 'voice');
     if (!voice || draft.voice?.sourceId !== voice.id) throw fail(404, 'This recording could not be found in the memory.');
     if (!(await r.sourcePolicies.canUse(draft, voice.id, 'place'))) throw fail(403, BLOCKED.voice);
@@ -177,7 +181,7 @@ export class StoryStore {
         era,
         target: request.targetId ?? STORY_TARGET.id,
         ...(request.targetId && { targetLabel: manifest.objects.find((item) => item.id === request.targetId).label }),
-        photo: { sourceId: photo.id, sha256: photo.sha256 },
+        ...(isComposition(manifest) ? { photos: bindings } : { photo: { sourceId: photos[0].id, sha256: photos[0].sha256 } }),
         voice: {
           sourceId: voice.id, sha256: voice.sha256, provider: voice.provider || null,
           // The excerpt's position in this exact original, bound by its checksum.
@@ -209,10 +213,14 @@ export class StoryStore {
       const extentKnown = Number.isInteger(count) && count > 0 && count <= MAX_SAMPLES && length !== null && range.endMs * SAMPLES_PER_MS <= count;
       if (length === null || !extentKnown || story.durationMs !== length || story.audio?.size !== WAV_HEADER_BYTES + length * PCM_BYTES_PER_MS) return 'range';
     }
-    if (manifest.status !== 'ready' || manifest.sourceSha256 !== context.photo.sha256) return 'photo';
+    if (manifest.status !== 'ready') return 'photo';
+    if (isComposition(manifest)) {
+      if (JSON.stringify(geometrySources(manifest)) !== JSON.stringify(context.photos)) return 'photo';
+      try { await r.assertSceneSources(manifest, purpose); } catch { return 'photo'; }
+    } else if (manifest.sourceSha256 !== context.photo.sha256) return 'photo';
     const draft = await r.drafts.get(manifest.draftId);
     const voice = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === context.voice.sourceId) : null;
-    if (!(await r.sourcePolicies.canUse(draft, context.photo.sourceId, purpose))) return 'photo';
+    for (const photo of context.photos ?? [context.photo]) if (!(await r.sourcePolicies.canUse(draft, photo.sourceId, purpose))) return 'photo';
     if (!voice || voice.sha256 !== context.voice.sha256 || !(await r.sourcePolicies.canUse(draft, voice.id, purpose))) return 'voice';
     if (dependenciesBlocked(manifest, context.dependencies)) return 'contribution';
     if (purpose === 'share') {
@@ -295,7 +303,7 @@ export class StoryStore {
       if (r.closed) throw fail(503, 'The app is shutting down. Try again later.');
       if (r.activeStory) throw fail(409, 'Another recorded story is being prepared right now. Try again when it finishes.');
       const { context, recording } = await this.#context(manifest, request);
-      const slot = { draftId, sourceIds: [context.voice.sourceId, context.photo.sourceId], controller: new AbortController(), done: null };
+      const slot = { draftId, sourceIds: [context.voice.sourceId, ...(context.photos ?? [context.photo]).map(({ sourceId }) => sourceId)], controller: new AbortController(), done: null };
       r.activeStory = slot;
       return { context, recording, slot };
     });

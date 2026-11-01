@@ -3,10 +3,13 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { RequestError } from './drafts.mjs';
 import { objectSurfaceMeshes, surfaceMeshes } from './public/photo-scene.js';
+import { copyArrangement, copyPose, faceObjectPose, isComposition, poseProblem, rotatePoseYaw } from './public/composition-scene.js';
 
 export const TARGET_ID = 'selected-foreground';
 export const ACTIONS = Object.freeze(['translate', 'rotate', 'face_anchor', 'clarify']);
 export const PLAN_KEYS = Object.freeze(['action', 'targetId', 'sourceId', 'baseVersion', 'delta', 'yawDelta', 'anchor', 'question', 'reason']);
+export const COMPOSITION_ACTIONS = Object.freeze(['translate', 'rotate', 'face_object', 'clarify']);
+export const COMPOSITION_PLAN_KEYS = Object.freeze(['action', 'targetId', 'sourceIds', 'baseVersion', 'delta', 'yawDelta', 'faceObjectId', 'question', 'reason']);
 export const TEXT_LIMIT = 2000;
 const OFFSET_LIMIT = 2;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -35,6 +38,7 @@ export const PROPOSAL_MESSAGES = {
   unknown: 'The proposal could not be prepared. Please try again.',
   restricted: 'The owner turned off model processing or stopped using this photo, so no proposal is offered. A model request that was already sent may still count toward usage.',
   relationship: 'This change would break the relationship preserved for this arrangement. Nothing was changed. Keep that relationship or explicitly change it before trying again.',
+  facing: 'The objects do not give a supported facing direction. Nothing was changed. Choose another position or direction.',
 };
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -102,6 +106,19 @@ export function staleProposals(proposals, version, now) {
 
 // Version 1 is the unedited build; every later version has a stored receipt.
 export function editHistory(manifest) {
+  if (isComposition(manifest)) {
+    const history = [manifest.initialArrangement, ...manifest.edits];
+    if (history.some((edit) => edit?.frame !== 'owner-composition' || !Array.isArray(edit.objects)
+      || edit.objects.length !== 2 || new Set(edit.objects.map((item) => item.id)).size !== 2
+      || !edit.objects.every((item) => ['object-1', 'object-2'].includes(item.id) && !poseProblem(item)))) {
+      throw new Error('The saved composition history could not be read.');
+    }
+    const entries = manifest.edits.map((entry) => ({
+      ...copyArrangement(entry), kind: entry.kind ?? 'manual',
+      ...Object.fromEntries(['proposalId', 'targetVersion', 'targetId'].filter((key) => entry[key] !== undefined).map((key) => [key, entry[key]])),
+    }));
+    return [{ ...copyArrangement(manifest.initialArrangement), version: 1, kind: 'initial' }, ...entries].sort((a, b) => a.version - b.version);
+  }
   if (Array.isArray(manifest.objects)) {
     const entries = manifest.edits.map(({ version, objects, relationship, kind = 'manual', proposalId, targetVersion, targetId }) => ({
       version, objects: objects.map((item) => ({ ...item, offset: [...item.offset] })), relationship: relationship && { ...relationship }, kind,
@@ -167,7 +184,9 @@ const filled = (value, max) => plain(value, max) && value.trim() !== '';
 // the absolute transform from the saved one. Returns { result } or
 // { error, code }: error is the fixed browser message, code a fixed category
 // for operator logs that never contains model, human or provider text.
-export function validatePlan(plan, { sourceId, baseVersion, saved, surface, targetId: expectedTargetId = TARGET_ID }) {
+export function validatePlan(plan, context) {
+  if (context.surface?.schema_version === 3) return validateCompositionPlan(plan, context);
+  const { sourceId, baseVersion, saved, surface, targetId: expectedTargetId = TARGET_ID } = context;
   const reject = (code, error = PROPOSAL_MESSAGES.invalid) => ({ error, code });
   if (!exactKeys(plan, PLAN_KEYS)) return reject('plan_keys');
   if (!ACTIONS.includes(plan.action)) return reject('action');
@@ -211,6 +230,54 @@ export function validatePlan(plan, { sourceId, baseVersion, saved, surface, targ
   const yaw = anchorYaw(surface, point, saved.offset, expectedTargetId);
   if (yaw === null) return reject('face_anchor_on_object', PROPOSAL_MESSAGES.anchor);
   return result({ offset: [...saved.offset], yaw });
+}
+
+export function validateCompositionPlan(plan, { sourceIds, baseVersion, saved, surface, targetId, arrangement }) {
+  const reject = (code, error = PROPOSAL_MESSAGES.invalid) => ({ error, code });
+  if (!exactKeys(plan, COMPOSITION_PLAN_KEYS)) return reject('composition_plan_keys');
+  if (!COMPOSITION_ACTIONS.includes(plan.action)) return reject('composition_action');
+  if (!Array.isArray(sourceIds) || sourceIds.length !== 2 || new Set(sourceIds).size !== 2 || !sourceIds.every(isRequestId)
+    || !Array.isArray(plan.sourceIds) || plan.sourceIds.length !== 2 || !plan.sourceIds.every((id, index) => id === sourceIds[index])) return reject('composition_source_ids');
+  if (plan.baseVersion !== baseVersion) return reject('base_version');
+  if (!plain(plan.reason, 400)) return reject('reason');
+  const ids = surface?.components?.map((item) => item.id);
+  if (!Array.isArray(ids) || ids.length !== 2 || !['object-1', 'object-2'].every((id) => ids.includes(id)) || !ids.includes(targetId)
+    || arrangement?.frame !== 'owner-composition' || !Array.isArray(arrangement.objects) || arrangement.objects.length !== 2
+    || new Set(arrangement.objects.map((item) => item.id)).size !== 2
+    || !arrangement.objects.every((item) => ids.includes(item.id) && !poseProblem(item)) || poseProblem(saved)) return reject('composition_context');
+  const selected = arrangement.objects.find((item) => item.id === targetId);
+  if (selected.scale !== saved.scale || !selected.position.every((n, i) => n === saved.position[i])
+    || !selected.quaternion.every((n, i) => n === saved.quaternion[i])) return reject('composition_saved_pose');
+  const extra = (fields) => fields.find((key) => plan[key] !== null);
+  const result = (transform) => ({ result: { ...plan, sourceIds: [...plan.sourceIds], delta: plan.delta && [...plan.delta], transform } });
+  if (plan.action === 'clarify') {
+    const field = extra(['targetId', 'delta', 'yawDelta', 'faceObjectId']);
+    if (field) return reject(`clarify_${field}_not_null`);
+    if (!filled(plan.question, 400)) return reject('clarify_question');
+    return result(null);
+  }
+  if (plan.targetId !== targetId) return reject(`${plan.action}_target_id`);
+  if (plan.question !== null) return reject(`${plan.action}_question_not_null`);
+  if (plan.action === 'translate') {
+    const field = extra(['yawDelta', 'faceObjectId']);
+    if (field) return reject(`translate_${field}_not_null`);
+    if (!Array.isArray(plan.delta) || plan.delta.length !== 3 || !plan.delta.every(finite)) return reject('translate_delta');
+    const transform = { ...copyPose(saved), position: saved.position.map((n, i) => n + plan.delta[i]) };
+    if (poseProblem(transform)) return reject('translate_range', PROPOSAL_MESSAGES.range);
+    return result(transform);
+  }
+  if (plan.action === 'rotate') {
+    const field = extra(['delta', 'faceObjectId']);
+    if (field) return reject(`rotate_${field}_not_null`);
+    if (!finite(plan.yawDelta)) return reject('rotate_yaw_delta');
+    return result(rotatePoseYaw(saved, plan.yawDelta));
+  }
+  const field = extra(['delta', 'yawDelta']);
+  if (field) return reject(`face_object_${field}_not_null`);
+  if (!ids.includes(plan.faceObjectId) || plan.faceObjectId === targetId) return reject('face_object_target');
+  const other = arrangement.objects.find((item) => item.id === plan.faceObjectId);
+  const transform = faceObjectPose(saved, other.position);
+  return transform ? result(transform) : reject('face_object_direction', PROPOSAL_MESSAGES.facing);
 }
 
 // Runs the thumbnail helper with server-chosen arguments and

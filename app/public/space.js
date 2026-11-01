@@ -18,6 +18,8 @@ import { mountStories } from './stories.js';
 import { mountRegionLinks } from './region-links.js';
 import { mountMemoryLink } from './memory-link.js';
 import { mountOutlineEditor } from './outline-editor.js';
+import { COMPOSITION_NOTE, mountCompositionEditor, poseAxes, poseValues, poseWithAxis } from './composition-editor.js';
+import { copyPose, faceObjectPose, isComposition, poseProblem } from './composition-scene.js';
 
 const POLL_MS = 2000;
 const SOURCE_BLOCKED_TEXT = 'Its photo is no longer allowed to be used for reconstructing this place, or its use was stopped. Every saved version depends on that photo, so none can be restored. The original photo is kept, not deleted.';
@@ -128,6 +130,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   let jobsGeneration = 0;
   let viewer = null;
   let outlineEditor = null;
+  let compositionEditor = null;
   let memoryEdit = null;
   let collaborationPanel = null;
   let sharesPanel = null;
@@ -171,10 +174,30 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     choices.append(item);
   }
 
+  const compose = el('button', { type: 'button', className: 'secondary', textContent: 'Compose objects from two photos' });
+  compose.addEventListener('click', () => {
+    closePanel();
+    onScene(null);
+    compositionEditor = mountCompositionEditor(panel, {
+      base, sourceFor, request, post: postJson, createGate: visibleSurfaceGate, createViewer, createExploreToggle,
+      onSaved: (job, { late = false } = {}) => {
+        if (disposed) return;
+        loadJobs({ resumePolling: false });
+        if (!late) openScene(job.id);
+      },
+      onCancel: ({ unknown }) => {
+        if (unknown) status.textContent = 'The composition save outcome is unknown. Check the refreshed saved scene list before starting another composition.';
+        loadJobs({ resumePolling: false });
+        closePanel();
+      },
+    });
+  });
+
   // Building or choosing another scene is secondary to the selected scene.
   const others = el('details', { className: 'space-others', open: sceneId === null }, [
     el('summary', { textContent: 'Build or choose another scene' }),
     choices,
+    compose,
     buildList,
   ]);
   container.replaceChildren(
@@ -199,6 +222,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
   function closePanel() {
     panelGeneration += 1;
+    compositionEditor?.dispose();
+    compositionEditor = null;
     outlineEditor?.dispose();
     outlineEditor = null;
     memoryEdit?.dispose();
@@ -224,9 +249,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     buildList.replaceChildren(
       ...jobs.map((job) => {
         const number = photoNumber(job.sourceId);
+        const subject = isComposition(job) ? 'Two-photo composition' : number ? `Photo ${number}` : 'A photo no longer shown';
         const when = new Date(job.createdAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
         const item = el('li', {}, [
-          el('span', { className: 'space-choice-label', textContent: `${number ? `Photo ${number}` : 'A photo no longer shown'} · ${when} · ${sceneRef(job.id)}` }),
+          el('span', { className: 'space-choice-label', textContent: `${subject} · ${when} · ${sceneRef(job.id)}` }),
           el('span', { className: 'hint', textContent: jobStatusText(job) }),
         ]);
         if (job.status === 'ready' && job.usageBlocked) {
@@ -465,7 +491,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     if (job.usageBlocked) others.open = true;
     if (job.usageBlocked && sourceBlocked(job)) {
       heading.textContent = `This scene is no longer shown · ${sceneRef(jobId)}`;
-      panel.append(el('p', { textContent: SOURCE_BLOCKED_TEXT }));
+      panel.append(el('p', { textContent: isComposition(job) ? 'One of this composition’s two source photos is no longer allowed to reconstruct the place, or its use was stopped. Every saved version depends on both sources, so the whole scene is unavailable and none can be restored. Originals are kept.' : SOURCE_BLOCKED_TEXT }));
       land();
       return;
     }
@@ -492,9 +518,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       return;
     }
     others.open = false;
-    heading.textContent = `Partial scene from photo ${number} · ${sceneRef(jobId)}`;
+    heading.textContent = isComposition(job) ? `Two-photo composition · ${sceneRef(jobId)}` : `Partial scene from photo ${number} · ${sceneRef(jobId)}`;
     land();
-    if (surfaceResult.body?.schema_version === 2) {
+    if ([2, 3].includes(surfaceResult.body?.schema_version)) {
       await openObjectScene({ job, jobId, surface: surfaceResult.body, token, heading, number });
       return;
     }
@@ -1028,10 +1054,18 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   // their objects, the scene is read-only.
   async function openObjectScene({ job, jobId, surface, token, heading, number }) {
     const jobUrl = `${base}/${jobId}`;
+    const composition = isComposition(surface);
+    const texture = composition ? { 'texture-1.jpg': assetUrl(jobId, 'texture-1.jpg'), 'texture-2.jpg': assetUrl(jobId, 'texture-2.jpg') } : assetUrl(jobId, 'texture.jpg');
+    const componentFor = (id) => surface.components?.find((component) => component.id === id);
+    const sourceIdFor = (id) => composition ? job.sourceBindings?.find((binding) => binding.objectIds?.includes(id))?.sourceId : job.sourceId;
+    const photoFor = (id) => {
+      const component = componentFor(id);
+      return { sourceId: sourceIdFor(id), size: composition ? component.surface.source.image_size : surface.source.image_size, url: composition ? texture[component.texture] : texture, number: photoNumber(sourceIdFor(id)) };
+    };
     const objects = Array.isArray(job.objects) ? job.objects : [];
     const letterOf = (id) => (objects.findIndex((object) => object.id === id) === 0 ? 'A' : 'B');
     const nameOf = (id) => `${letterOf(id)}: ${objects.find((object) => object.id === id)?.label ?? ''}`;
-    const pivots = objects.map(({ id, pivot }) => ({ id, pivot }));
+    const pivots = objects.map(({ id, pivot }) => ({ id, pivot: composition ? [0, 0, 0] : pivot }));
     const viewport = el('div', { className: 'space-viewport' });
     const badges = el('div', { className: 'object-badges' });
     badges.setAttribute('aria-hidden', 'true');
@@ -1039,6 +1073,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const original = el('button', { type: 'button', className: 'secondary', textContent: 'Original viewpoint' });
     const photoSide = photographedSideControls();
     const side = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect from the side' });
+    if (composition) original.hidden = true;
     let shown = job.edit;
     const drawBadges = () => {
       if (!viewer) return;
@@ -1054,18 +1089,19 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           }),
       );
     };
-    const [imageWidth, imageHeight] = surface.source.image_size;
+    const [imageWidth, imageHeight] = composition ? surface.components[0].surface.source.image_size : surface.source.image_size;
     const boxOver = (object) => {
+      const [width, height] = photoFor(object.id).size;
       const [x1, y1, x2, y2] = object.box;
       const box = el('div', { className: `box-overlay box-overlay-${letterOf(object.id).toLowerCase()}` }, [el('span', { className: 'box-badge', textContent: nameOf(object.id) })]);
-      Object.assign(box.style, { left: `${(x1 / imageWidth) * 100}%`, top: `${(y1 / imageHeight) * 100}%`, width: `${((x2 - x1) / imageWidth) * 100}%`, height: `${((y2 - y1) / imageHeight) * 100}%` });
+      Object.assign(box.style, { left: `${(x1 / width) * 100}%`, top: `${(y1 / height) * 100}%`, width: `${((x2 - x1) / width) * 100}%`, height: `${((y2 - y1) / height) * 100}%` });
       return box;
     };
 
     async function mountViewer() {
       let created = null;
       try {
-        created = await createViewer(viewport, surface, assetUrl(jobId, 'texture.jpg'), `3D partial scene with two objects from photo ${number}`, { onDraw: drawBadges });
+        created = await createViewer(viewport, surface, texture, composition ? 'Two-photo owner composition' : `3D partial scene with two objects from photo ${number}`, { onDraw: drawBadges });
       } catch (error) {
         viewport.hidden = true;
         original.disabled = true;
@@ -1094,19 +1130,24 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
 
     const explore = createExploreToggle();
-    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, ...photoCredit(job), ...(job.outline?.kind === 'owner-corrected' ? [el('p', { className: 'hint', textContent: 'Outlines include an owner-made correction; depth remains the existing model estimate.' })] : []), el('p', { className: 'hint', textContent: SCENE_NOTE })];
+    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, ...(composition ? objects.flatMap((object) => photoCredit({ sourceId: sourceIdFor(object.id) })) : photoCredit(job)), ...(job.outline?.kind === 'owner-corrected' ? [el('p', { className: 'hint', textContent: 'Outlines include an owner-made correction; depth remains the existing model estimate.' })] : []), el('p', { className: 'hint', textContent: composition ? `${COMPOSITION_NOTE} ${surface.context ? 'The first photo’s observed background is fixed at its initial placement.' : 'Only the two observed surfaces are shown, with no background.'}` : SCENE_NOTE })];
 
     if (!job.objectsConfirmed) {
       // No object can be chosen before the outlines are confirmed.
       photoSide.button.hidden = true;
       let confirmId = null;
       const message = el('p', { className: 'form-message', role: 'alert' });
-      const confirm = el('button', { type: 'button', textContent: 'The outlines match A and B' });
+      const confirm = el('button', { type: 'button', textContent: composition ? 'Confirm these surfaces and my assumed layout' : 'The outlines match A and B' });
       const mismatch = el('button', { type: 'button', className: 'secondary', textContent: 'They do not match' });
+      const identity = el('input', { type: 'checkbox' });
+      const layout = el('input', { type: 'checkbox' });
+      if (composition) confirm.disabled = true;
+      for (const checkbox of [identity, layout]) checkbox.addEventListener('change', () => { confirm.disabled = composition && (!identity.checked || !layout.checked); });
       confirm.addEventListener('click', async () => {
+        if (composition && (!identity.checked || !layout.checked)) return;
         confirmId ??= crypto.randomUUID();
         confirm.disabled = true;
-        const result = await postJson(`${jobUrl}/objects/confirm`, { requestId: confirmId, objectIds: objects.map((object) => object.id) });
+        const result = await postJson(`${jobUrl}/objects/confirm`, { requestId: confirmId, objectIds: objects.map((object) => object.id), ...(composition ? { surfaceIdentityConfirmed: true, layoutConfirmed: true, scaleBasis: 'owner-assumed-relative' } : {}) });
         if (disposed || token !== panelGeneration) return;
         confirm.disabled = false;
         if (result.status === 0 || result.status >= 500) {
@@ -1120,7 +1161,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         }
         openScene(jobId);
       });
+      if (composition) mismatch.hidden = true;
       mismatch.addEventListener('click', () => {
+        if (composition) return;
         closePanel();
         onScene(jobId);
         outlineEditor = mountOutlineEditor(panel, {
@@ -1144,6 +1187,18 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           },
         });
       });
+      if (composition) {
+        panel.append(sceneWorkspace(stage, [el('section', { className: 'memory-edit object-confirm' }, [
+          el('h4', { textContent: 'Check the selected surfaces and your layout' }),
+          ...objects.map((object) => el('figure', {}, [el('img', { className: 'space-proposal', src: photoFor(object.id).url, alt: `Source photo for ${nameOf(object.id)}` }), el('figcaption', { textContent: `${nameOf(object.id)} · photo ${photoFor(object.id).number}` })])),
+          el('p', { className: 'hint', textContent: describeArrangement(job.edit, nameOf) }),
+          el('label', {}, [identity, ' These photographed surfaces are the objects I named']),
+          el('label', {}, [layout, ' I chose this position, full orientation and assumed relative scale; no alignment or historical size was inferred']),
+          confirm, message,
+        ])]));
+        await mountViewer();
+        return;
+      }
       panel.append(
         sceneWorkspace(stage, [
           el('section', { className: 'memory-edit object-confirm' }, [
@@ -1173,7 +1228,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
     if (disposed || token !== panelGeneration) return;
 
-    const session = createArrangementSession(job.edit, () => crypto.randomUUID());
+    const session = createArrangementSession(job.edit, () => crypto.randomUUID(), job.initialArrangement ?? job.edit);
     const surfaces = visibleSurfaceGate(surface, () => !disposed && token === panelGeneration, () => showEdit());
     // Set while the memory or collaboration panel previews or saves: manual
     // changes and switching objects pause, and the viewer shows that preview.
@@ -1206,15 +1261,15 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     // settled only by an exact retry or by loading the saved version.
     let ruleSaving = false;
     let ruleUncertain = false;
-    const axes = [
+    const axes = composition ? poseAxes.map(([name, min, max, step]) => [name, max, step, min]) : [
       ['Left / right', OFFSET_LIMIT, 0.01],
       ['Down / up', OFFSET_LIMIT, 0.01],
       ['Away / toward', OFFSET_LIMIT, 0.01],
       ['Turn (degrees)', 180, 1],
     ];
-    const controls = axes.map(([name, limit, step]) => {
-      const range = el('input', { type: 'range', min: -limit, max: limit, step });
-      const field = el('input', { type: 'number', min: -limit, max: limit, step });
+    const controls = axes.map(([name, limit, step, minimum = -limit]) => {
+      const range = el('input', { type: 'range', min: minimum, max: limit, step });
+      const field = el('input', { type: 'number', min: minimum, max: limit, step });
       range.setAttribute('aria-label', `${name} slider`);
       field.setAttribute('aria-label', name);
       return { name, range, number: field };
@@ -1225,9 +1280,21 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const editMessage = el('p', { className: 'form-message', role: 'alert' });
     const save = el('button', { type: 'button', textContent: 'Apply and save' });
     const revert = el('button', { type: 'button', className: 'secondary', textContent: 'Revert to saved' });
-    const reset = el('button', { type: 'button', className: 'secondary', textContent: 'Reset object position' });
+    const reset = el('button', { type: 'button', className: 'secondary', textContent: composition ? 'Reset object to initial pose' : 'Reset object position' });
     const reload = el('button', { type: 'button', className: 'secondary', textContent: 'Load saved version', hidden: true });
     const toggle = el('button', { type: 'button', className: 'secondary', textContent: 'Show saved arrangement' });
+    let facingPreview = false;
+    const faceConfirm = el('input', { type: 'checkbox' });
+    const face = el('button', { type: 'button', className: 'secondary', textContent: 'Preview photographed side facing the other object', hidden: !composition });
+    face.addEventListener('click', () => {
+      if (!composition || !selected || saving || reloading || lockedBy.size || invalid.size) return;
+      const other = session.preview.objects.find((object) => object.id !== selected);
+      const pose = faceObjectPose(objectState(session.preview, selected), other.position);
+      if (!pose || !viewer) { editMessage.textContent = 'A usable direction and 3D preview are required for this turn.'; return; }
+      session.setPreview(selected, pose); facingPreview = true; faceConfirm.checked = false;
+      showEdit(); viewer.showGuide(pose, other.position, selected);
+    });
+    faceConfirm.addEventListener('change', () => showEdit());
     const strip = el('div', { className: 'relation-strip' });
     const evidence = el('div', { className: 'object-evidence' });
     const evidenceSummary = el('summary');
@@ -1237,6 +1304,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     for (const [leftId, rightId] of [[objects[0]?.id, objects[1]?.id], [objects[1]?.id, objects[0]?.id]]) {
       ruleOrder.append(el('option', { value: `${leftId}|${rightId}`, textContent: `Keep ${nameOf(leftId)} left of ${nameOf(rightId)}` }));
     }
+    if (composition) for (const object of objects) ruleOrder.append(el('option', { value: `faces|${object.id}`, textContent: `Keep photographed side of ${nameOf(object.id)} facing the other object (my chosen face)` }));
     ruleOrder.value = `${objects[0]?.id}|${objects[1]?.id}`;
     const ruleConfirm = el('input', { type: 'checkbox' });
     const ruleSave = el('button', { type: 'button', textContent: 'Save this rule' });
@@ -1244,9 +1312,15 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const ruleMessage = el('p', { className: 'form-message', role: 'alert' });
 
     const toDegrees = (radians) => Math.round((radians * 180) / Math.PI);
-    const ruleText = (rule) => (rule ? `${nameOf(rule.leftId)} stays left of ${nameOf(rule.rightId)} from the original photo` : 'No rule');
+    const ruleText = (rule) => ruleWords(rule, nameOf);
     const check = (arrangement, rule = arrangement.relationship) => (relations ? relations.checkRelationship(arrangement, pivots, rule) : null);
     const orderText = (arrangement) => {
+      if (composition) {
+        const [a, b] = arrangement.objects;
+        if (a.position[0] === b.position[0]) return `${nameOf(a.id)} and ${nameOf(b.id)} are level on owner X.`;
+        const [left, right] = a.position[0] < b.position[0] ? [a, b] : [b, a];
+        return `In the owner composition frame, ${nameOf(left.id)} is left of ${nameOf(right.id)}.`;
+      }
       if (!relations) return 'Order from the original photo: not available.';
       const { positions } = check(arrangement, null);
       const [a, b] = objects.map((object) => positions?.[object.id]);
@@ -1274,9 +1348,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         return;
       }
       const object = objects.find((entry) => entry.id === selected);
+      const sourcePhoto = photoFor(selected);
       evidence.replaceChildren(
-        el('p', { className: 'hint', textContent: `Photo evidence for ${nameOf(selected)}: the box you drew. The outline inside it is the model’s proposal.` }),
-        el('div', { className: 'anchor-frame' }, [el('img', { src: assetUrl(jobId, 'texture.jpg'), alt: `Photo ${number} with the box for ${nameOf(selected)}` }), boxOver(object)]),
+        el('p', { className: 'hint', textContent: composition ? `Source photo ${sourcePhoto.number} for ${nameOf(selected)}. This photographed surface retains the source depth estimate; its pose and relative scale are owner assumptions.` : `Photo evidence for ${nameOf(selected)}: the box you drew. The outline inside it is the model’s proposal.` }),
+        el('div', { className: 'anchor-frame' }, [el('img', { src: sourcePhoto.url, alt: `Photo ${sourcePhoto.number} with the box for ${nameOf(selected)}` }), boxOver(object)]),
       );
       const links = el('div');
       evidence.append(links);
@@ -1288,7 +1363,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         letter: letterOf(selected).toLowerCase(),
         photos: draft.photos,
         sourceFor,
-        scenePhoto: { sourceId: job.sourceId, box: object.box, size: [imageWidth, imageHeight], url: assetUrl(jobId, 'texture.jpg'), number },
+        scenePhoto: { ...sourcePhoto, box: object.box },
       });
       const memory = el('div');
       evidence.append(memory);
@@ -1322,7 +1397,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       viewer?.applyArrangement(shown);
       const target = selected ? objectState(session.preview, selected) : null;
       if (target) {
-        [...target.offset, toDegrees(target.yaw)].forEach((value, i) => {
+        (composition ? poseValues(target) : [...target.offset, toDegrees(target.yaw)]).forEach((value, i) => {
           // The field being typed keeps its raw text until an explicit action.
           if (controls[i].range !== typing) controls[i].range.value = String(value);
           if (controls[i].number !== typing && !invalid.has(controls[i].number)) controls[i].number.value = String(value);
@@ -1353,7 +1428,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
                   ? `Preview only: ${nameOf(selected)} moved. Not saved yet; the saved arrangement is version ${version}.`
                   : `Saved, version ${version}.`;
       editMessage.textContent = ruleBreak ? `This change would break your rule (${ruleText(session.saved.relationship)}), so it cannot be saved.` : editMessage.textContent;
-      save.disabled = busy || conflict || !dirty || !selected || Boolean(ruleBreak) || invalid.size > 0;
+      save.disabled = busy || conflict || !dirty || !selected || Boolean(ruleBreak) || invalid.size > 0 || (facingPreview && !faceConfirm.checked);
+      face.disabled = busy || !selected || showingSaved || invalid.size > 0;
       revert.disabled = busy || (!dirty && invalid.size === 0);
       reset.disabled = busy || !selected;
       for (const control of controls) control.range.disabled = control.number.disabled = busy || !selected || showingSaved;
@@ -1375,13 +1451,13 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           ? 'your unsaved change'
           : 'the saved arrangement';
       strip.replaceChildren(
-        el('p', { className: 'hint', textContent: 'An aid, not proof: the left–right order of the two visible centres as seen from the original camera.' }),
+        el('p', { className: 'hint', textContent: composition ? 'An aid, not proof: centre order on owner X, independent of the viewing camera. This is an assumed layout.' : 'An aid, not proof: the left–right order of the two visible centres as seen from the original camera.' }),
         el('p', { textContent: `Saved: ${orderText(session.saved)}` }),
         el('p', { textContent: `Shown now, ${shownLabel}: ${orderText(shown)}` }),
         ...(dirty && (proposalPreview || showingSaved) ? [el('p', { textContent: `Your unsaved change (not shown): ${orderText(session.preview)}` })] : []),
       );
       const rule = session.saved.relationship;
-      ruleState.textContent = `Current rule: ${ruleText(rule)}. ${rule ? 'It compares where the visible centres appear from the original camera; it does not detect collisions or measure distances.' : ''}`.trim();
+      ruleState.textContent = `Current rule: ${ruleText(rule)}. ${rule ? composition ? 'It constrains the owner-assumed layout; it is not a measurement or solid collision check.' : 'It compares where the visible centres appear from the original camera; it does not detect collisions or measure distances.' : ''}`.trim();
       const clean = !dirty && invalid.size === 0 && !session.uncertain && !conflict && !busy;
       ruleSave.textContent = ruleUncertain ? 'Retry the earlier rule change' : 'Save this rule';
       ruleSave.disabled = ruleUncertain ? ruleSaving || reloading : !clean || ruleConfirm.checked !== true;
@@ -1404,6 +1480,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       stopAll();
       typing = null;
       invalid.clear();
+      facingPreview = false; faceConfirm.checked = false;
       selected = id;
       // Each change of selection is a new lifetime for jumps started before it.
       selectionGen += 1;
@@ -1415,6 +1492,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     // One edited axis applied to the chosen object's exact current geometry;
     // untouched axes are never read back from rounded fields or snapped sliders.
     const withAxis = (geometry, i, raw) => {
+      if (composition) return poseWithAxis(geometry, i, raw);
       const edit = { offset: [...geometry.offset], yaw: geometry.yaw };
       const value = Number(raw);
       if (i < 3) edit.offset[i] = value;
@@ -1426,6 +1504,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     // One field's text checked against the rest of the chosen object's preview.
     const axisProblem = (i, raw) => {
       const target = objectState(session.preview, selected);
+      if (composition) { const pose = poseWithAxis(target, i, raw); return pose ? poseProblem(pose) : 'Enter an angle between -180 and 180 degrees.'; }
       const values = [...target.offset, (target.yaw * 180) / Math.PI];
       values[i] = raw.trim() === '' ? NaN : Number(raw);
       return editProblem({ offset: values.slice(0, 3), yaw: (values[3] * Math.PI) / 180 });
@@ -1436,11 +1515,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       showEdit();
     };
     // Never save behind an invalid field; otherwise the chosen object's exact previewed candidate.
-    const visibleProblem = () => firstInvalid() ?? (selected ? editProblem(objectState(session.preview, selected)) : null);
+    const visibleProblem = () => firstInvalid() ?? (selected ? (composition ? poseProblem : editProblem)(objectState(session.preview, selected)) : null);
     for (const control of controls) {
       for (const source of ['range', 'number']) {
         control[source].addEventListener('input', () => {
           if (!selected) return;
+          if (composition) { facingPreview = false; faceConfirm.checked = false; viewer?.showGuide(null, null); }
           const node = control[source];
           typing = node;
           // A slider sets its axis outright; a number field is checked on its own.
@@ -1454,7 +1534,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           // axis; every other axis keeps its exact previewed value, and an
           // invalid field keeps its axis until the field itself is fixed.
           const edit = invalid.has(node) ? null : withAxis(objectState(session.preview, selected), controls.indexOf(control), node.value);
-          const editIssue = edit && editProblem(edit);
+          const editIssue = edit && (composition ? poseProblem : editProblem)(edit);
           editMessage.textContent = firstInvalid() ?? editIssue ?? '';
           if (edit && !editIssue) session.setPreview(selected, edit);
           showEdit();
@@ -1475,6 +1555,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     revert.addEventListener('click', () => {
       typing = null;
       invalid.clear();
+      facingPreview = false; faceConfirm.checked = false;
       session.revert();
       showingSaved = false;
       editMessage.textContent = '';
@@ -1484,6 +1565,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       if (!selected) return;
       typing = null;
       invalid.clear();
+      facingPreview = false; faceConfirm.checked = false;
       session.resetObject(selected);
       showingSaved = false;
       editMessage.textContent = '';
@@ -1505,6 +1587,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         openScene(jobId);
         return;
       }
+      facingPreview = false; faceConfirm.checked = false;
       session.replaceSaved(latest.body.edit);
       conflict = false;
       typing = null;
@@ -1516,7 +1599,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       showEdit();
     });
     save.addEventListener('click', async () => {
-      if (saving || reloading || conflict || !selected) return;
+      if (saving || reloading || conflict || !selected || (facingPreview && !faceConfirm.checked)) return;
       if (visibleProblem()) {
         editMessage.textContent = visibleProblem();
         showEdit();
@@ -1537,6 +1620,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       if (disposed || token !== panelGeneration) return;
       saving = false;
       if (result.ok && Number.isInteger(result.body?.version) && Array.isArray(result.body?.objects)) {
+        facingPreview = false; faceConfirm.checked = false;
         session.confirm(result.body);
         conflict = false;
         showingSaved = false;
@@ -1602,13 +1686,13 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       }
       if (invalid.size > 0) return;
       const [leftId, rightId] = ruleOrder.value.split('|');
-      const relationship = { kind: 'left_of', leftId, rightId, frame: 'original-photo' };
+      const relationship = leftId === 'faces' ? { kind: 'faces', subjectId: rightId, targetId: objects.find((object) => object.id !== rightId).id, frame: 'owner-composition', frontBasis: 'owner-confirmed-photographed-side' } : { kind: 'left_of', leftId, rightId, frame: composition ? 'owner-composition' : 'original-photo' };
       const result = check(session.saved, relationship);
       if (result && !result.ok) {
         ruleMessage.textContent =
           result.reason === 'invalid'
             ? 'Choose which object stays left of the other.'
-            : `The saved arrangement does not meet this rule now (${result.reason === 'front' ? 'an object’s centre is not in front of the original camera' : 'the order is the other way'}), so it cannot be saved.`;
+            : `The saved arrangement does not meet this rule now (${['facing', 'direction'].includes(result.reason) ? 'the chosen photographed side does not have a usable direction toward the other object' : result.reason === 'front' ? 'an object’s centre is not in front of the original camera' : 'the order is the other way'}), so it cannot be saved.`;
         return;
       }
       saveRule(relationship);
@@ -1620,8 +1704,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         el('div', { className: 'actions', role: 'group' }, [el('span', { textContent: 'Object: ' }), ...pick]),
         el('fieldset', { className: 'space-edit' }, [
           el('legend', { textContent: 'Move the chosen object' }),
-          el('p', { className: 'hint', textContent: 'Only the chosen object moves; the other object and the background stay as saved. Changes are a preview until you apply and save them.' }),
-          el('p', { className: 'hint', textContent: SURFACE_SCOPE }),
+          el('p', { className: 'hint', textContent: composition ? 'Only the chosen object’s pose or relative scale changes. The other object and any fixed observed context stay as saved. Values use the owner composition axes, not either photo’s camera. Changes are a preview until saved.' : 'Only the chosen object moves; the other object and the background stay as saved. Changes are a preview until you apply and save them.' }),
+          el('p', { className: 'hint', textContent: composition ? SURFACE_SCOPE.replace('seen in the photo', 'seen in their source photos') : SURFACE_SCOPE }),
+          ...(composition ? [face, el('label', {}, [faceConfirm, ' I choose the photographed side as the face to point. This is my judgment, not an automatic front.'])] : []),
           ...controls.map(({ name, range, number: field }) => el('div', { className: 'space-axis' }, [el('span', { textContent: name }), range, field])),
           el('div', { className: 'actions' }, [toggle]),
           editStatus,
@@ -1633,7 +1718,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           el('legend', { textContent: 'Rule between the two objects' }),
           ruleState,
           el('label', {}, ['Rule ', ruleOrder]),
-          el('label', { className: 'memory-consent' }, [ruleConfirm, ' I want to change the rule; this saves a new version of the arrangement']),
+          el('label', { className: 'memory-consent' }, [ruleConfirm, composition ? ' I want this rule. For a facing rule, I choose the photographed side as the face to point; this does not identify an automatic semantic front.' : ' I want to change the rule; this saves a new version of the arrangement']),
           el('div', { className: 'actions' }, [ruleRemove, ruleSave]),
           ruleMessage,
         ]),
@@ -1674,7 +1759,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           return surface.regions?.[row * surface.width + column] ?? null;
         },
       };
-      const asArrangement = (transform) => (!transform ? null : transform.objects ? transform : withObject(session.saved, transform.targetId, transform));
+      const asArrangement = (transform) => !transform ? null : transform.objects ? transform : withObject(session.saved, transform.targetId, composition && transform.pose ? { ...transform.pose, scale: objectState(session.saved, transform.targetId).scale } : transform);
       // editor(targetId) reads that object's saved transform (a plan's own
       // object); with no argument, the selected one. The version is global.
       const editorFor = (name) => (targetId) => {
@@ -1683,8 +1768,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         const target = id ? objectState(saved, id) : null;
         return {
           version: saved.version,
-          offset: target ? target.offset : [0, 0, 0],
-          yaw: target ? target.yaw : 0,
+          ...(composition ? { frame: 'owner-composition', ...(target ? copyPose(target) : {}), arrangement: saved } : { offset: target ? target.offset : [0, 0, 0], yaw: target ? target.yaw : 0 }),
           relationship: saved.relationship,
           clean: !ruleSaving && !ruleUncertain && invalid.size === 0 && !session.isDirty() && !session.uncertain && !conflict && !saving && !reloading && ![...lockedBy].some((holder) => holder !== name),
         };
@@ -1714,8 +1798,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       const surfaceProblem = (candidate) => surfaces.problem(asArrangement(candidate));
       memoryEdit = mountMemoryEdit(memorySection, {
         jobUrl,
-        textureUrl: assetUrl(jobId, 'texture.jpg'),
-        source: sourceFor(job.sourceId),
+        textureUrl: composition ? null : texture,
+        ...(composition ? { representation: job.representation, geometrySources: (job.sourceBindings ?? []).map((binding) => sourceFor(binding.sourceId)) } : { source: sourceFor(job.sourceId) }),
         editor: editorFor('memory'),
         targets,
         showTransform(transform, point = null, targetId = null) {

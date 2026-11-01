@@ -4,6 +4,7 @@
 // links to files. Access is re-checked on a heartbeat and whenever the page
 // returns to view; any doubt closes the scene.
 
+import { copyPose, isComposition, poseProblem } from './composition-scene.js';
 import { createExploreToggle, createViewer } from './scene-viewer.js';
 import { createStoryPlayer } from './story-player.js';
 import { describeArrangement, objectNames, ruleText } from './arrangement.js';
@@ -86,6 +87,7 @@ function eraText(era, labelOf) {
 
 // Shown beside the scene for every view, so it stays in sight while scrolling.
 const SCENE_NOTE = 'Shape and depth: a model estimate from this one photo, not a measurement. Areas the photo did not show are left empty.';
+const COMPOSITION_NOTE = 'Two photographed surfaces, placed by the owner. Position, orientation and relative scale are assumptions, not measurements or automatic photo alignment. Each photo’s depth remains a model estimate. Unseen areas stay empty.';
 const CORRECTED_SCENE_NOTE = 'Outlines: include a correction the owner made on this photo. Depth: the existing model estimate, not a measurement. This does not fix depth errors or add unseen surfaces. Areas the photo did not show are left empty.';
 // Two-object 3D views: one deliberate camera move to the chosen object's
 // photographed side, as that object is arranged in the selected saved view.
@@ -129,6 +131,8 @@ function viewDetails(view, labelOf, summary = []) {
       }),
     );
   }
+  for (const photo of view.evidence?.photos ?? []) nodes.push(el('p', { className: 'hint', textContent: `Source photo for ${photo.objectId === 'object-1' ? 'A' : 'B'}: provided by ${photo.providerLabel || 'an unnamed provider'}; ${photo.attributedCaptureDate ? `date given by them: ${photo.attributedCaptureDate}` : 'date unknown'}.` }));
+  if (isComposition(view.edit)) nodes.push(el('p', { className: 'hint', textContent: 'This saved layout and relative size are owner assumptions. The two photos were not automatically registered.' }));
   nodes.push(el('p', { className: 'hint', textContent: arrangementText(view.evidence?.arrangement) }));
   for (const support of view.evidence?.support ?? []) {
     if (support?.kind !== 'human_recollection') continue;
@@ -169,7 +173,7 @@ const AXES = [
 const DIFFERENCE_NOTE = 'These are differences between saved arrangements. They do not establish when or whether the place changed, and do not make either view earlier or more accurate.';
 const placement = (edit, id) => {
   const object = Array.isArray(edit?.objects) ? edit.objects.find((entry) => entry?.id === id) : null;
-  return object && finite3(object.offset) && Number.isFinite(object.yaw) ? object : null;
+  return object && (isComposition(edit) ? !poseProblem(object) : finite3(object.offset) && Number.isFinite(object.yaw)) ? object : null;
 };
 const sameRule = (a, b) => {
   if (!a || !b) return a === b;
@@ -188,6 +192,13 @@ function arrangementDifference(view, start, views, objects, nameOf) {
     const now = placement(view.edit, object.id);
     const then = placement(start.edit, object.id);
     if (!now || !then) return `${nameOf(object.id)}: unknown; its saved placement is not available in both views.`;
+    if (isComposition(view.edit)) {
+      const changed = [];
+      if (now.position.some((n, i) => n !== then.position?.[i])) changed.push('position');
+      if (now.quaternion.some((n, i) => n !== then.quaternion?.[i])) changed.push('orientation');
+      if (now.scale !== then.scale) changed.push('assumed relative scale');
+      return `${nameOf(object.id)}: ${changed.length ? `${changed.join(', ')} different` : 'position, orientation and assumed relative scale unchanged'}.`;
+    }
     const changed = [];
     const same = [];
     AXES.forEach(([name, more, less], i) => {
@@ -208,7 +219,7 @@ function arrangementDifference(view, start, views, objects, nameOf) {
         ? 'Rule: unchanged.'
         : `Rule: different (this view: ${ruleText(now, nameOf)}; ${base}: ${ruleText(then, nameOf)}).`;
   return [
-    el('p', { textContent: `Saved arrangement compared with ${base}, the published starting view. Directions are as seen from the original photo, not from your current camera:` }),
+    el('p', { textContent: `Saved arrangement compared with ${base}, the published starting view. ${isComposition(view.edit) ? 'Coordinates are in the owner composition frame, not from either source photo or your current camera' : 'Directions are as seen from the original photo, not from your current camera'}:` }),
     el('ul', { className: 'collab-list' }, [...lines, rule].map((line) => el('li', { textContent: line }))),
     el('p', { className: 'hint', textContent: DIFFERENCE_NOTE }),
   ];
@@ -296,6 +307,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
 
   async function render(manifest, surface, textureUrl, mine) {
     const correctedOutline = manifest.outline?.kind === 'owner-corrected';
+    const composition = isComposition(surface);
+    const textureFor = (id) => composition ? textureUrl[surface.components.find((component) => component.id === id).texture] : textureUrl;
     const views = new Map(manifest.views.map((view) => [view.id, view]));
     const labelOf = (id) => views.get(id)?.label ?? 'another view';
     // Earlier context applies only to the same saved copy; each ID is used
@@ -330,15 +343,15 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         evidence.replaceChildren();
         return;
       }
-      const [width, height] = surface.source?.image_size ?? [1, 1];
+      const [width, height] = composition ? surface.components.find((component) => component.id === object.id).surface.source.image_size : surface.source?.image_size ?? [1, 1];
       const [x1, y1, x2, y2] = object.box;
       const box = el('div', { className: `box-overlay box-overlay-${objects.indexOf(object) === 0 ? 'a' : 'b'}` }, [el('span', { className: 'box-badge', textContent: nameOf(object.id) })]);
       Object.assign(box.style, { left: `${(x1 / width) * 100}%`, top: `${(y1 / height) * 100}%`, width: `${((x2 - x1) / width) * 100}%`, height: `${((y2 - y1) / height) * 100}%` });
       evidence.replaceChildren(
-        el('p', { className: 'hint', textContent: correctedOutline
+        el('p', { className: 'hint', textContent: composition ? `Source photo for ${nameOf(object.id)}: its photographed surface and estimated depth come from this photo. Its composition pose and relative scale were chosen by the owner.` : correctedOutline
           ? `Photo evidence for ${nameOf(object.id)}: this box encloses its current outline. This scene includes an owner-made outline correction; the depth remains a model estimate. Neither establishes history.`
           : `Photo evidence for ${nameOf(object.id)}: the box the owner drew. The outline inside it is a model estimate.` }),
-        el('div', { className: 'anchor-frame' }, [el('img', { src: textureUrl, alt: `The photo used for “${manifest.title}”, with the box for ${nameOf(object.id)}` }), box]),
+        el('div', { className: 'anchor-frame' }, [el('img', { src: textureFor(object.id), alt: `The source photo for ${nameOf(object.id)} in “${manifest.title}”, with its box` }), box]),
       );
     };
     // Offered only with a working 3D view of two objects and a chosen object;
@@ -359,7 +372,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         sideStatus.textContent = SIDE_MISSING(name, view.label);
         return;
       }
-      const moved = viewer.viewPhotographedSide({ offset: [...placed.offset], yaw: placed.yaw }, objectId);
+      const moved = viewer.viewPhotographedSide(composition ? copyPose(placed) : { offset: [...placed.offset], yaw: placed.yaw }, objectId);
       sideStatus.textContent = moved ? SIDE_MOVED(name, view.label) : SIDE_REFUSED(name);
     };
     // While comparing with the photograph, stories stay listed but have no
@@ -472,10 +485,10 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       else viewer?.applyEdit(view.edit);
       details.replaceChildren(...viewDetails(view, labelOf, arrangementDifference(view, views.get(manifest.startViewId), manifest.views, objects, nameOf)));
       const provider = view.evidence?.photo?.providerLabel;
-      credit.textContent = provider ? `Photo provided by ${provider}` : '';
+      credit.textContent = composition ? (view.evidence?.photos ?? []).map((photo) => `${nameOf(photo.objectId)}: photo provided by ${photo.providerLabel || 'an unnamed provider'}`).join('; ') : provider ? `Photo provided by ${provider}` : '';
       if (objects && view.edit?.objects) {
         details.append(
-          el('p', { textContent: `Rule: ${ruleText(view.edit.relationship, nameOf)}.${view.edit.relationship ? ' It compares where the two centres appear from the original photo; it does not measure distance.' : ''}` }),
+          el('p', { textContent: `Rule: ${ruleText(view.edit.relationship, nameOf)}.${view.edit.relationship ? composition ? ' It constrains the owner-assumed layout, not historic truth or solid collision.' : ' It compares where the two centres appear from the original photo; it does not measure distance.' : ''}` }),
           el('p', { className: 'hint', textContent: `Arrangement in this view: ${describeArrangement(view.edit, nameOf)}.` }),
         );
       }
@@ -564,7 +577,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       photoImage.src = textureUrl;
     };
     const enterCompare = () => {
-      if (comparing || !viewer) return;
+      if (composition || comparing || !viewer) return;
       saved = { camera: viewer.getCamera(), interactive: viewer.isInteractive() };
       comparing = true;
       viewer.setInteractive(false);
@@ -662,7 +675,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           stageFrame,
           message,
           credit,
-          el('p', { className: 'hint', textContent: correctedOutline ? CORRECTED_SCENE_NOTE : SCENE_NOTE }),
+          el('p', { className: 'hint', textContent: composition ? `${COMPOSITION_NOTE} ${surface.context ? 'Only the first source photo’s observed background is kept, fixed at its initial placement.' : 'Only two observed surfaces are shown; no background is included.'}` : correctedOutline ? CORRECTED_SCENE_NOTE : SCENE_NOTE }),
         ]),
         el('div', { className: 'scene-inspector' }, [
           buttons,
@@ -685,8 +698,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         return;
       }
       // The derived photo and the text, clearly not presented as the 3D scene.
-      viewport.replaceChildren(el('img', { className: 'space-proposal', src: textureUrl, alt: `The photo used for “${manifest.title}”` }));
-      message.textContent = 'The 3D view is not available in this browser. Showing the photo used for the scene instead; the arrangement between views is described in the text.';
+      viewport.replaceChildren(...(composition ? surface.components.map((component) => el('img', { className: 'space-proposal', src: textureFor(component.id), alt: `Source photo for ${nameOf(component.id)}` })) : [el('img', { className: 'space-proposal', src: textureUrl, alt: `The photo used for “${manifest.title}”` })]));
+      message.textContent = composition ? 'The 3D view is not available. Showing the two source photos separately, not a combined scene. Saved pose and relative-scale differences are described in the text.' : 'The 3D view is not available in this browser. Showing the photo used for the scene instead; the arrangement between views is described in the text.';
       back.hidden = true;
       showView(currentId);
       goLive();
@@ -708,7 +721,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     });
     sideButton.addEventListener('click', viewSide);
     // Offered only with a working 3D view; the 2D fallback has none.
-    compareButton.hidden = false;
+    compareButton.hidden = composition;
     renderSide();
     message.textContent = 'Switching views keeps the same camera so they can be compared.';
     showView(currentId);
@@ -733,20 +746,26 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       if (mine !== generation) return;
       const start = manifest?.views?.find((view) => view.id === manifest.startViewId);
       if (!start) throw new Error('manifest');
-      const [surfaceResponse, textureResponse] = await Promise.all([
-        timed((signal) => source.asset(start.id, 'surface.json', signal), LOAD_TIMEOUT_MS, outer),
-        timed((signal) => source.asset(start.id, 'texture.jpg', signal), LOAD_TIMEOUT_MS, outer),
-      ]);
+      const surfaceResponse = await timed((signal) => source.asset(start.id, 'surface.json', signal), LOAD_TIMEOUT_MS, outer);
       if (mine !== generation) return;
-      if (!surfaceResponse.ok || !textureResponse.ok) throw new Error('asset');
-      const [surface, texture] = await Promise.all([surfaceResponse.json(), textureResponse.blob()]);
+      if (!surfaceResponse.ok) throw new Error('asset');
+      const surface = await surfaceResponse.json();
+      if (mine !== generation) return;
+      const composition = isComposition(manifest);
+      if (composition !== isComposition(surface)) throw new Error('representation');
+      const names = composition ? ['texture-1.jpg', 'texture-2.jpg'] : ['texture.jpg'];
+      const responses = await Promise.all(names.map((name) => timed((signal) => source.asset(start.id, name, signal), LOAD_TIMEOUT_MS, outer)));
+      if (mine !== generation) return;
+      if (responses.some((response) => !response.ok)) throw new Error('asset');
+      const textures = await Promise.all(responses.map((response) => response.blob()));
       if (mine !== generation) return;
       const stillAllowed = await timed((signal) => source.check(signal), HEARTBEAT_TIMEOUT_MS, outer);
       if (mine !== generation) return;
       if (!stillAllowed) throw new Error('revoked');
-      const url = URL.createObjectURL(texture);
-      urls.push(url);
-      await render(manifest, surface, url, mine);
+      const loaded = textures.map((texture) => URL.createObjectURL(texture));
+      urls.push(...loaded);
+      const textureInput = composition ? Object.fromEntries(names.map((name, index) => [name, loaded[index]])) : loaded[0];
+      await render(manifest, surface, textureInput, mine);
     } catch {
       if (mine === generation) unavailable();
     }

@@ -6,6 +6,8 @@ import { RequestError } from './drafts.mjs';
 import { OUTPUTS } from './reconstructions.mjs';
 import { PLAYBACK_NAME, REVIEW_NAME, VOICE_ORIGINAL_NAMES } from './contribution-photos.mjs';
 import { MEMORY_LINKS_BYTES, MEMORY_LINKS_FILE, storedMemoryLinks, validMemoryLinks } from './memory-links.mjs';
+import { geometrySources } from './geometry-sources.mjs';
+import { COMPOSITION_OUTPUTS } from './composition-assets.mjs';
 
 // Owner removal of one saved place from this app's tracked local storage.
 // A permanent, content-free barrier in data/place-deletions/<draftId>.json is
@@ -297,7 +299,7 @@ export function sceneTree(parts, type) {
     return ['assets', 'stories', 'story-staging', 'contributions'].includes(second);
   }
   if (parts.length === 3) {
-    if (second === 'assets') return type === 'file' && Object.hasOwn(OUTPUTS, third);
+    if (second === 'assets') return type === 'file' && (Object.hasOwn(OUTPUTS, third) || Object.hasOwn(COMPOSITION_OUTPUTS, third));
     if (second === 'stories' || second === 'story-staging') return type === 'file' && WAV.test(third);
     if (second === 'contributions') return type === 'directory' && CONTRIBUTION_DIR.test(third);
     return false;
@@ -305,8 +307,15 @@ export function sceneTree(parts, type) {
   return parts.length === 4 && second === 'contributions' && type === 'file' && MEDIA.has(fourth);
 }
 
-export const stagingTree = (parts, type) => (parts.length === 1 ? type === 'directory' && parts[0] === 'output'
-  : parts.length === 2 && parts[0] === 'output' && type === 'file' && Object.hasOwn(OUTPUTS, parts[1]));
+export const stagingTree = (parts, type) => {
+  if (parts[0] === 'child') {
+    if (parts.length === 1) return type === 'directory';
+    if (parts.length === 2) return type === 'directory' ? parts[1] === 'assets' : type === 'file' && (parts[1] === 'manifest.json' || temp('manifest.json').test(parts[1]));
+    return parts.length === 3 && parts[1] === 'assets' && type === 'file' && Object.hasOwn(COMPOSITION_OUTPUTS, parts[2]);
+  }
+  return parts.length === 1 ? type === 'directory' && parts[0] === 'output'
+    : parts.length === 2 && parts[0] === 'output' && type === 'file' && Object.hasOwn(OUTPUTS, parts[1]);
+};
 
 export const partsTree = (parts, type) => parts.length === 1 && type === 'file' && PART_FILE.test(parts[0]);
 // A crash-left copy of an intake record, which can hold its text and metadata.
@@ -398,7 +407,10 @@ export class PlaceDeletionService {
       {
         // Only a real scene record of this exact place and job is reviewed.
         if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest) || manifest.id !== jobId || manifest.draftId !== draftId
-          || typeof manifest.status !== 'string' || !isId(manifest.sourceId) || typeof manifest.createdAt !== 'string') throw fail(503, UNREVIEWABLE);
+          || typeof manifest.status !== 'string' || typeof manifest.createdAt !== 'string') throw fail(503, UNREVIEWABLE);
+        try {
+          if (!geometrySources(manifest).every(({ sourceId }) => isId(sourceId))) throw new Error();
+        } catch { throw fail(503, UNREVIEWABLE); }
         // Only an absent (legacy) container counts as empty. A present one must
         // be a plain object whose list holds records; anything else is refused.
         const records = (key, field) => {

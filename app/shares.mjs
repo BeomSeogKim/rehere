@@ -5,6 +5,10 @@ import { OBJECT_IDS, arrangementOf, assertObjectsConfirmed, isTwoObject } from '
 import { captionsIntact, contributionAllows, versionDependencies } from './collaboration.mjs';
 import { photoAttested, readPlayback, readReviewPhoto } from './contribution-photos.mjs';
 import { RequestError } from './drafts.mjs';
+import { geometrySources } from './geometry-sources.mjs';
+import { COMPOSITION_OUTPUTS, verifiedAsset } from './composition-assets.mjs';
+import { isComposition } from './public/composition-scene.js';
+import { safeJobDirectory } from './contribution-deletion-files.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -26,6 +30,8 @@ const CONTRIBUTOR_PHOTO_LABEL = 'Photo supplied by a contributor. Not automatica
 const EVIDENCE_ASSET = /^([1-9][0-9]?)\.jpg$/;
 // Only these derived files are ever served to a preview or a visitor.
 export const SHARED_ASSETS = Object.freeze({ 'surface.json': 'application/json', 'texture.jpg': 'image/jpeg' });
+const sharedAssets = (manifest) => isComposition(manifest)
+  ? { 'surface.json': 'application/json', 'texture-1.jpg': 'image/jpeg', 'texture-2.jpg': 'image/jpeg' } : SHARED_ASSETS;
 const QUOTABLE = new Set(['submitted', 'adopted', 'alternative']);
 
 export const UNAVAILABLE = 'This shared place is not available.';
@@ -148,6 +154,17 @@ function parseRevoke(body) {
 // records are never served. Object boxes are shared because the whole
 // permitted texture is.
 export function visitorSurface(surface) {
+  if (surface.schema_version === 3) return {
+    schema_version: 3, representation: surface.representation,
+    components: surface.components.map(({ id, label, selectedObjectId, texture, surface: parent }) => {
+      const sanitized = visitorSurface(parent);
+      if (sanitized.objects) sanitized.objects = sanitized.objects.map((object, index) => ({
+        id: object.id, label: `Object ${index + 1}`, box_xyxy: object.id === selectedObjectId ? [...object.box_xyxy] : [0, 0, ...sanitized.source.image_size],
+      }));
+      return { id, label, selectedObjectId, texture, surface: sanitized };
+    }),
+    context: surface.context && structuredClone(surface.context),
+  };
   const { width, height, depth, foreground, assumptions, source } = surface;
   const shape = surface.schema_version === 2
     ? { schema_version: 2, regions: surface.regions, objects: surface.objects.map(({ id, label, box_xyxy: box }) => ({ id, label, box_xyxy: [...box] })) }
@@ -177,10 +194,12 @@ const variantsOf = (manifest) => manifest.collaboration?.variants ?? [];
 // The saved fields of a version or variant in the scene's own shape: one
 // transform, or for two objects both transforms and the optional rule.
 function editFields(manifest, edit) {
+  if (isComposition(manifest)) return { version: edit.version, ...arrangementOf(edit) };
   return isTwoObject(manifest) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw };
 }
 
 function initialEdit(manifest) {
+  if (isComposition(manifest)) return { version: 1, ...arrangementOf(manifest.initialArrangement) };
   return isTwoObject(manifest)
     ? { objects: OBJECT_IDS.map((id) => ({ id, offset: [0, 0, 0], yaw: 0 })), relationship: null }
     : { offset: [0, 0, 0], yaw: 0 };
@@ -279,10 +298,16 @@ export class ShareStore {
   async #sourceIssue(manifest) {
     if (manifest.status !== 'ready') return 'changed';
     const draft = await this.reconstructions.drafts.get(manifest.draftId);
-    const source = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === manifest.sourceId) : null;
-    if (!source || source.sha256 !== manifest.sourceSha256 || source.origin?.kind !== 'public') return 'source';
-    // Current owner restrictions: sharing needs place and share uses, not stopped.
-    if (!(await this.reconstructions.sourcePolicies.canUse(draft, manifest.sourceId, 'share'))) return 'source';
+    let bindings;
+    try { bindings = geometrySources(manifest); } catch { return 'source'; }
+    for (const binding of bindings) {
+      const source = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === binding.sourceId) : null;
+      if (!source || source.sha256 !== binding.sourceSha256 || source.origin?.kind !== 'public') return 'source';
+      if (!(await this.reconstructions.sourcePolicies.canUse(draft, source.id, 'share'))) return 'source';
+    }
+    if (isComposition(manifest)) {
+      try { await this.reconstructions.assertSceneSources(manifest, 'share'); } catch { return 'source'; }
+    }
     return null;
   }
 
@@ -302,7 +327,7 @@ export class ShareStore {
   async #liveIssue(manifest, frozen) {
     const source = await this.#sourceIssue(manifest);
     if (source) return source;
-    if (manifest.sourceSha256 !== frozen.sourceSha256) return 'source';
+    if (isComposition(manifest) ? JSON.stringify(geometrySources(manifest)) !== JSON.stringify(frozen.sourceBindings) : manifest.sourceSha256 !== frozen.sourceSha256) return 'source';
     if (await this.#assetIssue(manifest, frozen.assets)) return 'asset';
     const contributions = contributionsOf(manifest);
     for (const quote of frozen.quotes) {
@@ -345,6 +370,18 @@ export class ShareStore {
   // Each shared file must still match both the manifest record and the frozen
   // checksum byte for byte; a same-size replacement is not the frozen file.
   async #assetIssue(manifest, bindings) {
+    if (isComposition(manifest)) {
+      const names = Object.keys(sharedAssets(manifest));
+      if (!bindings || Object.keys(bindings).length !== names.length || !names.every((name) => Object.hasOwn(bindings, name))) return 'asset';
+      const assets = path.join(this.reconstructions.jobDir(manifest.draftId, manifest.id), 'assets');
+      if (!(await safeJobDirectory(assets, this.reconstructions.rootDir).catch(() => false))) return 'asset';
+      for (const name of names) {
+        const entry = manifest.derivedAssets.find((item) => item.name === name), binding = bindings[name];
+        if (!entry || entry.sha256 !== binding.sha256 || entry.size !== binding.size) return 'asset';
+        try { await verifiedAsset(path.join(assets, name), entry, COMPOSITION_OUTPUTS[name]); } catch { return 'asset'; }
+      }
+      return null;
+    }
     for (const [name, binding] of Object.entries(bindings)) {
       const entry = manifest.derivedAssets.find((item) => item.name === name);
       if (!entry || entry.sha256 !== binding.sha256 || entry.size !== binding.size) return 'asset';
@@ -364,7 +401,8 @@ export class ShareStore {
     if (reason) this.#throwReason(reason);
     assertObjectsConfirmed(manifest);
     const draft = await this.reconstructions.drafts.get(manifest.draftId);
-    const source = draft.sources.find((item) => item.id === manifest.sourceId);
+    const sources = geometrySources(manifest).map(({ sourceId }) => draft.sources.find((item) => item.id === sourceId));
+    const source = sources[0];
     const selected = request.views.map((view) => {
       const resolved = savedView(manifest, view);
       if (!resolved) throw fail(404, 'This version of the scene could not be found.');
@@ -429,7 +467,8 @@ export class ShareStore {
         era: publicEra,
         evidence: {
           arrangement: arrangementOrigin(manifest, view),
-          photo: { providerLabel: source.provider || null, attributedCaptureDate: source.dates?.capturedOn ?? null },
+          ...(isComposition(manifest) ? { photos: manifest.objects.map(({ id }, index) => ({ objectId: id, providerLabel: sources[index].provider || null, attributedCaptureDate: sources[index].dates?.capturedOn ?? null })) }
+            : { photo: { providerLabel: source.provider || null, attributedCaptureDate: source.dates?.capturedOn ?? null } }),
           geometry: 'model estimate',
           support,
           recollections: [...supporting, ...unattached].map((item) => ({ providerLabel: item.provider.displayName, text: item.text, periodClaim: item.periodClaim })),
@@ -450,21 +489,22 @@ export class ShareStore {
     const publicView = {
       id: null, title: request.title, createdAt: null, synthetic: request.synthetic, startViewId: request.startViewId,
       camera: { position: [...request.camera.position], target: [...request.camera.target] }, views, stories: publicStories,
+      ...(isComposition(manifest) && { representation: manifest.representation, scaleBasis: 'owner-assumed-relative' }),
       ...(contributorPhotos.length > 0 && { contributorPhotos }),
       ...(contributorRecordings.length > 0 && { contributorRecordings }),
       // The owner's names and source boxes for the two objects, as visible evidence.
-      ...(isTwoObject(manifest) && { objects: manifest.objects.map(({ id, label, box }) => ({ id, label, box: [...box] })) }),
+      ...(isTwoObject(manifest) && { objects: manifest.objects.map(({ id, label, box }, index) => ({ id, label, box: [...box], ...(isComposition(manifest) && { sourceIndex: index + 1 }) })) }),
       ...(manifest.outline?.kind === 'owner-corrected' && { outline: { kind: 'owner-corrected' } }),
     };
     const assets = {};
-    for (const name of Object.keys(SHARED_ASSETS)) {
+    for (const name of Object.keys(sharedAssets(manifest))) {
       const entry = manifest.derivedAssets.find((item) => item.name === name);
       if (!entry) this.#throwReason('asset');
       assets[name] = { sha256: entry.sha256, size: entry.size };
     }
     if (await this.#assetIssue(manifest, assets)) this.#throwReason('asset');
     const frozen = {
-      sourceSha256: manifest.sourceSha256,
+      ...(isComposition(manifest) ? { sourceBindings: geometrySources(manifest) } : { sourceSha256: manifest.sourceSha256 }),
       assets,
       views: selected.map(({ view, dependencies, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision })),
       quotes: quotes.map((item) => ({ contributionId: item.id, textSha256: item.textSha256 })),
@@ -544,9 +584,14 @@ export class ShareStore {
   // matches the frozen checksum. Never a source path or a sibling file.
   async #asset(manifest, frozen, viewId, name) {
     if (viewId === 'evidence') return this.#evidence(manifest, frozen, name);
-    if (!frozen.views.some((view) => view.id === viewId) || !Object.hasOwn(SHARED_ASSETS, name)) return null;
+    const types = sharedAssets(manifest);
+    if (!frozen.views.some((view) => view.id === viewId) || !Object.hasOwn(types, name)) return null;
     const file = path.join(this.reconstructions.jobDir(manifest.draftId, manifest.id), 'assets', name);
     const binding = frozen.assets[name];
+    if (isComposition(manifest)) {
+      const bytes = await verifiedAsset(file, { ...binding }, COMPOSITION_OUTPUTS[name]);
+      return { name, type: types[name], body: name === 'surface.json' ? Buffer.from(JSON.stringify(visitorSurface(JSON.parse(bytes.toString('utf8'))))) : bytes };
+    }
     if (name === 'surface.json') {
       const bytes = await readFile(file);
       if (sha256(bytes) !== binding.sha256) return null;
@@ -670,6 +715,10 @@ export class ShareStore {
         if (existing.removedFor) throw removedRecord();
         if (existing.previewId !== request.previewId || existing.digest !== request.previewDigest || !sameVerifier(existing.tokenVerifier, tokenVerifier)) {
           throw fail(409, 'This request was already used with different values.');
+        }
+        if (isComposition(manifest)) {
+          const reason = await this.#liveIssue(manifest, existing.frozen);
+          if (reason) this.#throwReason(reason);
         }
         return this.#receipt(existing);
       }

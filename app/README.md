@@ -51,7 +51,12 @@ inferred depth and mask, explore the visible surfaces, and preview a foreground
 move or rotation before saving it. Unseen areas stay empty. This is a local
 model reconstruction from one photograph, not a complete room or calibrated
 geometry. A scene can instead hold exactly two named objects that are confirmed,
-moved and related separately; see [two objects](OBJECTS.md).
+moved and related separately. Two saved objects from distinct photos of the
+same place can also be composed with an explicit owner-chosen position, full
+orientation and assumed relative scale. Each keeps its observed mesh and
+texture; this is not automatic photo alignment. Both sources govern its use,
+saved history, recollections, stories and visitor snapshots. See
+[two objects and their relationships](OBJECTS.md).
 
 Scoped contributors can submit writing, a real recording, or both, with an
 optional photo. Each material retains its own original, source facts and
@@ -88,7 +93,9 @@ later private changes stay private, while current withdrawal overrides a frozen
 copy. See the [sharing guide](SHARING.md) for access, revocation and limits.
 In a 3D visit or preview, compare the permitted photo copy with the selected
 reconstruction from the same original viewpoint, then return to your previous
-camera. Labels keep source pixels, chosen positions and inferred surfaces
+camera. A two-photo composition instead offers object-specific source photos
+and photographed-side inspection, without claiming a combined original photo.
+Labels keep source pixels, chosen positions and inferred surfaces
 distinct; comparison stops story playback and never edits a saved arrangement.
 A visit hidden in another tab is cleared at once and re-authorized on return;
 it then reopens the same saved view, object and camera when that saved copy and

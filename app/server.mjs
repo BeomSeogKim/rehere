@@ -42,6 +42,8 @@ const STATIC_FILES = new Map([
   ['/space.js', ['space.js', 'text/javascript; charset=utf-8']],
   ['/outline-editor.js', ['outline-editor.js', 'text/javascript; charset=utf-8']],
   ['/photo-scene.js', ['photo-scene.js', 'text/javascript; charset=utf-8']],
+  ['/composition-scene.js', ['composition-scene.js', 'text/javascript; charset=utf-8']],
+  ['/composition-editor.js', ['composition-editor.js', 'text/javascript; charset=utf-8']],
   ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
   ['/access-ui.js', ['access-ui.js', 'text/javascript; charset=utf-8']],
   ['/collaboration.js', ['collaboration.js', 'text/javascript; charset=utf-8']],
@@ -67,7 +69,7 @@ const STATIC_FILES = new Map([
 const VISITOR_FILES = new Map([
   ['/', ['visit.html', 'text/html; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
-  ...['visitor-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'story-player.js', 'playback.js', 'arrangement.js']
+  ...['visitor-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'composition-scene.js', 'story-player.js', 'playback.js', 'arrangement.js']
     .map((name) => [`/${name}`, [name, 'text/javascript; charset=utf-8']]),
 ]);
 // Visitors never record or share location.
@@ -164,7 +166,7 @@ const PREVIEW_STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/s
 const STORIES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories$/;
 const STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)$/;
 const STORY_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)\/(audio\.wav|withdraw)$/;
-const SHARE_ASSETS = new Set(['surface.json', 'texture.jpg']);
+const SHARE_ASSETS = new Set(['surface.json', 'texture.jpg', 'texture-1.jpg', 'texture-2.jpg']);
 // A pinned contributor photo in a shared view: evidence/<n>.jpg.
 const sharedAsset = (viewId, name) => (UUID.test(viewId) && SHARE_ASSETS.has(name)) || (viewId === 'evidence' && /^[1-9][0-9]?\.jpg$/.test(name));
 // Accepts exactly one Authorization header holding a canonical visit token.
@@ -812,6 +814,11 @@ export function createAppServer({
     const jobsMatch = JOBS_PATH.exec(pathname);
     if (jobsMatch && req.method === 'POST') {
       const request = parseBuildRequest(await readJsonBody(req));
+      if (request.kind === 'two-photo-composition') {
+        const { status, manifest } = await reconstructions.createComposition(jobsMatch[1], request);
+        sendJson(res, status, manifest);
+        return;
+      }
       sendJson(res, 202, await reconstructions.create(jobsMatch[1], request));
       return;
     }

@@ -8,6 +8,7 @@
 // backs, hidden volumes or the path between arrangements. A clear result says
 // nothing about a whole room.
 import { editProblem, objectSurfaceMeshes } from './photo-scene.js';
+import { applyPoseToObject, poseProblem } from './composition-scene.js';
 
 const SCOPE = 'named-visible-surfaces';
 
@@ -45,10 +46,13 @@ export function visibleSurfaceProblem(result) {
 // position (pivot + offset) and rotation (0, yaw, 0) composed by Three.js, its
 // world matrix taken under the scene's identity matrix, and Vector3.applyMatrix4.
 // The exact predicates then judge the same doubles the scene uses.
-export function placer(THREE, pivot, { offset, yaw }) {
+export function placer(THREE, pivot, transform) {
   const object = new THREE.Object3D();
-  object.position.set(pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]);
-  object.rotation.set(0, yaw, 0);
+  if (transform.position) applyPoseToObject(object, transform);
+  else {
+    object.position.set(pivot[0] + transform.offset[0], pivot[1] + transform.offset[1], pivot[2] + transform.offset[2]);
+    object.rotation.set(0, transform.yaw, 0);
+  }
   object.updateMatrix();
   const matrix = new THREE.Matrix4().multiplyMatrices(new THREE.Matrix4(), object.matrix);
   const point = new THREE.Vector3();
@@ -78,7 +82,7 @@ function boundaryOf(indices, vertexCount) {
 }
 
 export function prepareVisibleGeometry(THREE, MeshBVH, surface) {
-  if (surface?.schema_version !== 2) throw new Error('Only a two-object scene has named surfaces to compare.');
+  if (surface?.schema_version !== 2 && surface?.schema_version !== 3) throw new Error('Only a two-object scene has named surfaces to compare.');
   const { objects } = objectSurfaceMeshes(surface);
   const parts = objects.map(({ id, pivot, positions, indices }) => {
     const geometry = new THREE.BufferGeometry();
@@ -98,7 +102,7 @@ export function prepareVisibleGeometry(THREE, MeshBVH, surface) {
       bvh: new MeshBVH(geometry, { indirect: true }),
     };
   });
-  return { THREE, parts };
+  return { THREE, parts, ...(surface.schema_version === 3 && { composition: true }) };
 }
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -355,8 +359,9 @@ function validArrangement(prepared, arrangement) {
   const transforms = arrangement?.objects;
   if (!Array.isArray(transforms) || transforms.length !== prepared.parts.length) return null;
   const byId = new Map(transforms.map((item) => [item?.id, item]));
+  if (byId.size !== prepared.parts.length || (prepared.composition && arrangement.frame !== 'owner-composition')) return null;
   const ordered = prepared.parts.map((part) => byId.get(part.id));
-  return ordered.every((item) => item && editProblem(item) === null) ? ordered : null;
+  return ordered.every((item) => item && (prepared.composition ? poseProblem(item) : editProblem(item)) === null) ? ordered : null;
 }
 
 function placedBox(part, place) {
@@ -375,6 +380,14 @@ function toLocal(part, { offset, yaw }, [x, y, z]) {
   const dx = x - part.pivot[0] - offset[0];
   const dz = z - part.pivot[2] - offset[2];
   return [c * dx - s * dz, y - part.pivot[1] - offset[1], s * dx + c * dz];
+}
+
+function localizer(THREE, part, transform) {
+  if (!transform.position) return (point) => toLocal(part, transform, point);
+  const object = new THREE.Object3D();
+  applyPoseToObject(object, transform);
+  const inverse = object.matrix.clone().invert(), point = new THREE.Vector3();
+  return (value) => point.set(...value).applyMatrix4(inverse).toArray();
 }
 
 function aabb(points, margin) {
@@ -406,6 +419,7 @@ export function checkVisibleArrangement(prepared, arrangement, limits = DEFAULT_
   const [ta, tb] = transforms;
   const placeA = placer(prepared.THREE, a.pivot, ta);
   const placeB = placer(prepared.THREE, b.pivot, tb);
+  const localA = localizer(prepared.THREE, a, ta), localB = localizer(prepared.THREE, b, tb);
   const cornersA = placedBox(a, placeA);
   const cornersB = placedBox(b, placeB);
   const scale = Math.max(1, ...[...cornersA, ...cornersB].flat().map(Math.abs));
@@ -413,6 +427,10 @@ export function checkVisibleArrangement(prepared, arrangement, limits = DEFAULT_
   // Query boxes are widened far past rounding, so no pair that could touch is
   // missed by the Float32 BVH bounds.
   const margin = 2 * hold;
+  // A world-space query margin grows in a component's inverse scaled frame.
+  // The small extra factor also covers an admitted nearly-unit quaternion.
+  const marginA = ta.position ? margin * 1.000001 / ta.scale : margin;
+  const marginB = tb.position ? margin * 1.000001 / tb.scale : margin;
   let nodes = 0;
   let pairs = 0;
   let exhausted = false;
@@ -424,7 +442,7 @@ export function checkVisibleArrangement(prepared, arrangement, limits = DEFAULT_
   };
 
   // Pass 1: triangles of A near B's placed bounds, in A's local frame.
-  const nearB = aabb(cornersB.map((point) => toLocal(a, ta, point)), margin);
+  const nearB = aabb(cornersB.map(localA), marginA);
   const candidates = [];
   a.bvh.shapecast({
     intersectsBounds: (box) => !spend('node') && meets(nearB, box),
@@ -446,7 +464,7 @@ export function checkVisibleArrangement(prepared, arrangement, limits = DEFAULT_
   exactLeft = maxExact;
   for (const triangleA of candidates) {
     const p = worldTriangle(a, placeA, triangleA);
-    const near = aabb(p.map((point) => toLocal(b, tb, point)), margin);
+    const near = aabb(p.map(localB), marginB);
     const vertsA = [0, 1, 2].map((corner) => a.index[triangleA * 3 + corner]);
     let witness = false;
     b.bvh.shapecast({

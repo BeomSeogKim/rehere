@@ -7,6 +7,7 @@ import { OrbitControls } from '/vendor/OrbitControls.js';
 // A namespace import: the two-object builder is looked up only for a
 // two-object surface, so the legacy viewer never depends on it.
 import * as photoScene from './photo-scene.js';
+import { compositionFacingGuide, rotateVector } from './composition-scene.js';
 
 // Camera limits the viewer itself enforces; a saved camera must stay within them.
 export const CAMERA_LIMITS = Object.freeze({ coordinate: 50, minDistance: 0.5, maxDistance: 8 });
@@ -26,7 +27,13 @@ export function cameraWithinLimits({ position, target }) {
 // object's yaw about the vertical axis and moved with its offset. The camera
 // looks at the object's centre, so the framing differs from the photo; it is
 // not the photo's projection. Null when that vantage is outside the limits.
-export function photographedSideCamera(pivot, { offset, yaw }) {
+export function photographedSideCamera(pivot, transform) {
+  if (transform.position) {
+    const delta = rotateVector(pivot.map((n) => -n * transform.scale), transform.quaternion);
+    const camera = { position: transform.position.map((n, i) => n + delta[i]), target: [...transform.position] };
+    return cameraWithinLimits(camera) ? camera : null;
+  }
+  const { offset, yaw } = transform;
   const centre = pivot.map((value, axis) => value + offset[axis]);
   const [x, y, z] = pivot.map((value) => -value);
   const cos = Math.cos(yaw);
@@ -76,18 +83,26 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     renderer.forceContextLoss();
     renderer.domElement.remove();
   });
+  const composition = surface?.schema_version === 3;
+  const loadTexture = async (url) => {
+    let texture;
+    try { texture = await new THREE.TextureLoader().loadAsync(url); } catch { throw new Error('texture'); }
+    releases.push(() => texture.dispose());
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+  };
   let texture;
-  try {
-    texture = await new THREE.TextureLoader().loadAsync(textureUrl);
-  } catch {
-    throw new Error('texture');
-  }
-  releases.push(() => texture.dispose());
-  texture.colorSpace = THREE.SRGBColorSpace;
-  const twoObjects = surface?.schema_version === 2;
+  if (composition) {
+    texture = {};
+    for (const name of ['texture-1.jpg', 'texture-2.jpg']) {
+      if (typeof textureUrl?.[name] !== 'string') throw new Error('texture');
+      texture[name] = await loadTexture(textureUrl[name]);
+    }
+  } else texture = await loadTexture(textureUrl);
+  const twoObjects = surface?.schema_version === 2 || composition;
   if (twoObjects && typeof photoScene.createObjectSceneObjects !== 'function') throw new Error('unsupported');
   const objects = twoObjects ? photoScene.createObjectSceneObjects(THREE, surface, texture) : photoScene.createSceneObjects(THREE, surface, texture);
-  const meshes = twoObjects ? [objects.background, ...objects.objects.map((object) => object.mesh)] : [objects.background, objects.foreground];
+  const meshes = (twoObjects ? [objects.background, ...objects.objects.map((object) => object.mesh)] : [objects.background, objects.foreground]).filter(Boolean);
   releases.push(() => {
     for (const mesh of meshes) {
       mesh.geometry.dispose();
@@ -98,9 +113,9 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
 
   // The vertical field of view follows from the horizontal one and the photo's
   // aspect, as the surface builder computes it.
-  const [imageWidth, imageHeight] = surface.source.image_size;
-  const tangent = Math.tan((surface.assumptions.horizontal_fov_degrees * Math.PI) / 360);
-  const verticalFov = objects.verticalFovDegrees ?? (2 * Math.atan((tangent * imageHeight) / imageWidth) * 180) / Math.PI;
+  const [imageWidth, imageHeight] = composition ? [1, 1] : surface.source.image_size;
+  const tangent = Math.tan(((composition ? 55 : surface.assumptions.horizontal_fov_degrees) * Math.PI) / 360);
+  const verticalFov = composition ? 55 : objects.verticalFovDegrees ?? (2 * Math.atan((tangent * imageHeight) / imageWidth) * 180) / Math.PI;
   const camera = new THREE.PerspectiveCamera(verticalFov, 1, 0.01, 50);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   const canvas = renderer.domElement;
@@ -140,7 +155,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   // the pseudo-depth range so orbiting turns around the photographed surfaces.
   const look = (position) => {
     camera.position.set(...position);
-    controls.target.set(0, 0, -3);
+    controls.target.set(0, 0, composition ? 0 : -3);
     controls.update();
     draw();
   };
@@ -173,7 +188,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   const observer = new ResizeObserver(resize);
   releases.push(() => observer.disconnect());
   observer.observe(viewport);
-  look([0, 0, 0]);
+  look(composition ? [0, 0, 5] : [0, 0, 0]);
 
   // A face-anchor preview draws the photographed side as an arrow and a line to
   // the target point, so a person can check the relation before applying.
@@ -200,10 +215,11 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     // offsets and the projection aspect; never the camera, controls, geometry,
     // transforms, texture or field of view.
     setPhotoFraming(on) {
+      if (composition) return false;
       framing = Boolean(on);
       resize();
     },
-    originalView: () => look([0, 0, 0]),
+    originalView: () => composition ? false : look([0, 0, 0]),
     showGuide(transform, point, targetId = null) {
       clearGuide();
       if (!transform || !point) {
@@ -215,9 +231,10 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
         draw();
         return null;
       }
-      const centre = pivot.map((value, axis) => value + transform.offset[axis]);
-      const target = photoScene.surfacePoint(surface, point);
-      const relation = photoScene.facingGuide(centre, transform.yaw, target);
+      const centre = composition ? [...transform.position] : pivot.map((value, axis) => value + transform.offset[axis]);
+      const target = composition ? (typeof point === 'string' ? arrangement?.objects.find((object) => object.id === point)?.position : point) : photoScene.surfacePoint(surface, point);
+      const relation = composition ? compositionFacingGuide(transform, target) : photoScene.facingGuide(centre, transform.yaw, target);
+      if (!relation.direction) return null;
       const group = new THREE.Group();
       const arrow = new THREE.ArrowHelper(new THREE.Vector3(...relation.direction), new THREE.Vector3(...centre), 0.6, 0xffd400, 0.15, 0.08);
       // The level line is what the turn can face; the drop line joins it to
@@ -238,7 +255,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       draw();
       return relation;
     },
-    sideView: () => look([1.6, 0.25, -0.4]),
+    sideView: () => look(composition ? [4, 2, 5] : [1.6, 0.25, -0.4]),
     // The camera as two finite vectors, for snapshots that must restore the
     // exact view later.
     getCamera: () => ({ position: camera.position.toArray(), target: controls.target.toArray() }),
@@ -250,7 +267,8 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       return objects.objects.map(({ id, pivot }) => {
         const transform = arrangement?.objects.find((object) => object.id === id);
         const offset = transform?.offset ?? [0, 0, 0];
-        const point = new THREE.Vector3(pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]).project(camera);
+        const centre = composition && transform ? transform.position : pivot.map((n, i) => n + offset[i]);
+        const point = new THREE.Vector3(...centre).project(camera);
         return { id, x: left + ((point.x + 1) / 2) * width, y: top + ((1 - point.y) / 2) * height, visible: point.z > -1 && point.z < 1 && Math.abs(point.x) <= 1 && Math.abs(point.y) <= 1 };
       });
     },
@@ -258,7 +276,8 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     // `transform`; changes nothing else. False when there is no such object or
     // the vantage is outside the limits, and the camera stays where it was.
     viewPhotographedSide(transform, targetId = null) {
-      const pivot = twoObjects ? objects.objects.find((object) => object.id === targetId)?.pivot : objects.pivot;
+      const selected = twoObjects ? objects.objects.find((object) => object.id === targetId) : null;
+      const pivot = composition ? selected?.sourcePivot : twoObjects ? selected?.pivot : objects.pivot;
       const view = pivot && transform ? photographedSideCamera(pivot, transform) : null;
       if (!view) return false;
       camera.position.set(...view.position);
@@ -268,6 +287,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       return true;
     },
     setCamera({ position, target }) {
+      if (composition) { camera.fov = 55; camera.updateProjectionMatrix(); }
       camera.position.set(...position);
       controls.target.set(...target);
       controls.update();

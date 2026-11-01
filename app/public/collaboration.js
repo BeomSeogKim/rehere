@@ -5,6 +5,9 @@
 // explicitly. Recollections, photos and model reconstructions stay separate
 // kinds of evidence; none of them is shown as verified history.
 
+import { copyPose, isComposition, poseProblem } from './composition-scene.js';
+import { poseAxes, poseValues, poseWithAxis } from './composition-editor.js';
+import { formatTransform } from './memory-edit.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import { register, registerElement, unregister } from './playback.js';
 import { createStoryPlayer, formatMs } from './story-player.js';
@@ -195,6 +198,7 @@ export function submissionProblem({ text, periodClaim, voice = null }) {
 
 export function transformProblem(transform) {
   if (!transform) return 'Set the candidate position first.';
+  if (transform.pose) return poseProblem({ ...transform.pose, scale: 1 });
   const { offset, yaw } = transform;
   if (!Array.isArray(offset) || offset.length !== 3 || !offset.every(Number.isFinite)) return 'Each position value must be a number.';
   if (offset.some((value) => Math.abs(value) > OFFSET_LIMIT)) return `Each position value must be between -${OFFSET_LIMIT} and ${OFFSET_LIMIT}.`;
@@ -232,9 +236,6 @@ export function describeEra(era, labelFor = () => 'another scene') {
 
 // The provider's display name as recorded when they wrote it.
 const providerName = (entry) => entry.provider?.displayName || 'Someone';
-
-const formatTransform = ({ offset, yaw }) =>
-  `left/right ${offset[0].toFixed(2)}, down/up ${offset[1].toFixed(2)}, away/toward ${offset[2].toFixed(2)}, turn ${Math.round((yaw * 180) / Math.PI)}°`;
 
 function el(tag, { onclick, ...props } = {}, children = []) {
   const node = document.createElement(tag);
@@ -1938,20 +1939,21 @@ export function mountCollaboration(container, bridge) {
     };
     const reason = el('textarea', { rows: 2, maxLength: REASON_LIMIT });
     const conflict = select(Object.entries(CONFLICTS), 'unknown');
-    const axes = ['Left / right', 'Down / up', 'Away / toward', 'Turn (degrees)'];
-    const savedValues = (state) => [...state.offset, Math.round((state.yaw * 180) / Math.PI)].map(String);
+    const composition = isComposition(editor);
+    const axes = composition ? poseAxes.slice(0, 6).map(([name]) => name) : ['Left / right', 'Down / up', 'Away / toward', 'Turn (degrees)'];
+    const savedValues = (state) => (composition ? poseValues(state).slice(0, 6) : [...state.offset, Math.round((state.yaw * 180) / Math.PI)]).map(String);
     // The fields show the saved position, the turn rounded to whole degrees.
     // A field the owner has not typed in keeps its exact saved value, so the
     // candidate never rounds what was left alone. Everything is bound to the
     // saved version this review was opened on.
     const formVersion = editor.version;
     const sceneMoved = () => bridge.editor().version !== formVersion;
-    const exact = (state) => ({ offset: [...state.offset], yaw: state.yaw });
+    const exact = (state) => composition ? copyPose(state) : { offset: [...state.offset], yaw: state.yaw };
     let baseline = bridge.targets ? null : exact(editor);
-    let edited = [false, false, false, false];
-    const values = bridge.targets ? ['', '', '', ''] : savedValues(editor);
+    let edited = axes.map(() => false);
+    const values = bridge.targets ? axes.map(() => '') : savedValues(editor);
     const inputs = axes.map((name, i) => {
-      const input = el('input', { type: 'number', step: i === 3 ? 1 : 0.01, min: i === 3 ? -180 : -OFFSET_LIMIT, max: i === 3 ? 180 : OFFSET_LIMIT, value: values[i] });
+      const input = el('input', { type: 'number', step: i >= 3 ? 1 : 0.01, min: composition ? i >= 3 ? -180 : -10 : i === 3 ? -180 : -OFFSET_LIMIT, max: composition ? i >= 3 ? 180 : 10 : i === 3 ? 180 : OFFSET_LIMIT, value: values[i] });
       input.setAttribute('aria-label', `Candidate ${name}`);
       return input;
     });
@@ -1968,15 +1970,15 @@ export function mountCollaboration(container, bridge) {
       if (fieldsTarget) targetDrafts.set(fieldsTarget, { values: inputs.map((input) => input.value), edited, baseline });
       fieldsTarget = target;
       const saved = target ? bridge.editor(target) : null;
-      const fresh = saved && saved.version === formVersion ? { values: savedValues(saved), edited: [false, false, false, false], baseline: exact(saved) } : null;
-      const next = (target && targetDrafts.get(target)) ?? fresh ?? { values: ['', '', '', ''], edited: [false, false, false, false], baseline: null };
+      const fresh = saved && saved.version === formVersion ? { values: savedValues(saved), edited: axes.map(() => false), baseline: exact(saved) } : null;
+      const next = (target && targetDrafts.get(target)) ?? fresh ?? { values: axes.map(() => ''), edited: axes.map(() => false), baseline: null };
       edited = [...next.edited];
       baseline = next.baseline;
       inputs.forEach((input, i) => (input.value = next.values[i]));
     };
     const candidateBox = el('fieldset', { className: 'space-edit', hidden: true }, [
       el('legend', { textContent: 'Candidate position, set by hand' }),
-      el('p', { className: 'hint', textContent: 'Set where the object would be if this recollection is right. Rehere does not read a position from the words.' }),
+      el('p', { className: 'hint', textContent: composition ? 'Set this object’s position and orientation in the owner composition. Its exact saved relative scale stays unchanged. This is your judgment from the recollection, not automatic alignment.' : 'Set where the object would be if this recollection is right. Rehere does not read a position from the words.' }),
       ...inputs.map((input, i) => el('div', { className: 'space-axis' }, [el('span', { textContent: axes[i] }), input])),
     ]);
     const preview = el('button', { type: 'button', className: 'secondary', textContent: 'Preview candidate on the scene' });
@@ -1985,6 +1987,12 @@ export function mountCollaboration(container, bridge) {
 
     const targetNote = el('p', { className: 'hint' });
     const candidate = () => {
+      if (composition) {
+        if (!baseline) return { targetId: fieldsTarget, pose: { position: [NaN, NaN, NaN], quaternion: [0, 0, 0, 1] } };
+        let pose = copyPose(baseline);
+        for (let axis = 0; axis < inputs.length; axis += 1) if (edited[axis]) { pose = poseWithAxis(pose, axis, inputs[axis].value); if (!pose) return { targetId: fieldsTarget, pose: { position: [NaN, NaN, NaN], quaternion: [0, 0, 0, 1] } }; }
+        return { targetId: fieldsTarget, pose: { position: pose.position, quaternion: pose.quaternion } };
+      }
       const numbers = inputs.map((input) => (input.value.trim() === '' ? NaN : Number(input.value)));
       const typed = (i) => edited[i] || !baseline;
       const transform = {
