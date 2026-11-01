@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attestPhotos, contributionsDir } from './contribution-photos.mjs';
@@ -8,7 +8,7 @@ import { cleanupContributionFiles, removeManifestTemps, safeJobDirectory } from 
 import {
   assertSceneUsable, issueMessage, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, usageBlocked, versionDependencies,
 } from './collaboration.mjs';
-import { RequestError } from './drafts.mjs';
+import { LIMITS, RequestError } from './drafts.mjs';
 import {
   ACTIVE_PROPOSAL, PROPOSAL_MESSAGES, editHistory, newProposal, parseProposalRequest, parseUndoRequest, pythonImagePreparer, staleProposals, validatePlan,
 } from './memory-proposals.mjs';
@@ -271,6 +271,84 @@ async function writeJsonAtomic(file, value) {
     throw error;
   }
 }
+
+// Reads at most `limit + 1` bytes through one file handle, so a file that
+// grew after any check is never read in full. Throws on a missing or
+// unreadable file.
+async function readUpTo(file, limit) {
+  const handle = await open(file, 'r');
+  try {
+    const buffer = Buffer.alloc(limit + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, total, buffer.length - total, total);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    return buffer.subarray(0, total);
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+// A recorded photo size the bounded read may trust: within the photo limit.
+const recordedPhotoSize = (source) => Number.isInteger(source?.size) && source.size > 0 && source.size <= LIMITS.photoBytes;
+
+// The stored original of a photo source, read up to its recorded size plus
+// one byte; null unless it is exactly that size. Checksums are the caller's.
+async function boundedOriginal(file, source) {
+  if (!file || !recordedPhotoSize(source)) return null;
+  const bytes = await readUpTo(file, source.size).catch(() => null);
+  return bytes && bytes.length === source.size ? bytes : null;
+}
+
+// Owner region links: private, mutable owner judgments that a box in another
+// photo of the same memory shows one confirmed object of a scene. They are
+// kept in region-links.json beside the manifest and never change the
+// manifest, the originals, a version or anything shared or sent to a model.
+const REGION_LINKS_FILE = 'region-links.json';
+const REGION_LINKS_BYTES = 256 * 1024;
+const REGION_RECEIPTS_MAX = 200;
+const REGION_LINKS_MAX = LIMITS.photoCount - 1;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const REGION_NOT_READY = 'Link photo regions after both objects are confirmed.';
+const REGION_UNAVAILABLE = 'Photo region links are unavailable right now. Nothing was changed.';
+const REGION_UNREADABLE = 'The photo region link could not be read.';
+const CHECKSUM_MESSAGE = 'The saved photo no longer matches its recorded checksum, so it cannot be used.';
+const regionBoxValid = (box, [width, height]) => Array.isArray(box) && box.length === 4 && box.every(finite)
+  && box[0] >= 0 && box[1] >= 0 && box[2] > box[0] && box[3] > box[1] && box[2] <= width && box[3] <= height;
+const positiveInt = (value) => Number.isInteger(value) && value > 0;
+
+function validRegionLinks(state) {
+  if (state?.schemaVersion !== 1 || !exactKeys(state, ['schemaVersion', 'objects'])) return false;
+  const { objects } = state;
+  if (objects === null || typeof objects !== 'object' || Array.isArray(objects)) return false;
+  return Object.entries(objects).every(([id, entry]) => OBJECT_IDS.includes(id) && exactKeys(entry, ['revision', 'updatedAt', 'links', 'receipts'])
+    && Number.isInteger(entry.revision) && entry.revision >= 0 && (entry.updatedAt === null || typeof entry.updatedAt === 'string')
+    && Array.isArray(entry.links) && entry.links.length <= REGION_LINKS_MAX
+    && new Set(entry.links.map((link) => link?.sourceId)).size === entry.links.length
+    && entry.links.every((link) => exactKeys(link, ['sourceId', 'sourceSha256', 'imageSize', 'box', 'linkedAt'])
+      && typeof link.sourceId === 'string' && UUID_PATTERN.test(link.sourceId) && typeof link.sourceSha256 === 'string' && SHA256_HEX.test(link.sourceSha256)
+      && Array.isArray(link.imageSize) && link.imageSize.length === 2 && link.imageSize.every(positiveInt)
+      && regionBoxValid(link.box, link.imageSize) && typeof link.linkedAt === 'string')
+    && Array.isArray(entry.receipts) && entry.receipts.length <= REGION_RECEIPTS_MAX
+    && entry.receipts.every((receipt) => exactKeys(receipt, ['requestId', 'digest', 'revision']) && typeof receipt.requestId === 'string'
+      && UUID_PATTERN.test(receipt.requestId) && typeof receipt.digest === 'string' && SHA256_HEX.test(receipt.digest)
+      && Number.isInteger(receipt.revision) && receipt.revision >= 0));
+}
+
+function parseRegionLinkRequest(body) {
+  if (!exactKeys(body, ['requestId', 'baseRevision', 'action', 'sourceId', 'box', 'confirmed'])) throw new RequestError(400, REGION_UNREADABLE);
+  const { requestId, baseRevision, action, sourceId, box, confirmed } = body;
+  const valid = typeof requestId === 'string' && UUID_PATTERN.test(requestId) && Number.isInteger(baseRevision) && baseRevision >= 0
+    && (action === 'set' || action === 'remove') && typeof sourceId === 'string' && UUID_PATTERN.test(sourceId)
+    && (action === 'set' ? Array.isArray(box) : box === null);
+  if (!valid) throw new RequestError(400, REGION_UNREADABLE);
+  if (confirmed !== true) throw new RequestError(400, 'Confirm that the regions show the same object before saving.');
+  return { requestId, baseRevision, action, sourceId, box: action === 'set' ? parseBox(box) : null };
+}
+
+const emptyRegionEntry = () => ({ revision: 0, updatedAt: null, links: [], receipts: [] });
 
 // A replayed receipt returns its saved geometry only while that version's own
 // dependencies may still be used; an unrelated later blockage does not matter.
@@ -596,10 +674,9 @@ export class ReconstructionStore {
   async verifiedOriginal(draftId, sourceId, purpose = 'model') {
     const { source } = await this.permittedPhoto(draftId, sourceId, purpose);
     const asset = await this.drafts.asset(draftId, source.name);
-    const bytes = asset && (await readFile(asset.file));
-    if (!bytes || sha256(bytes) !== source.sha256) {
-      throw new RequestError(409, 'The saved photo no longer matches its recorded checksum, so it cannot be used.');
-    }
+    // Read through one handle up to the recorded size plus one byte.
+    const bytes = await boundedOriginal(asset?.file, source);
+    if (!bytes || sha256(bytes) !== source.sha256) throw new RequestError(409, CHECKSUM_MESSAGE);
     const size = imageSize(bytes);
     if (!size || size.width < 1 || size.height < 1) throw new RequestError(400, 'The size of this photo could not be read.');
     return { source, imagePath: asset.file, size };
@@ -1348,16 +1425,186 @@ export class ReconstructionStore {
     if (principal.role !== 'owner') throw new RequestError(403, 'This action is not allowed.');
   }
 
+  // The stored links of one scene: { schemaVersion, objects }, empty when
+  // there is no file. A larger, unreadable or invalid file, or an unsafe job
+  // folder, throws a fixed 503; it never reads as an empty list.
+  async #readRegionLinks(draftId, jobId) {
+    const jobDir = this.jobDir(draftId, jobId);
+    if (!(await safeJobDirectory(jobDir, this.rootDir).catch(() => false))) throw new RequestError(503, REGION_UNAVAILABLE);
+    let bytes;
+    try {
+      bytes = await readUpTo(path.join(jobDir, REGION_LINKS_FILE), REGION_LINKS_BYTES);
+    } catch (error) {
+      if (error.code === 'ENOENT') return { schemaVersion: 1, objects: {} };
+      throw new RequestError(503, REGION_UNAVAILABLE);
+    }
+    let state = null;
+    try {
+      if (bytes.length <= REGION_LINKS_BYTES) state = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      state = null;
+    }
+    if (!validRegionLinks(state)) throw new RequestError(503, REGION_UNAVAILABLE);
+    return state;
+  }
+
+  // Callers hold the mutex. A ready two-object scene whose objects were
+  // confirmed, that is usable through its own photo and its dependencies,
+  // and whose original still matches its record.
+  async #linkScene(draftId, jobId) {
+    const manifest = await this.readManifest(draftId, jobId);
+    if (!manifest) throw new RequestError(404, 'This scene could not be found.');
+    if (manifest.status !== 'ready' || !isTwoObject(manifest) || !manifest.objectsConfirmed) throw new RequestError(409, REGION_NOT_READY);
+    if (!(await this.sourceUses(draftId, manifest.sourceId)).place) throw new RequestError(409, SOURCE_BLOCKED_MESSAGE);
+    assertSceneUsable(manifest, 'place');
+    const { source } = await this.verifiedOriginal(draftId, manifest.sourceId, 'place');
+    if (source.sha256 !== manifest.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
+    return { manifest, draft: await this.drafts.get(draftId) };
+  }
+
+  // Callers hold the mutex. Another photo of the same memory with current
+  // place use (never model use) and verified bytes; returns its stored size.
+  async #admitReference(draft, manifest, sourceId) {
+    const source = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === sourceId) : null;
+    if (!source || source.kind !== 'photo' || sourceId === manifest.sourceId) throw new RequestError(400, 'Link a region in a different photo of this memory.');
+    const { size } = await this.verifiedOriginal(draft.id, sourceId, 'place');
+    return { source, size };
+  }
+
+  // The current safe view of one stored link. Grants are checked before any
+  // byte is read, so the pixels of a disallowed photo are never opened; an
+  // unavailable link keeps only its photo and time.
+  async #projectRegionLink(draft, link) {
+    const hidden = (reason) => ({ sourceId: link.sourceId, box: null, imageSize: null, linkedAt: link.linkedAt, available: false, reason });
+    const source = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === link.sourceId && item.kind === 'photo') : null;
+    if (!source) return hidden('unreadable');
+    if (!(await this.sourcePolicies.canUse(draft, link.sourceId, 'place'))) return hidden('source');
+    const asset = await this.drafts.asset(draft.id, source.name);
+    if (!asset || !recordedPhotoSize(source)) return hidden('unreadable');
+    let bytes;
+    try {
+      bytes = await readUpTo(asset.file, source.size);
+    } catch {
+      return hidden('unreadable');
+    }
+    if (bytes.length !== source.size || sha256(bytes) !== source.sha256 || source.sha256 !== link.sourceSha256) return hidden('checksum');
+    const size = imageSize(bytes);
+    if (!size) return hidden('unreadable');
+    if (size.width !== link.imageSize[0] || size.height !== link.imageSize[1]) return hidden('checksum');
+    return { sourceId: link.sourceId, box: [...link.box], imageSize: [size.width, size.height], linkedAt: link.linkedAt, available: true, reason: null };
+  }
+
+  async #regionView(draft, manifest, objectId, entry) {
+    const object = manifest.objects.find((item) => item.id === objectId);
+    const links = [];
+    for (const link of entry.links) links.push(await this.#projectRegionLink(draft, link));
+    return {
+      draftId: manifest.draftId, jobId: manifest.id, objectId, label: object.label,
+      scenePhoto: { sourceId: manifest.sourceId, box: [...object.box] }, revision: entry.revision, updatedAt: entry.updatedAt, links,
+    };
+  }
+
+  async regionLinks(draftId, jobId, objectId) {
+    if (!OBJECT_IDS.includes(objectId)) throw new RequestError(404, 'This object could not be found.');
+    await this.recover();
+    return this.serialize(async () => {
+      const { manifest, draft } = await this.#linkScene(draftId, jobId);
+      const state = await this.#readRegionLinks(draftId, jobId);
+      return this.#regionView(draft, manifest, objectId, state.objects[objectId] ?? emptyRegionEntry());
+    });
+  }
+
+  // The stored pixel size of another photo the owner may link, admitted with
+  // place use only. The links file is not read.
+  async regionReference(draftId, jobId, sourceId) {
+    await this.recover();
+    return this.serialize(async () => {
+      const { manifest, draft } = await this.#linkScene(draftId, jobId);
+      const { size } = await this.#admitReference(draft, manifest, sourceId);
+      return { width: size.width, height: size.height };
+    });
+  }
+
+  // One explicit set or remove for one object. An exact replay is found before
+  // the cap and the revision check and never reapplies; every success, a
+  // no-op included, keeps a receipt. The whole file is rewritten from its
+  // latest state, so the other object's links are kept.
+  async changeRegionLink(draftId, jobId, objectId, body) {
+    if (!OBJECT_IDS.includes(objectId)) throw new RequestError(404, 'This object could not be found.');
+    const request = parseRegionLinkRequest(body);
+    await this.recover();
+    return this.serialize(async () => {
+      const { manifest, draft } = await this.#linkScene(draftId, jobId);
+      const state = await this.#readRegionLinks(draftId, jobId);
+      const entry = state.objects[objectId] ?? emptyRegionEntry();
+      const digest = sha256(JSON.stringify([request.baseRevision, request.action, request.sourceId, request.box]));
+      const receipt = entry.receipts.find((item) => item.requestId === request.requestId);
+      if (receipt) {
+        if (receipt.digest !== digest) throw new RequestError(409, 'This request was already used with different values.');
+        return { ...(await this.#regionView(draft, manifest, objectId, entry)), changed: false, replayed: true, appliedRevision: receipt.revision };
+      }
+      if (entry.receipts.length >= REGION_RECEIPTS_MAX) throw new RequestError(409, 'These photo links cannot be changed again.');
+      if (request.baseRevision !== entry.revision) throw new RequestError(409, 'These photo links changed elsewhere. Reload them before saving.');
+      const existing = entry.links.find((link) => link.sourceId === request.sourceId);
+      let links = entry.links;
+      if (request.action === 'remove') {
+        // A link whose photo is no longer available can still be removed.
+        if (!existing) throw new RequestError(404, 'This photo region link could not be found.');
+        links = entry.links.filter((link) => link !== existing);
+      } else {
+        const { source, size } = await this.#admitReference(draft, manifest, request.sourceId);
+        const [, , x2, y2] = request.box;
+        if (x2 > size.width || y2 > size.height) throw new RequestError(400, `The selected box must stay inside the photo (${size.width} x ${size.height} pixels).`);
+        const same = existing && sameValues(existing.box, request.box) && existing.sourceSha256 === source.sha256
+          && existing.imageSize[0] === size.width && existing.imageSize[1] === size.height;
+        if (!same) {
+          const link = { sourceId: request.sourceId, sourceSha256: source.sha256, imageSize: [size.width, size.height], box: [...request.box], linkedAt: new Date().toISOString() };
+          links = existing ? entry.links.map((item) => (item === existing ? link : item)) : [...entry.links, link];
+        }
+      }
+      const changed = links !== entry.links;
+      const revision = changed ? entry.revision + 1 : entry.revision;
+      const next = {
+        revision, updatedAt: changed ? new Date().toISOString() : entry.updatedAt, links,
+        receipts: [...entry.receipts, { requestId: request.requestId, digest, revision }],
+      };
+      const file = path.join(this.jobDir(draftId, jobId), REGION_LINKS_FILE);
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify({ schemaVersion: 1, objects: { ...state.objects, [objectId]: next } }, null, 2), { flag: 'wx', mode: 0o600 });
+        await rename(temporary, file);
+      } catch {
+        await rm(temporary, { force: true }).catch(() => {});
+        throw new RequestError(503, 'The photo region link could not be saved. Nothing was changed.');
+      }
+      return { ...(await this.#regionView(draft, manifest, objectId, next)), changed, replayed: false, appliedRevision: revision };
+    });
+  }
+
   // Local current uses of a source: scenes built from it, live shared
   // snapshots of those scenes, and model work still running for them.
   // Counts saved uses of a photo or recording: a scene built from the photo,
   // its stories, and stories that use the recording. Each snapshot counts once.
   async sourceImpacts(draftId, sourceId) {
-    const impacts = { scenes: 0, stories: 0, snapshots: 0, processing: 0 };
+    const impacts = { scenes: 0, stories: 0, snapshots: 0, processing: 0, linkedRegions: 0 };
     if (!UUID_PATTERN.test(draftId)) return impacts;
     const now = Date.now();
     for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
       const manifest = await this.readManifest(draftId, jobId).catch(() => null);
+      // Stored links, available or not, whose reference or base photo is this
+      // source. Metadata only and no lock. An unreadable links file, or stored
+      // links whose scene manifest cannot be read (so their base photo is
+      // unknown), make the count unknown (null); neither blocks a restriction.
+      if (impacts.linkedRegions !== null) {
+        const links = await this.#readRegionLinks(draftId, jobId).catch(() => undefined);
+        const entries = links ? Object.values(links.objects) : [];
+        if (links === undefined || (!manifest && entries.some((entry) => entry.links.length > 0))) impacts.linkedRegions = null;
+        else if (manifest) {
+          for (const entry of entries) {
+            impacts.linkedRegions += entry.links.filter((link) => link.sourceId === sourceId || manifest.sourceId === sourceId).length;
+          }
+        }
+      }
       if (!manifest) continue;
       const photo = manifest.sourceId === sourceId;
       const storyIds = (manifest.stories?.items ?? [])

@@ -16,6 +16,7 @@ import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
 import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner } from './reconstructions.mjs';
+import { OBJECT_IDS } from './arrangements.mjs';
 
 const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 const DEFAULT_DATA_DIR = fileURLToPath(new URL('./data/', import.meta.url));
@@ -53,6 +54,7 @@ const STATIC_FILES = new Map([
   ['/scene-relations.js', ['scene-relations.js', 'text/javascript; charset=utf-8']],
   ['/arrangement.js', ['arrangement.js', 'text/javascript; charset=utf-8']],
   ['/visible-surfaces.js', ['visible-surfaces.js', 'text/javascript; charset=utf-8']],
+  ['/region-links.js', ['region-links.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // The account-free visitor listener serves only the visit page and the exact
@@ -129,6 +131,8 @@ const HISTORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/history
 const UNDO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/undo$/;
 const RELATIONSHIP_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/relationship$/;
 const OBJECTS_CONFIRM_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/confirm$/;
+const REGION_LINKS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/objects\/([^/]+)\/region-links$/;
+const REGION_REFERENCE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/region-reference\/([^/]+)$/;
 const REVOKE_PATH = /^\/api\/invitations\/([^/]+)\/revoke$/;
 const SCENE_COLLABORATION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/(contributions|collaboration)$/;
 const CONTRIBUTION_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/([^/]+)\/(review|withdraw|photo|recording\.wav|captions|deletion|delete)$/;
@@ -850,6 +854,29 @@ export function createAppServer({
     if (confirmMatch && req.method === 'POST') {
       sendJson(res, 200, await reconstructions.confirmObjects(confirmMatch[1], confirmMatch[2], await readJsonBody(req)));
       return;
+    }
+    // Owner photo-region links and the place-only size of a linkable photo.
+    // IDs and the object are checked before any storage is read.
+    const regionLinksMatch = REGION_LINKS_PATH.exec(pathname);
+    const regionReferenceMatch = REGION_REFERENCE_PATH.exec(pathname);
+    if (regionLinksMatch || regionReferenceMatch) {
+      const [, draftId, jobId, third] = regionLinksMatch ?? regionReferenceMatch;
+      if (!UUID_PATTERN.test(draftId) || !UUID_PATTERN.test(jobId)) throw new RequestError(404, NOT_FOUND);
+      if (regionLinksMatch && !OBJECT_IDS.includes(third)) throw new RequestError(404, 'This object could not be found.');
+      if (regionReferenceMatch && !UUID_PATTERN.test(third)) throw new RequestError(404, 'This photo could not be found in the memory.');
+      if (regionReferenceMatch && reading) {
+        sendJson(res, 200, await reconstructions.regionReference(draftId, jobId, third));
+        return;
+      }
+      if (regionLinksMatch && reading) {
+        sendJson(res, 200, await reconstructions.regionLinks(draftId, jobId, third));
+        return;
+      }
+      if (regionLinksMatch && req.method === 'POST') {
+        sendJson(res, 200, await reconstructions.changeRegionLink(draftId, jobId, third, await readJsonBody(req)));
+        return;
+      }
+      throw new RequestError(405, 'Method not allowed.');
     }
     const jobAssetMatch = JOB_ASSET_PATH.exec(pathname);
     if (jobAssetMatch && reading) {

@@ -29,6 +29,40 @@ the object you named. Until then the scene can be viewed but not edited,
 planned, reviewed, given stories or shared. A wrong outline needs a new build
 with different boxes; it is never corrected automatically.
 
+## Link regions from other photos
+
+After confirming both objects, choose one and open its **Photo evidence**.
+The object's box in the scene photo can be compared with regions you mark in
+other original photos of this same place. Draw a box, inspect both photos,
+and explicitly confirm that they show the same object. If unsure, leave
+them unlinked. There is one region per reference photo for each object;
+change its region or remove the link to correct your judgment.
+
+These links record your assessment. Rehere does not recognise or align the
+photos, establish their dates, infer another viewpoint or change the scene.
+The boxes use stored pixel coordinates, without applying EXIF rotation.
+Reopening the scene restores its links; an unsaved arrangement stays in
+place while a link is saved. A conflict keeps the drawn input for explicit
+review, and an unclear answer can repeat the same prepared request.
+
+A reference needs current permission for place construction, but not model
+processing. The normal build still requires both. Stopping or removing place
+use makes that reference unavailable, with its box hidden; it does not delete
+the record or the original. An unavailable reference link can be removed
+while the scene itself remains usable. Stopping the scene's own photo blocks
+the scene and its links. Source-use controls count stored linked regions;
+if that optional metadata cannot be read, the count is explicitly unknown
+and source restriction remains available.
+
+Links are owner-private metadata in a separate `region-links.json` beside
+the scene manifest. Each object's revision and request receipts are
+independent of arrangement versions. A link change never rewrites the
+manifest, original photos, source-use policy or an issued visitor snapshot.
+Contributors, visitors and model requests receive no link data. A missing
+sidecar means no links; an unreadable one reports unavailable without
+disabling the ordinary scene. This uses one process and atomic file writes,
+without fsync or multiple-process locking.
+
 ## Arrange and relate
 
 A saved arrangement holds a transform for each object and at most one rule.
@@ -98,6 +132,9 @@ authority, source-use and contribution checks.
 | `POST /<job>/relationship` | `requestId`, `baseVersion`, `relationship` (rule or `null`), `confirmed: true` |
 | `POST /<job>/undo` | `requestId`, `baseVersion`, `targetVersion`, `ruleChangeConfirmed` |
 | `POST /<job>/proposals` | the existing fields plus `targetId` |
+| `GET /<job>/objects/<object>/region-links` | Current owner links and their availability |
+| `POST /<job>/objects/<object>/region-links` | `requestId`, `baseRevision`, `action` (`set` or `remove`), `sourceId`, `box` (or `null` for removal), `confirmed: true` |
+| `GET /<job>/region-reference/<source>` | Place-permitted reference dimensions in stored pixel order |
 
 Recollection review transforms and new stories add `targetId` the same way.
 One-foreground scenes keep their original request shapes and return their
@@ -108,5 +145,5 @@ Visitor views receive only the geometry, regions, object names and source
 boxes needed to draw and identify the objects.
 
 This covers exactly two objects in one photograph and one left/right rule.
-More objects, other rules, physical collision, multiple viewpoints and
-automatic object identification are not implemented.
+More objects, other rules, physical collision, reconstruction from multiple
+viewpoints and automatic object identification are not implemented.

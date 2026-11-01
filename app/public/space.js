@@ -15,6 +15,7 @@ import { createArrangementSession, describeArrangement, objectNames, objectState
 import { stopAll } from './playback.js';
 import { mountShares } from './shares.js';
 import { mountStories } from './stories.js';
+import { mountRegionLinks } from './region-links.js';
 
 const POLL_MS = 2000;
 const SOURCE_BLOCKED_TEXT = 'Its photo is no longer allowed to be used for reconstructing this place, or its use was stopped. Every saved version depends on that photo, so none can be restored. The original photo is kept, not deleted.';
@@ -128,6 +129,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   let sharesPanel = null;
   let storiesPanel = null;
   let blockedPanel = null;
+  // The selected object's links to regions in other photos, inside its photo
+  // evidence; replaced on every object choice.
+  let regionLinksPanel = null;
   // Bumped whenever the panel is closed or replaced; a response for an older
   // selection or scene must not change the panel that replaced it.
   let panelGeneration = 0;
@@ -199,6 +203,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     storiesPanel = null;
     blockedPanel?.dispose();
     blockedPanel = null;
+    regionLinksPanel?.dispose();
+    regionLinksPanel = null;
     viewer?.dispose();
     viewer = null;
     panel.replaceChildren();
@@ -1224,6 +1230,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     };
 
     function renderEvidence() {
+      regionLinksPanel?.dispose();
+      regionLinksPanel = null;
       evidenceSummary.textContent = selected ? `Photo evidence for ${nameOf(selected)}` : 'Photo evidence (choose an object)';
       if (!selected) {
         evidence.replaceChildren(el('p', { className: 'hint', textContent: 'Choose an object to see the box you drew for it in the photo.' }));
@@ -1234,6 +1242,18 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         el('p', { className: 'hint', textContent: `Photo evidence for ${nameOf(selected)}: the box you drew. The outline inside it is the model’s proposal.` }),
         el('div', { className: 'anchor-frame' }, [el('img', { src: assetUrl(jobId, 'texture.jpg'), alt: `Photo ${number} with the box for ${nameOf(selected)}` }), boxOver(object)]),
       );
+      const links = el('div');
+      evidence.append(links);
+      regionLinksPanel = mountRegionLinks(links, {
+        draftId: draft.id,
+        jobUrl,
+        objectId: selected,
+        name: nameOf(selected),
+        letter: letterOf(selected).toLowerCase(),
+        photos: draft.photos,
+        sourceFor,
+        scenePhoto: { sourceId: job.sourceId, box: object.box, size: [imageWidth, imageHeight], url: assetUrl(jobId, 'texture.jpg'), number },
+      });
     }
 
     function showEdit() {
