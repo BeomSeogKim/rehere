@@ -73,9 +73,10 @@ review and restoration.
 
 Recorded stories connect a permitted imported recording to an explicitly chosen
 saved arrangement and its foreground object, or one named object of a
-two-object scene.
-Human-supplied captions
-and provider attribution accompany a converted playback copy, with explicit
+two-object scene. Use the whole first audio track or explicitly select an
+excerpt by its start and end in the original. The original stays unchanged;
+caption times start at 0:00 of the selected playback. Human-supplied captions
+and provider attribution accompany the converted copy, with explicit
 visitor selection and current withdrawal checks. See [recorded stories](STORIES.md).
 
 Not included: automatic transcription, multi-view alignment, hosted account

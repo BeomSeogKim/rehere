@@ -18,10 +18,20 @@ write captions for the meaningful audible content, and confirm them before
 saving. Version numbers do not establish a date. A changed time assertion
 requires refreshing and explicitly reviewing the context again.
 
-The playback copy contains the complete first audio track, converted to mono
+By default the playback copy contains the complete first audio track. To use
+an excerpt, choose its start and end in the original recording. These are
+integer millisecond positions; the end must be after the start and within
+the decoded recording. The range stays bound to that original's checksum,
+the chosen object and the saved view. Captions and playback start at 0:00 of
+the selected part. Changing the recording or selection clears the caption
+acknowledgment so it can be reviewed again.
+
+The local decoder reads the whole first track once, then an excerpt keeps
+exactly the selected samples. Only those samples enter its playback copy;
+no outside audio is delivered through its story route. The copy is mono
 16 kHz, 16-bit PCM WAV. Other tracks are not included. The original remains
-unchanged. The decoder rejects recordings over five minutes instead of
-silently cutting them. It accepts supported WebM, Ogg and MP4 containers;
+unchanged. Recordings over five minutes are rejected even when a shorter
+excerpt was requested. It accepts supported WebM, Ogg and MP4 containers;
 MP4 files requiring seeking may fail because input is pipe-only. No file or
 network protocol fallback is attempted. Set `REHERE_FFMPEG` to a prepared
 FFmpeg executable if it is not available on `PATH`.
@@ -38,8 +48,12 @@ Playback starts only after a Play action. Pause and Stop are separate controls;
 all captions remain readable as a transcript. The currently active cue is
 identified with text rather than color alone. Captions are human supplied and
 not automatically transcribed or independently verified. Confirming captions
-means they convey the recording's meaningful audible content; unrelated
+means they convey the selected playback's meaningful audible content; unrelated
 commentary does not substitute for captions.
+
+An excerpt player names its original start and end and explains the 0:00
+playback origin. Earlier whole-recording stories stay whole and are not
+rewritten or clipped. Changing a selection requires a newly saved story.
 
 Only one recording plays at a time, including original-recording playback and
 recorder listen-back. Switching arrangement, leaving, hiding the page, signing
@@ -83,8 +97,8 @@ anonymization: spoken information and the voice itself remain identifying.
 See the official [protocol](https://ffmpeg.org/ffmpeg-protocols.html) and
 [format](https://ffmpeg.org/ffmpeg-formats.html) documentation for the transport
 and raw PCM controls. The selected limits and storage/permission checks are
-application decisions. Hosted transcription, contributor recordings, excerpt
-editing, inferred story matching and arbitrary track selection are not included.
+application decisions. Hosted transcription, contributor-recording excerpts,
+inferred story matching and arbitrary track selection are not included.
 
 One server process owns this local workspace. Power-loss durability, hosted
 operation and operating-system audio isolation are not claimed.

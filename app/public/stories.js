@@ -5,10 +5,12 @@
 // transcribed or checked.
 
 import { viewChoices } from './shares.js';
-import { createStoryPlayer, formatMs } from './story-player.js';
+import { createStoryPlayer, formatMs, formatPosition } from './story-player.js';
 
 export const TITLE_LIMIT = 120;
 export const CUE_LIMIT = 200;
+// An excerpt must end within the five minutes a recording may last.
+export const EXCERPT_LIMIT_MS = 300_000;
 export const CUE_TEXT_LIMIT = 2000;
 export const CUES_TOTAL_LIMIT = 20_000;
 const TARGET_LABEL = 'Selected foreground object';
@@ -23,7 +25,9 @@ export function parseTime(text) {
   return Math.round((minutes * 60 + seconds) * 1000);
 }
 
-export function cuesProblem(cues, durationHintMs = null) {
+// excerptMs: the exact length of a chosen excerpt, which captions must fit;
+// otherwise durationHintMs is the whole recording's approximate length.
+export function cuesProblem(cues, durationHintMs = null, excerptMs = null) {
   if (cues.length < 1) return 'Add at least one caption.';
   if (cues.length > CUE_LIMIT) return `Use ${CUE_LIMIT} captions or fewer.`;
   let total = 0;
@@ -39,7 +43,10 @@ export function cuesProblem(cues, durationHintMs = null) {
     previousEnd = cue.endMs;
   }
   if (total > CUES_TOTAL_LIMIT) return `Keep all captions together to ${CUES_TOTAL_LIMIT.toLocaleString('en-US')} characters or fewer.`;
-  if (Number.isFinite(durationHintMs) && previousEnd > durationHintMs) {
+  if (Number.isInteger(excerptMs) && previousEnd > excerptMs) {
+    return `The last caption ends at ${formatMs(previousEnd)}, after the end of the excerpt at ${formatPosition(excerptMs)}. Caption times start at 0:00 of the excerpt.`;
+  }
+  if (!Number.isInteger(excerptMs) && Number.isFinite(durationHintMs) && previousEnd > durationHintMs) {
     return `The last caption ends at ${formatMs(previousEnd)}, after the recording’s end at about ${formatMs(durationHintMs)}.`;
   }
   return null;
@@ -109,6 +116,18 @@ export function mountStories(container, bridge) {
     : null;
   if (targetSelect) targetSelect.value = '';
   const title = el('input', { type: 'text', maxLength: 200 });
+  // Which part of the recording the story plays: the whole (default) or an
+  // excerpt between two positions in the ORIGINAL recording.
+  const partName = `story-part-${Math.random().toString(36).slice(2)}`;
+  const whole = el('input', { type: 'radio', name: partName, value: 'whole', checked: true });
+  const excerpt = el('input', { type: 'radio', name: partName, value: 'excerpt', checked: false });
+  const rangeStart = el('input', { type: 'text', placeholder: '0:00' });
+  const rangeEnd = el('input', { type: 'text' });
+  const lengthHint = el('p', { className: 'hint' });
+  const rangeFields = el('div', { hidden: true }, [
+    field('Start in the original recording', rangeStart, 'Leave blank to start at 0:00.'),
+    field('End in the original recording', rangeEnd, 'Required for an excerpt.'),
+  ]);
   const cueRows = el('div', { className: 'story-cue-rows' });
   const addCue = el('button', { type: 'button', className: 'secondary', textContent: 'Add a caption' });
   const confirmed = el('input', { type: 'checkbox' });
@@ -139,7 +158,7 @@ export function mountStories(container, bridge) {
       el('p', {
         className: 'hint',
         textContent:
-          'A story connects one saved recording of this memory to one saved view of the scene and its selected object, with captions you write. The original recording is kept unchanged; listeners hear a converted playback copy of its whole first audio track. A saved story cannot be edited; save a new one to correct it.',
+          'A story connects one saved recording of this memory to one saved view of the scene and its selected object, with captions you write. The original recording is kept unchanged; listeners hear a converted playback copy of either its whole first audio track or one excerpt of it that you choose. An excerpt may leave out parts of what was said. A saved story cannot be edited; save a new one to correct it.',
       }),
       field('Recording', voiceSelect),
       voiceNote,
@@ -147,12 +166,20 @@ export function mountStories(container, bridge) {
       targetSelect ? field('Object', targetSelect, 'The object this story is about. Listeners can pick an object to find its stories.') : el('p', { className: 'hint', textContent: `Object: ${TARGET_LABEL}` }),
       field('Story title', title),
       el('fieldset', { className: 'source-permissions' }, [
+        el('legend', { textContent: 'Part of the recording' }),
+        el('label', {}, [whole, ' The whole recording']),
+        el('label', {}, [excerpt, ' An excerpt']),
+        el('p', { className: 'hint', textContent: 'Excerpt positions are in the original recording. Captions start at 0:00 of the part you choose. An excerpt is a listening selection, not proof that the statement is complete or true.' }),
+        rangeFields,
+        lengthHint,
+      ]),
+      el('fieldset', { className: 'source-permissions' }, [
         el('legend', { textContent: 'Captions' }),
-        el('p', { className: 'hint', textContent: 'Write what is heard, with start and end times as minutes:seconds (for example 0:04.5). Rehere does not transcribe or check them.' }),
+        el('p', { className: 'hint', textContent: 'Write what is heard, with start and end times as minutes:seconds from 0:00 of the part you chose (for example 0:04.5). Rehere does not transcribe or check them.' }),
         cueRows,
         el('div', { className: 'actions access-links' }, [addCue]),
       ]),
-      el('label', { className: 'memory-consent' }, [confirmed, ' These captions, written by me, convey the recording’s meaningful audible content; they are not checked by Rehere']),
+      el('label', { className: 'memory-consent' }, [confirmed, ' These captions, written by me, convey the meaningful audible content of the part chosen to play (the whole recording or the excerpt); they are not checked by Rehere']),
       el('div', { className: 'actions' }, [save, abandon]),
       message,
       status,
@@ -358,6 +385,8 @@ export function mountStories(container, bridge) {
       view: choice ? { kind: choice.kind, version: choice.version, variantId: choice.variantId, eraRevision: choice.eraRevision } : null,
       ...(targetSelect ? { targetId: targetSelect.value } : {}),
       title: title.value,
+      // Only an excerpt adds a range; the whole recording sends exactly the earlier request.
+      ...(excerpt.checked ? { sourceRange: { startMs: rangeStart.value.trim() === '' ? 0 : parseTime(rangeStart.value), endMs: parseTime(rangeEnd.value) } } : {}),
       cues: readCues(),
       captionConfirmed: confirmed.checked === true,
     };
@@ -373,10 +402,44 @@ export function mountStories(container, bridge) {
     if (!unresolved) abandon.hidden = true;
   }
 
+  // The excerpt range as entered: no request is sent while it is unusable.
+  function rangeProblem(range) {
+    if (!range) return null;
+    if (!Number.isInteger(range.startMs) || range.startMs < 0) return 'Enter where the excerpt starts in the original recording as minutes:seconds, for example 0:04.5, or leave it blank to start at 0:00.';
+    if (rangeEnd.value.trim() === '') return 'Enter where the excerpt ends in the original recording.';
+    if (!Number.isInteger(range.endMs)) return 'Enter where the excerpt ends as minutes:seconds, for example 0:12.0.';
+    if (range.endMs <= range.startMs) return 'The excerpt must end after it starts.';
+    if (range.endMs > EXCERPT_LIMIT_MS) return `An excerpt must end by ${formatMs(EXCERPT_LIMIT_MS)} in the original recording.`;
+    return null;
+  }
+
+  function renderPart() {
+    rangeFields.hidden = !excerpt.checked;
+    const hint = bridge.durationHintMs?.(voiceSelect.value) ?? null;
+    lengthHint.textContent = Number.isFinite(hint) ? `This recording is about ${formatMs(hint)} long. Rehere checks the exact length when saving.` : '';
+  }
+
+  // A different recording, part or range is different audible content, so the
+  // caption confirmation must be given again.
+  const contentChanged = () => {
+    confirmed.checked = false;
+    renderPart();
+  };
+  voiceSelect.addEventListener('change', contentChanged);
+  whole.addEventListener('change', contentChanged);
+  excerpt.addEventListener('change', contentChanged);
+  rangeStart.addEventListener('input', contentChanged);
+  rangeEnd.addEventListener('input', contentChanged);
+
   function resetForm() {
     title.value = '';
     if (targetSelect) targetSelect.value = '';
     confirmed.checked = false;
+    whole.checked = true;
+    excerpt.checked = false;
+    rangeStart.value = '';
+    rangeEnd.value = '';
+    renderPart();
     cueRows.replaceChildren();
     addCueRow();
   }
@@ -447,7 +510,9 @@ export function mountStories(container, bridge) {
           ? 'Give the story a title.'
           : [...input.title].length > TITLE_LIMIT
             ? `Keep the title to ${TITLE_LIMIT} characters or fewer.`
-            : cuesProblem(input.cues, bridge.durationHintMs?.(input.voiceSourceId) ?? null) ?? (input.captionConfirmed ? null : 'Confirm that your captions convey what is heard.');
+            : rangeProblem(input.sourceRange) ??
+              cuesProblem(input.cues, bridge.durationHintMs?.(input.voiceSourceId) ?? null, input.sourceRange ? input.sourceRange.endMs - input.sourceRange.startMs : null) ??
+              (input.captionConfirmed ? null : 'Confirm that your captions convey what is heard.');
     if (problem) {
       message.textContent = problem;
       return;
@@ -464,6 +529,7 @@ export function mountStories(container, bridge) {
   addCue.addEventListener('click', () => addCueRow());
 
   renderVoices();
+  renderPart();
   addCueRow();
   load();
   return {

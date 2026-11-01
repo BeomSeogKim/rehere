@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { pcmWav } from './audio-derivative.mjs';
+import { MAX_PCM_BYTES, SAMPLE_RATE, pcmWav } from './audio-derivative.mjs';
 import { OBJECT_IDS, assertObjectsConfirmed, isTwoObject, objectMarker } from './arrangements.mjs';
 import { contributionAllows, dependenciesBlocked } from './collaboration.mjs';
 import { RequestError } from './drafts.mjs';
@@ -13,6 +13,13 @@ const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 export const STORY_LIMITS = Object.freeze({ title: 120, cues: 200, cueText: 2000, cueTotal: 20_000 });
 export const STORY_TARGET = Object.freeze({ id: 'selected-foreground', label: 'Selected foreground object' });
 const WAV_TYPE = 'audio/wav';
+// Excerpts: integer milliseconds of 16 kHz mono 16-bit PCM, 32 bytes each,
+// within the five-minute decoded limit; the WAV header is 44 bytes.
+const PCM_BYTES_PER_MS = 32;
+const WAV_HEADER_BYTES = 44;
+const MAX_RANGE_MS = 300_000;
+const SAMPLES_PER_MS = 16;
+const MAX_SAMPLES = 4_800_000; // 300 seconds at 16 kHz
 const UNREADABLE = 'The request could not be read.';
 
 // Fixed browser messages for the decoder's fixed failure codes.
@@ -34,6 +41,7 @@ const BLOCKED = {
   contribution: 'A recollection this arrangement depends on was withdrawn or is not permitted.',
   view: 'The arrangement this story belongs to is no longer available.',
   era: 'The time assertion for this arrangement changed after the story was saved.',
+  range: 'The selected part of the recording no longer matches its record.',
 };
 
 const fail = (status, message) => new RequestError(status, message);
@@ -76,16 +84,30 @@ function parseCues(cues) {
 
 const STORY_KEYS = ['requestId', 'voiceSourceId', 'view', 'title', 'cues', 'captionConfirmed'];
 
+// An excerpt of the original recording: integer milliseconds from its start.
+function validRange(range) {
+  return exactKeys(range, ['startMs', 'endMs']) && Number.isInteger(range.startMs) && Number.isInteger(range.endMs)
+    && range.startMs >= 0 && range.endMs > range.startMs && range.endMs <= MAX_RANGE_MS;
+}
+
 // A two-object scene also names the one object the story is about.
+// An optional sourceRange selects an excerpt; without it the whole first
+// track is used and the request (and its digest) is exactly as before.
 export function parseStoryRequest(body, twoObjects = false) {
-  if (!exactKeys(body, twoObjects ? [...STORY_KEYS, 'targetId'] : STORY_KEYS)) throw fail(400, UNREADABLE);
+  const keys = twoObjects ? [...STORY_KEYS, 'targetId'] : STORY_KEYS;
+  const hasRange = body !== null && typeof body === 'object' && Object.hasOwn(body, 'sourceRange');
+  if (!exactKeys(body, hasRange ? [...keys, 'sourceRange'] : keys)) throw fail(400, UNREADABLE);
+  if (hasRange && !validRange(body.sourceRange)) throw fail(400, 'The selected part of the recording could not be read.');
   const view = parseView(body.view);
   const cues = parseCues(body.cues);
   const valid = isId(body.requestId) && isId(body.voiceSourceId) && view && cues && filled(body.title, STORY_LIMITS.title)
     && (!twoObjects || OBJECT_IDS.includes(body.targetId));
   if (!valid) throw fail(400, UNREADABLE);
   if (body.captionConfirmed !== true) throw fail(400, 'Confirm that the captions convey what can be heard in the recording.');
-  return { requestId: body.requestId, voiceSourceId: body.voiceSourceId, view, title: body.title, cues, ...(twoObjects && { targetId: body.targetId }) };
+  return {
+    requestId: body.requestId, voiceSourceId: body.voiceSourceId, view, title: body.title, cues, ...(twoObjects && { targetId: body.targetId }),
+    ...(hasRange && { sourceRange: { startMs: body.sourceRange.startMs, endMs: body.sourceRange.endMs } }),
+  };
 }
 
 // The object a story is about: the owner's named object, or the one
@@ -156,7 +178,11 @@ export class StoryStore {
         target: request.targetId ?? STORY_TARGET.id,
         ...(request.targetId && { targetLabel: manifest.objects.find((item) => item.id === request.targetId).label }),
         photo: { sourceId: photo.id, sha256: photo.sha256 },
-        voice: { sourceId: voice.id, sha256: voice.sha256, provider: voice.provider || null },
+        voice: {
+          sourceId: voice.id, sha256: voice.sha256, provider: voice.provider || null,
+          // The excerpt's position in this exact original, bound by its checksum.
+          ...(request.sourceRange && { sourceRange: { ...request.sourceRange } }),
+        },
       },
       recording: { name: draft.voice.name, type: draft.voice.type, size: voice.size, sha256: voice.sha256 },
     };
@@ -168,6 +194,21 @@ export class StoryStore {
     if (story.status === 'withdrawn') return 'withdrawn';
     const r = this.reconstructions;
     const { context } = story;
+    // A saved excerpt must be exactly the recorded selection; it is never
+    // treated as the whole recording and nothing is decoded again.
+    // Either excerpt field marks an excerpt, and then both must be valid; a
+    // whole-recording story has neither.
+    const voiceFields = context.voice ?? {};
+    if (Object.hasOwn(voiceFields, 'sourceRange') || Object.hasOwn(voiceFields, 'sourceSampleCount')) {
+      const range = context.voice.sourceRange;
+      const length = validRange(range) ? range.endMs - range.startMs : null;
+      // The decoded original's sample count, recorded at publication, must
+      // still contain the selection: this catches an isolated corrupted or
+      // shifted range of the same length (not a coherent rewrite of the record).
+      const count = context.voice.sourceSampleCount;
+      const extentKnown = Number.isInteger(count) && count > 0 && count <= MAX_SAMPLES && length !== null && range.endMs * SAMPLES_PER_MS <= count;
+      if (length === null || !extentKnown || story.durationMs !== length || story.audio?.size !== WAV_HEADER_BYTES + length * PCM_BYTES_PER_MS) return 'range';
+    }
     if (manifest.status !== 'ready' || manifest.sourceSha256 !== context.photo.sha256) return 'photo';
     const draft = await r.drafts.get(manifest.draftId);
     const voice = Array.isArray(draft?.sources) ? draft.sources.find((item) => item.id === context.voice.sourceId) : null;
@@ -207,6 +248,7 @@ export class StoryStore {
       cues: available ? story.cues.map((cue) => ({ ...cue })) : [],
       durationMs: story.durationMs,
       audio: available ? { type: WAV_TYPE, size: story.audio.size } : null,
+      ...(available && context.voice.sourceRange && { sourceRange: { ...context.voice.sourceRange } }),
       error: null,
       createdAt: story.createdAt,
       withdrawnAt: story.withdrawnAt,
@@ -282,7 +324,7 @@ export class StoryStore {
       return { manifest, context };
     };
     try {
-      const wav = await this.#prepare(draftId, recording, request.cues, slot.controller.signal, stillAdmitted);
+      const wav = await this.#prepare(draftId, recording, request.cues, slot.controller.signal, stillAdmitted, request.sourceRange);
       await mkdir(path.dirname(staged), { recursive: true });
       await writeFile(staged, wav.bytes, { flag: 'wx' });
       return await r.serialize(async () => {
@@ -298,8 +340,12 @@ export class StoryStore {
           throw fail(...DECODE_MESSAGES.aborted);
         }
         const stories = storiesOf(manifest);
+        // An excerpt also keeps, privately, how many samples the whole decoded
+        // original had; it is added only now so the admission check compares
+        // exactly the context resolved before decoding.
+        const saved = request.sourceRange ? { ...context, voice: { ...context.voice, sourceSampleCount: wav.sourceSampleCount } } : context;
         const story = {
-          id: storyId, requestId, requestDigest, status: 'ready', title: request.title, cues: request.cues, context,
+          id: storyId, requestId, requestDigest, status: 'ready', title: request.title, cues: request.cues, context: saved,
           captionAuthor: { principalId: principal.id, displayName: principal.displayName }, captionConfirmed: true,
           durationMs: wav.durationMs, audio: { type: WAV_TYPE, size: wav.bytes.length, sha256: sha256(wav.bytes) },
           createdAt: new Date().toISOString(), withdrawnAt: null,
@@ -324,7 +370,7 @@ export class StoryStore {
   // whole first audio track and builds the WAV playback copy. The decoder is
   // started inside a final admission under the mutex and awaited outside it,
   // so a restriction saved while the original was read always prevents the start.
-  async #prepare(draftId, recording, cues, signal, stillAdmitted) {
+  async #prepare(draftId, recording, cues, signal, stillAdmitted, sourceRange = undefined) {
     const asset = await this.reconstructions.drafts.asset(draftId, recording.name);
     const bytes = asset && (await readFile(asset.file));
     if (!bytes || bytes.length !== recording.size || sha256(bytes) !== recording.sha256) {
@@ -345,6 +391,18 @@ export class StoryStore {
       throw fail(...(known ?? DECODE_MESSAGES['decode-failed']));
     }
     if (signal.aborted) throw fail(...DECODE_MESSAGES.aborted);
+    if (sourceRange) {
+      // The whole decoded track must be valid PCM in the fixed layout before
+      // any part of it is taken; then exactly [start, end) is kept.
+      const { pcm } = decoded;
+      const valid = Buffer.isBuffer(pcm) && pcm.length > 0 && pcm.length % 2 === 0 && pcm.length <= MAX_PCM_BYTES
+        && decoded.sampleRate === SAMPLE_RATE && decoded.channels === 1 && decoded.bitsPerSample === 16;
+      if (!valid) throw fail(...DECODE_MESSAGES['decode-failed']);
+      if (sourceRange.endMs * PCM_BYTES_PER_MS > pcm.length) throw fail(400, 'The selected part ends after the recording ends. Adjust the end time.');
+      const durationMs = sourceRange.endMs - sourceRange.startMs;
+      if (cues.at(-1).endMs > durationMs) throw fail(400, 'A caption ends after the selected part ends. Caption times start at the beginning of the selected part.');
+      return { bytes: pcmWav(pcm.subarray(sourceRange.startMs * PCM_BYTES_PER_MS, sourceRange.endMs * PCM_BYTES_PER_MS)), durationMs, sourceSampleCount: pcm.length / 2 };
+    }
     const { durationMs } = decoded;
     if (cues.at(-1).endMs > durationMs) throw fail(400, 'A caption ends after the recording ends. Adjust the caption times.');
     return { bytes: pcmWav(decoded.pcm), durationMs };
@@ -413,6 +471,7 @@ export class StoryStore {
       publicStory: {
         viewId: matches[0].id, target: storyTarget(story.context), title: story.title, providerLabel: story.context.voice.provider, captionAuthorLabel: story.captionAuthor.displayName,
         cues: story.cues.map((cue) => ({ ...cue })), durationMs: story.durationMs, audio: { type: WAV_TYPE, size: story.audio.size },
+        ...(story.context.voice.sourceRange && { sourceRange: { ...story.context.voice.sourceRange } }),
       },
     };
   }

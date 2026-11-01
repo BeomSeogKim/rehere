@@ -685,7 +685,9 @@ describe('stories and sharing in one scene', () => {
 
     // Save a story for the current saved version through the real composer.
     storyPanel.findAll((node) => node.tag === 'select')[1].value = 'version:1';
-    const [title, start, end] = storyPanel.findAll((node) => node.tag === 'input' && node.type === 'text');
+    // The title is the first text field; the caption times are in the caption row.
+    const [title] = storyPanel.findAll((node) => node.tag === 'input' && node.type === 'text');
+    const [start, end] = storyPanel.findAll((node) => node.className === 'story-cue-row')[0].findAll((node) => node.tag === 'input' && node.type === 'text');
     title.value = 'Morning bell';
     start.value = '0:00';
     end.value = '0:01.0';

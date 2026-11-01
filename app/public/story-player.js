@@ -41,6 +41,21 @@ export function formatMs(ms) {
   return `${minutes}:${String(seconds).padStart(2, '0')}.${tenths % 10}`;
 }
 
+// A position in an original recording: the usual tenths when exact, otherwise
+// exact milliseconds, so a chosen bound is never shown as a different position.
+export function formatPosition(ms) {
+  if (ms % 100 === 0) return formatMs(ms);
+  const minutes = Math.floor(ms / 60_000);
+  const rest = ms - minutes * 60_000;
+  return `${minutes}:${String(Math.floor(rest / 1000)).padStart(2, '0')}.${String(rest % 1000).padStart(3, '0')}`;
+}
+
+// The optional bounds of an excerpt story, or null for a whole recording.
+const excerptOf = (story) => {
+  const range = story.sourceRange;
+  return range && Number.isInteger(range.startMs) && Number.isInteger(range.endMs) && range.startMs >= 0 && range.endMs > range.startMs ? range : null;
+};
+
 function el(tag, { onclick, ...props } = {}, children = []) {
   const node = document.createElement(tag);
   Object.assign(node, props);
@@ -103,10 +118,14 @@ export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story'), 
     const marker = el('span', { className: 'story-cue-marker', textContent: '' });
     return el('li', {}, [marker, el('span', { textContent: `${formatMs(cue.startMs)}–${formatMs(cue.endMs)} ` }), el('span', { textContent: cue.text })]);
   });
+  const excerpt = excerptOf(story);
   const element = el('div', { className: 'story-player' }, [
     el('div', { className: 'actions space-camera' }, [play, pause, stop]),
     status,
     now,
+    ...(excerpt
+      ? [el('p', { className: 'hint', textContent: `Excerpt from the original recording: ${formatPosition(excerpt.startMs)}–${formatPosition(excerpt.endMs)}. Playback and caption times start at 0:00 of this excerpt.` })]
+      : []),
     el('p', { className: 'hint', textContent: story.cues.length ? 'Captions (written by a person, not checked by Rehere):' : 'No captions supplied.' }),
     el('ol', { className: 'story-cues' }, cueItems),
   ]);
