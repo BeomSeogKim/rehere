@@ -127,6 +127,9 @@ function viewDetails(view, labelOf) {
   return nodes;
 }
 
+const finite3 = (value) => Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
+const copyCamera = (camera) => (camera && finite3(camera.position) && finite3(camera.target) ? { position: [...camera.position], target: [...camera.target] } : null);
+
 // source: { manifest(signal) -> view|null, check(signal) -> boolean,
 // asset(viewId, name, signal) -> Response }. onState receives 'loading',
 // '3d', '2d', 'paused' or 'unavailable'; '2d' means the 3D scene was not shown.
@@ -144,6 +147,12 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   let timer = null;
   let state = 'loading';
   let disposed = false;
+  // A public visit only: where the person was, kept in memory while the page
+  // is hidden as opaque IDs and camera numbers, nothing else. A return still
+  // goes through the full fresh admission before any of it is used.
+  let resume = null;
+  // Reads that context from the screen on show; dropped with the screen.
+  let captureContext = null;
 
   const setState = (next) => {
     state = next;
@@ -153,6 +162,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   // Releases everything this screen holds: the 3D view, object URLs, pending
   // reads and the heartbeat.
   function clear() {
+    captureContext = null;
     clearTimeout(timer);
     timer = null;
     disposePlayers();
@@ -167,6 +177,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   }
 
   function unavailable() {
+    resume = null;
     generation += 1;
     clear();
     container.append(el('p', { className: 'form-message is-error', role: 'alert', textContent: UNAVAILABLE }), el('p', { className: 'hint', textContent: DEVICE_NOTE }));
@@ -201,7 +212,12 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   async function render(manifest, surface, textureUrl, mine) {
     const views = new Map(manifest.views.map((view) => [view.id, view]));
     const labelOf = (id) => views.get(id)?.label ?? 'another view';
-    let currentId = manifest.startViewId;
+    // Earlier context applies only to the same saved copy; each ID is used
+    // only while it still exists, otherwise the published start is used.
+    const visit = source.kind === 'visit' && typeof manifest.id === 'string' && manifest.id !== '';
+    const restore = visit && resume?.snapshotId === manifest.id ? resume : null;
+    const viewRestored = Boolean(restore) && views.has(restore.viewId);
+    let currentId = viewRestored ? restore.viewId : manifest.startViewId;
     const viewport = el('div', { className: 'space-viewport' });
     const details = el('div', { className: 'visit-details' });
     const message = el('p', { className: 'hint', role: 'status' });
@@ -211,7 +227,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     // evidence and only its stories. Picking stops any playing story.
     const objects = Array.isArray(manifest.objects) && manifest.objects.length === 2 ? manifest.objects : null;
     const nameOf = objectNames(objects);
-    let objectId = null;
+    let objectId = restore && objects?.some((entry) => entry.id === restore.objectId) ? restore.objectId : null;
     const objectButtons = el('div', { className: 'actions', role: 'group' });
     const evidence = el('div', { className: 'object-evidence' });
     const evidenceSummary = el('summary', { textContent: 'Photo evidence (choose an object)' });
@@ -494,6 +510,19 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       );
       renderObjects();
     }
+    // The screen's context, copied as plain IDs and numbers; while comparing
+    // with the photograph, the camera from before the comparison.
+    const live = () => ({
+      snapshotId: manifest.id,
+      viewId: currentId,
+      objectId: typeof objectId === 'string' ? objectId : null,
+      camera: copyCamera(comparing ? saved?.camera : viewer?.getCamera?.()),
+    });
+    // The screen is live: earlier context is used up, and this one is read on hide.
+    const goLive = () => {
+      resume = null;
+      if (visit) captureContext = live;
+    };
     container.replaceChildren(
       el('h1', { textContent: manifest.title }),
       // Identifies which saved copy this is; the copy does not change later. A
@@ -543,6 +572,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       message.textContent = 'The 3D view is not available in this browser. Showing the photo used for the scene instead; the arrangement between views is described in the text.';
       back.hidden = true;
       showView(currentId);
+      goLive();
       setState('2d');
       scheduleHeartbeat(mine);
       return;
@@ -553,12 +583,14 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     }
     viewer = created;
     explore.attach(viewer);
-    viewer.setCamera(manifest.camera);
+    // A camera returns only with its own restored view.
+    viewer.setCamera(viewRestored && copyCamera(restore.camera) ? copyCamera(restore.camera) : manifest.camera);
     back.addEventListener('click', () => viewer?.setCamera(manifest.camera));
     // Offered only with a working 3D view; the 2D fallback has none.
     compareButton.hidden = false;
     message.textContent = 'Switching views keeps the same camera so they can be compared.';
     showView(currentId);
+    goLive();
     setState('3d');
     scheduleHeartbeat(mine);
   }
@@ -601,6 +633,9 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   // Hidden pages stop at once; coming back starts again with fresh checks.
   function pause() {
     if (disposed || state === 'unavailable' || state === 'paused') return;
+    // Only a live screen updates the context; a hide while opening keeps the
+    // latest one, and clear() then drops the screen and its reader.
+    if (captureContext) resume = captureContext();
     generation += 1;
     clear();
     container.append(el('p', { className: 'hint', textContent: 'Paused while this page is hidden. Access is checked again when you return.' }));
@@ -625,6 +660,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     state: () => state,
     dispose() {
       disposed = true;
+      resume = null;
       generation += 1;
       clear();
       document.removeEventListener?.('visibilitychange', onVisibility);

@@ -406,3 +406,174 @@ describe('recorded stories for visitors', () => {
     v.view.dispose();
   });
 });
+
+describe('returning to a hidden visit', () => {
+  const OBJECTS = [
+    { id: 'object-1', label: 'Counter', box: [100, 100, 300, 300] },
+    { id: 'object-2', label: 'Flour stack', box: [320, 120, 500, 380] },
+  ];
+  const MOVED = { position: [1.25, -0.5, 2.75], target: [0.1, 0.2, -2.9] };
+  const twoObjects = (overrides = {}) => ({ ...manifest(), objects: OBJECTS, ...overrides });
+  const hide = () => {
+    globalThis.document.visibilityState = 'hidden';
+    docListeners.visibilitychange();
+  };
+  const show = () => {
+    globalThis.document.visibilityState = 'visible';
+    docListeners.visibilitychange();
+  };
+  const moveCamera = ({ position, target }) => {
+    globalThis.viewerCamera.camera.position.set(...position);
+    globalThis.viewerCamera.controls.target.set(...target);
+  };
+  const close = (actual, expected) => [...actual.position, ...actual.target].every((value, i) => Math.abs(value - [...expected.position, ...expected.target][i]) < 1e-9);
+  const pressed = (v, predicate) => v.find((node) => node.tag === 'button' && predicate(node))[0]?.attributes['aria-pressed'];
+  const viewPressed = (v, id) => pressed(v, (node) => node.viewId === id);
+  const objectPressed = (v, id) => pressed(v, (node) => node.objectId === id);
+  // A visit source whose manifest can be replaced or held per opening.
+  function visit(manifests) {
+    const queue = [...manifests];
+    const src = source({ manifest: () => (queue.length > 1 ? queue.shift() : queue[0])() });
+    src.kind = 'visit';
+    return src;
+  }
+  async function chooseAndMove(v) {
+    v.find((node) => node.tag === 'button' && node.viewId === ALT)[0].dispatch('click');
+    v.find((node) => node.tag === 'button' && node.objectId === 'object-2')[0].dispatch('click');
+    moveCamera(MOVED);
+  }
+
+  it('drops everything on hide, shows nothing until the fresh checks pass, then restores the same view, object and camera', async () => {
+    let answer;
+    const answers = [() => Promise.resolve(twoObjects()), () => new Promise((resolve) => (answer = resolve))];
+    const src = visit(answers);
+    const v = open(src);
+    await flush();
+    await chooseAndMove(v);
+    const urlsBefore = [...created];
+    hide();
+    assert.equal(v.states.at(-1), 'paused');
+    assert.ok(globalThis.viewerLog.includes('renderer.dispose'), 'the scene is released at once');
+    for (const url of urlsBefore) assert.ok(revoked.includes(url), 'its local copies are released');
+    assert.doesNotMatch(v.container.textContent, /Corner shop|Mina|counter/);
+    const calls = src.calls.length;
+    show();
+    await flush();
+    assert.equal(src.calls[calls], 'manifest', 'a fresh read starts');
+    assert.doesNotMatch(v.container.textContent, /Corner shop/, 'nothing is shown while it is being checked');
+    answer(twoObjects());
+    await flush();
+    assert.deepEqual(src.calls.slice(calls), ['manifest', `asset ${START} surface.json`, `asset ${START} texture.jpg`, 'check'], 'the full admission, unchanged');
+    assert.equal(v.states.at(-1), '3d');
+    assert.equal(viewPressed(v, ALT), 'true');
+    assert.equal(objectPressed(v, 'object-2'), 'true');
+    assert.ok(close(currentCamera(), MOVED), 'the same camera');
+    assert.equal(v.button('Explore in 3D').attributes['aria-pressed'], 'false', 'back in page-scroll mode');
+    assert.equal(v.button('Compare with the photograph').hidden, false, 'not comparing');
+    assert.equal(audios.filter((audio) => audio.calls.includes('play')).length, 0, 'no audio plays');
+    v.view.dispose();
+  });
+
+  it('uses the published start for a different saved copy, a missing view or a missing object, and a camera only with its own view', async () => {
+    const cases = [
+      { next: twoObjects({ id: '00000000-0000-4000-8000-000000000000' }), view: START, object: null, camera: CAMERA },
+      { next: twoObjects({ views: [manifest().views[0]] }), view: START, object: 'object-2', camera: CAMERA },
+      { next: twoObjects({ objects: [OBJECTS[0], { ...OBJECTS[1], id: 'object-3' }] }), view: ALT, object: null, camera: MOVED },
+    ];
+    for (const { next, view, object, camera } of cases) {
+      const v = open(visit([() => Promise.resolve(twoObjects()), () => Promise.resolve(next)]));
+      await flush();
+      await chooseAndMove(v);
+      hide();
+      show();
+      await flush();
+      assert.equal(v.states.at(-1), '3d');
+      assert.equal(viewPressed(v, view), 'true', `view ${view}`);
+      if (object) assert.equal(objectPressed(v, object), 'true');
+      else assert.equal(objectPressed(v, null), 'true', 'all objects');
+      assert.ok(close(currentCamera(), camera), 'camera');
+      v.view.dispose();
+    }
+  });
+
+  it('keeps the latest choice through repeated hides while reads are held, and a late older read changes nothing', async () => {
+    const held = [];
+    const v = open(visit([() => Promise.resolve(twoObjects()), () => new Promise((resolve) => held.push(resolve)), () => Promise.resolve(twoObjects())]));
+    await flush();
+    await chooseAndMove(v);
+    hide();
+    show();
+    await flush();
+    hide();
+    show();
+    await flush();
+    assert.equal(v.states.at(-1), '3d');
+    assert.equal(viewPressed(v, ALT), 'true');
+    assert.ok(close(currentCamera(), MOVED));
+    held[0](twoObjects({ id: '00000000-0000-4000-8000-000000000000' }));
+    await flush();
+    assert.equal(viewPressed(v, ALT), 'true', 'the late read is ignored');
+    v.view.dispose();
+  });
+
+  it('shows unavailable on a return that is no longer allowed, and keeps nothing for later', async () => {
+    let allowed = true;
+    const src = visit([() => Promise.resolve(twoObjects())]);
+    src.check = () => Promise.resolve(allowed);
+    const v = open(src);
+    await flush();
+    await chooseAndMove(v);
+    hide();
+    allowed = false;
+    show();
+    await flush();
+    assert.equal(v.states.at(-1), 'unavailable');
+    assert.doesNotMatch(v.container.textContent, /Corner shop|Mina/);
+    v.view.dispose();
+  });
+
+  it('returns from a comparison hidden mid-way at the camera from before it, with the comparison closed', async () => {
+    const v = open(visit([() => Promise.resolve(twoObjects())]));
+    await flush();
+    moveCamera(MOVED);
+    v.button('Compare with the photograph').dispatch('click');
+    assert.ok(!close(currentCamera(), MOVED), 'comparing uses the photo viewpoint');
+    hide();
+    show();
+    await flush();
+    assert.ok(close(currentCamera(), MOVED));
+    assert.equal(v.button('Compare with the photograph').hidden, false);
+    v.view.dispose();
+  });
+
+  it('restores nothing for an owner preview', async () => {
+    const src = source({ manifest: () => Promise.resolve(twoObjects()) });
+    src.kind = 'preview';
+    const v = open(src);
+    await flush();
+    await chooseAndMove(v);
+    hide();
+    show();
+    await flush();
+    assert.equal(viewPressed(v, START), 'true');
+    assert.ok(close(currentCamera(), CAMERA));
+    v.view.dispose();
+  });
+
+  it('keeps contributor photos collapsed and unfetched after a return to a view that has them', async () => {
+    const photos = { contributorPhotos: [{ asset: { viewId: ALT, name: 'evidence/1.jpg' }, viewIds: [ALT], providerLabel: 'Mina', label: 'The shop window', width: 600, height: 500 }] };
+    const src = visit([() => Promise.resolve(twoObjects(photos))]);
+    const v = open(src);
+    await flush();
+    await chooseAndMove(v);
+    hide();
+    show();
+    await flush();
+    assert.equal(viewPressed(v, ALT), 'true');
+    const section = v.find((node) => node.tag === 'details' && /Contributor photos/.test(node.textContent))[0];
+    assert.ok(section, 'listed for the restored view');
+    assert.notEqual(section.open, true, 'collapsed');
+    assert.ok(!src.calls.some((call) => call.includes('evidence')), 'not fetched');
+    v.view.dispose();
+  });
+});

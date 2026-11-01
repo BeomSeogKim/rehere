@@ -78,6 +78,9 @@ In a 3D visit or preview, compare the permitted photo copy with the selected
 reconstruction from the same original viewpoint, then return to your previous
 camera. Labels keep source pixels, chosen positions and inferred surfaces
 distinct; comparison stops story playback and never edits a saved arrangement.
+A visit hidden in another tab is cleared at once and re-authorized on return;
+it then reopens the same saved view, object and camera when that saved copy and
+those choices are unchanged, with audio stopped and photos collapsed.
 
 The saved-place screen puts the scene workspace first. Original photos,
 writing, recordings and source-use controls remain under **Original materials
