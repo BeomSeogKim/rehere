@@ -577,3 +577,151 @@ describe('returning to a hidden visit', () => {
     v.view.dispose();
   });
 });
+
+describe('saved arrangement differences for visitors', () => {
+  const GRID = 20;
+  const OBJECTS = [
+    { id: 'object-1', label: 'Counter', box: [0, 435, 226, 790] },
+    { id: 'object-2', label: 'Flour stack', box: [490, 450, 982, 781] },
+  ];
+  const surface = {
+    schema_version: 2,
+    width: GRID,
+    height: GRID,
+    depth: Array(GRID * GRID).fill(3),
+    regions: Array.from({ length: GRID * GRID }, (_, i) => {
+      const x = i % GRID;
+      const y = Math.floor(i / GRID);
+      return y >= 6 && y <= 13 ? (x >= 2 && x <= 6 ? 1 : x >= 13 && x <= 17 ? 2 : 0) : 0;
+    }),
+    objects: OBJECTS.map(({ id, label, box }) => ({ id, label, box_xyxy: box })),
+    assumptions: { near: 1, far: 4, horizontal_fov_degrees: 55, max_triangle_depth_span: 0.35 },
+    source: { image_size: [1000, 800] },
+  };
+  const RULE = { kind: 'left_of', leftId: 'object-1', rightId: 'object-2', frame: 'original-photo' };
+  const YAW = 0.30000000000000004;
+  const arrangement = (a, b, relationship = RULE) => ({
+    objects: [
+      { id: 'object-1', ...a },
+      { id: 'object-2', ...b },
+    ],
+    relationship,
+  });
+  const BASE = arrangement({ offset: [0.1, 0, 0.2], yaw: YAW }, { offset: [0.5, 0, 0], yaw: 0 });
+  const views = (...alternatives) => [
+    { ...manifest().views[0], label: 'Saved version 2', edit: BASE },
+    ...alternatives.map((edit, i) => ({ ...manifest().views[1], id: i === 0 ? ALT : `33333333-3333-4333-8333-33333333333${i}`, label: `Alternative arrangement ${i + 1}`, edit })),
+  ];
+  const mount = (list, extra = {}) => {
+    const data = { ...manifest(), objects: OBJECTS, views: list, ...extra };
+    const v = open(source({ manifest: () => Promise.resolve(data), asset: (viewId, name) => Promise.resolve(name === 'surface.json' ? ok(surface) : textureResponse()) }));
+    return v;
+  };
+  const choose = (v, label) => v.button(label).dispatch('click');
+  const items = (v) => v.find((node) => node.tag === 'li' && /^(A|B): |^Rule: /.test(node.textContent)).map((node) => node.textContent);
+  const NOTE = /These are differences between saved arrangements\. They do not establish when or whether the place changed/;
+
+  it('names the published start as baseline and shows an X-only change with the exact turn kept as unchanged', async () => {
+    const xOnly = arrangement({ offset: [0.35, 0, 0.2], yaw: YAW }, { offset: [0.5, 0, 0], yaw: 0 });
+    const v = mount(views(xOnly));
+    await flush();
+    assert.equal(v.states.at(-1), '3d');
+    assert.match(v.container.textContent, /“Saved version 2” is the published starting view\. Other views’ saved arrangements are compared with it\./);
+    assert.equal(items(v).length, 0, 'no difference list at the baseline itself');
+    globalThis.viewerCamera.camera.position.set(1, 2, 3);
+    choose(v, 'Alternative arrangement 1');
+    assert.deepEqual(currentCamera().position, [1, 2, 3], 'the camera is not changed');
+    const text = v.container.textContent;
+    assert.match(text, /Saved arrangement compared with “Saved version 2”, the published starting view\. Directions are as seen from the original photo, not from your current camera:/);
+    const details = v.find((node) => node.className === 'visit-details')[0].textContent;
+    const order = ['Alternative arrangement 1', 'Owner’s assertion: before the renovation', 'Based on: Shop records', 'Saved arrangement compared with', 'A: Counter: farther right', 'These are differences between saved arrangements', 'Photo: provided by', 'Arrangement: based on a recollection', 'In Mina’s own words', 'Rule: A: Counter stays left', 'Arrangement in this view:'];
+    const at = order.map((part) => details.indexOf(part));
+    assert.ok(at.every((index) => index >= 0), `all present: ${order.filter((_, i) => at[i] < 0)}`);
+    assert.deepEqual([...at].sort((a, b) => a - b), at, 'heading, time, differences, then photo and recollection prose, then the rule and numbers');
+    assert.deepEqual(items(v), [
+      'A: Counter: farther right; height, depth, turn unchanged.',
+      'B: Flour stack: position and turn unchanged.',
+      'Rule: unchanged.',
+    ]);
+    assert.doesNotMatch(details, /\bmoved\b/, 'no claim of historical movement');
+    assert.match(text, NOTE);
+    assert.match(text, /Arrangement in this view: A: Counter left\/right 0\.35, down\/up 0\.00, away\/toward 0\.20, turn 17°/, 'full numeric detail stays');
+    assert.match(text, /Owner’s assertion: before the renovation/, 'era kept');
+    assert.match(text, /Arrangement: based on a recollection by Mina, selected by the owner/, 'source kept');
+    assert.match(text, /In Mina’s own words:The counter <b>faced<\/b> the window\./, 'recollection kept as text');
+    assert.equal(v.find((node) => node.tag === 'b').length, 0, 'no raw HTML');
+    choose(v, 'Saved version 2');
+    assert.equal(items(v).length, 0);
+    assert.match(v.container.textContent, /Time unknown/);
+    v.view.dispose();
+  });
+
+  it('compares every axis and the turn by id with directions, regardless of stored order or the previously visited view', async () => {
+    const all = { objects: [{ id: 'object-2', offset: [0.4, 0.1, -0.5], yaw: 1 }, { id: 'object-1', offset: [0.1, -0.2, 0.3], yaw: 0 }], relationship: { ...RULE } };
+    const tiny = arrangement({ offset: [0.1 + 1e-9, 0, 0.2], yaw: YAW + 1e-12 }, { offset: [0.5, 1e-7, -1e-6], yaw: 0 });
+    const v = mount(views(all, tiny));
+    await flush();
+    choose(v, 'Alternative arrangement 2');
+    choose(v, 'Alternative arrangement 1');
+    assert.deepEqual(items(v), [
+      'A: Counter: lower, nearer, different turn; left-right position unchanged.',
+      'B: Flour stack: farther left, higher, farther back, different turn.',
+      'Rule: unchanged.',
+    ], 'baseline is the start, not the view visited just before');
+    choose(v, 'Alternative arrangement 2');
+    assert.deepEqual(items(v), [
+      'A: Counter: farther right, different turn; height, depth unchanged.',
+      'B: Flour stack: higher, farther back; left-right position, turn unchanged.',
+      'Rule: unchanged.',
+    ], 'tiny real changes are not hidden by display rounding');
+    assert.match(v.container.textContent, /A: Counter left\/right 0\.10, down\/up 0\.00, away\/toward 0\.20, turn 17°; B: Flour stack left\/right 0\.50, down\/up 0\.00, away\/toward -0\.00/, 'the rounded detail looks the same');
+    v.view.dispose();
+  });
+
+  it('compares the rule by all its fields, with no rule versus a rule as a change', async () => {
+    const same = { objects: BASE.objects, relationship: { frame: 'original-photo', rightId: 'object-2', leftId: 'object-1', kind: 'left_of' } };
+    const flipped = { objects: BASE.objects, relationship: { ...RULE, leftId: 'object-2', rightId: 'object-1' } };
+    const frame = { objects: BASE.objects, relationship: { ...RULE, frame: 'other' } };
+    const none = { objects: BASE.objects, relationship: null };
+    const v = mount(views(same, flipped, frame, none));
+    await flush();
+    const ruleLine = (label) => (choose(v, label), items(v).at(-1));
+    assert.equal(ruleLine('Alternative arrangement 1'), 'Rule: unchanged.');
+    assert.deepEqual(items(v).slice(0, 2), ['A: Counter: position and turn unchanged.', 'B: Flour stack: position and turn unchanged.']);
+    assert.equal(ruleLine('Alternative arrangement 2'), 'Rule: different (this view: B: Flour stack stays left of A: Counter from the original photo; “Saved version 2”: A: Counter stays left of B: Flour stack from the original photo).');
+    assert.match(ruleLine('Alternative arrangement 3'), /^Rule: different/, 'a field the text does not show still counts');
+    assert.equal(ruleLine('Alternative arrangement 4'), 'Rule: different (this view: No rule; “Saved version 2”: A: Counter stays left of B: Flour stack from the original photo).');
+    v.view.dispose();
+  });
+
+  it('says unknown, not unchanged, when a counterpart placement or rule is missing', async () => {
+    globalThis.viewerFail = 'webgl';
+    const missing = { objects: [{ id: 'object-2', offset: [0.5, 0, 0], yaw: 0 }] };
+    const broken = arrangement({ offset: [0.1, 0, 0.2], yaw: null }, { offset: [0.5, 0, 0], yaw: 0 });
+    const v = mount(views(missing, broken));
+    await flush();
+    assert.equal(v.states.at(-1), '2d');
+    choose(v, 'Alternative arrangement 1');
+    assert.deepEqual(items(v), [
+      'A: Counter: unknown; its saved placement is not available in both views.',
+      'B: Flour stack: position and turn unchanged.',
+      'Rule: unknown; it is not available in both views.',
+    ]);
+    choose(v, 'Alternative arrangement 2');
+    assert.equal(items(v)[0], 'A: Counter: unknown; its saved placement is not available in both views.');
+    v.view.dispose();
+  });
+
+  it('shows no comparison for a single view or a legacy one-object visit', async () => {
+    const single = mount(views());
+    await flush();
+    assert.doesNotMatch(single.container.textContent, /published starting view|Saved arrangement compared/);
+    assert.match(single.container.textContent, /Arrangement in this view:/);
+    single.view.dispose();
+    const legacy = open(source());
+    await flush();
+    legacy.button('Mina’s recollection').dispatch('click');
+    assert.doesNotMatch(legacy.container.textContent, /published starting view|Saved arrangement compared|differences between saved arrangements/);
+    legacy.view.dispose();
+  });
+});

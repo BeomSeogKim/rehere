@@ -62,6 +62,13 @@ page over the scene. Switching saved arrangements keeps the camera; selecting
 an object shows its evidence and related stories without moving the camera.
 Opening evidence or resizing the layout preserves the view and player state.
 
+For two-object snapshots, the details compare each selected arrangement with
+the published starting view, named explicitly. They identify changed positions,
+turns and rules and what stays the same before the numeric detail. Directions
+use the original photo's scene axes, even after exploring with the camera.
+Only shared saved values are compared; differences do not establish when or
+whether the place changed or which account is more accurate.
+
 Choose **Compare with the photograph** to switch between **Photo** and
 **This reconstruction** from the photo's original viewpoint. Both fit the
 same image shape without stretching or cropping. The photo is the permitted,

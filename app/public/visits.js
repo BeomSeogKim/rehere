@@ -87,12 +87,15 @@ function eraText(era, labelOf) {
 // Shown beside the scene for every view, so it stays in sight while scrolling.
 const SCENE_NOTE = 'Shape and depth: a model estimate from this one photo, not a measurement. Areas the photo did not show are left empty.';
 
-function viewDetails(view, labelOf) {
+// `summary` (the saved arrangement differences) follows the time assertion,
+// before the photo, provider and recollection text.
+function viewDetails(view, labelOf, summary = []) {
   const nodes = [el('h3', { textContent: view.label })];
   nodes.push(el('p', { textContent: eraText(view.era, labelOf) }));
   if (view.era && view.era.kind !== 'unknown' && view.era.statement) {
     nodes.push(el('p', { className: 'hint', textContent: `Based on: ${view.era.statement}${view.era.assertedByLabel ? ` (asserted by ${view.era.assertedByLabel})` : ''}` }));
   }
+  nodes.push(...summary);
   const photo = view.evidence?.photo;
   if (photo) {
     nodes.push(
@@ -128,6 +131,63 @@ function viewDetails(view, labelOf) {
 }
 
 const finite3 = (value) => Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
+
+// Saved two-object arrangements compared with the published start view only:
+// per object by stable id, each stored coordinate and the turn compared
+// exactly (no rounding), and the rule compared field by field. Anything that
+// cannot be compared is said to be unknown, never unchanged.
+const AXES = [
+  ['left-right position', 'farther right', 'farther left'],
+  ['height', 'higher', 'lower'],
+  ['depth', 'nearer', 'farther back'],
+];
+const DIFFERENCE_NOTE = 'These are differences between saved arrangements. They do not establish when or whether the place changed, and do not make either view earlier or more accurate.';
+const placement = (edit, id) => {
+  const object = Array.isArray(edit?.objects) ? edit.objects.find((entry) => entry?.id === id) : null;
+  return object && finite3(object.offset) && Number.isFinite(object.yaw) ? object : null;
+};
+const sameRule = (a, b) => {
+  if (!a || !b) return a === b;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every((key) => a[key] === b[key]);
+};
+function arrangementDifference(view, start, views, objects, nameOf) {
+  if (!objects || !Array.isArray(view.edit?.objects)) return [];
+  const base = `“${start.label}”`;
+  if (view.id === start.id) {
+    const others = views.some((other) => other.id !== start.id && Array.isArray(other.edit?.objects));
+    if (!others) return [];
+    return [el('p', { className: 'hint', textContent: `${base} is the published starting view. Other views’ saved arrangements are compared with it. ${DIFFERENCE_NOTE}` })];
+  }
+  const lines = objects.map((object) => {
+    const now = placement(view.edit, object.id);
+    const then = placement(start.edit, object.id);
+    if (!now || !then) return `${nameOf(object.id)}: unknown; its saved placement is not available in both views.`;
+    const changed = [];
+    const same = [];
+    AXES.forEach(([name, more, less], i) => {
+      if (now.offset[i] === then.offset[i]) same.push(name);
+      else changed.push(now.offset[i] > then.offset[i] ? more : less);
+    });
+    if (now.yaw === then.yaw) same.push('turn');
+    else changed.push('different turn');
+    if (!changed.length) return `${nameOf(object.id)}: position and turn unchanged.`;
+    return `${nameOf(object.id)}: ${changed.join(', ')}${same.length ? `; ${same.join(', ')} unchanged` : ''}.`;
+  });
+  const now = view.edit.relationship;
+  const then = start.edit?.relationship;
+  const rule =
+    now === undefined || then === undefined
+      ? 'Rule: unknown; it is not available in both views.'
+      : sameRule(now, then)
+        ? 'Rule: unchanged.'
+        : `Rule: different (this view: ${ruleText(now, nameOf)}; ${base}: ${ruleText(then, nameOf)}).`;
+  return [
+    el('p', { textContent: `Saved arrangement compared with ${base}, the published starting view. Directions are as seen from the original photo, not from your current camera:` }),
+    el('ul', { className: 'collab-list' }, [...lines, rule].map((line) => el('li', { textContent: line }))),
+    el('p', { className: 'hint', textContent: DIFFERENCE_NOTE }),
+  ];
+}
 const copyCamera = (camera) => (camera && finite3(camera.position) && finite3(camera.target) ? { position: [...camera.position], target: [...camera.target] } : null);
 
 // source: { manifest(signal) -> view|null, check(signal) -> boolean,
@@ -358,7 +418,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       const view = views.get(id);
       if (view.edit?.objects) viewer?.applyArrangement(view.edit);
       else viewer?.applyEdit(view.edit);
-      details.replaceChildren(...viewDetails(view, labelOf));
+      details.replaceChildren(...viewDetails(view, labelOf, arrangementDifference(view, views.get(manifest.startViewId), manifest.views, objects, nameOf)));
       const provider = view.evidence?.photo?.providerLabel;
       credit.textContent = provider ? `Photo provided by ${provider}` : '';
       if (objects && view.edit?.objects) {
