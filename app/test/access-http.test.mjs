@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -481,12 +481,17 @@ describe('owner setup command', () => {
       if (target !== path.join(appDir, 'data')) await assert.rejects(stat(target), target);
     }
     // The ignored data folder is the one place inside the repository a card may go.
+    // The CLI never creates a card's parent folder, so a fresh checkout's
+    // absent data folder is made here first; an existing one is left as is,
+    // and a folder this test made is removed again only if it is still empty.
+    const created = await mkdir(path.join(appDir, 'data'), { recursive: true, mode: 0o700 });
     const inData = path.join(appDir, 'data', `test-card-${randomUUID()}.json`);
     try {
       assert.equal(await runCli(['init', '--credentials-file', inData, '--name', 'x'], { dataDir: await tempDir(), ...quiet() }), 0);
       assert.equal((await stat(inData)).mode & 0o777, 0o600);
     } finally {
       await rm(inData, { force: true });
+      if (created) await rmdir(created).catch(() => {});
     }
     // A symlinked parent that resolves into a served folder is refused before anything is written.
     const linkDir = await tempDir();
