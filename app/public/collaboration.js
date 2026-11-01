@@ -1607,7 +1607,10 @@ export function mountInvitations(container, { draftId }) {
 // The owner's panel inside a ready scene. bridge: { jobUrl, editor(),
 // showTransform(transform|null) -> boolean (true only when the 3D view drew
 // it), setLocked(boolean), saved(edit), unconfirmed(), conflict(), blocked(),
-// targets?, onChanged? }. onChanged() is called after a fresh read finds the
+// targets?, onChanged?, surfaceProblem? }. surfaceProblem(candidate) -> null |
+// text, only on two-object scenes, checks the photographed surfaces of a
+// candidate before it is adopted or kept as an alternative. onChanged() is
+// called after a fresh read finds the
 // recollections or alternatives changed. targets, only on two-object scenes: { selected() -> id | null,
 // nameOf(id), describe(arrangement) }; a candidate then moves the selected
 // object and carries its targetId, and editor() is that object's saved state.
@@ -1994,6 +1997,12 @@ export function mountCollaboration(container, bridge) {
       if (voice && geometry() && voiceProblemText()) return;
       if (reason.value.length > REASON_LIMIT) {
         message.textContent = `Keep the note to ${REASON_LIMIT} characters or fewer.`;
+        return;
+      }
+      // A hold sends nothing and keeps the candidate, its preview and the form.
+      const held = geometry() ? bridge.surfaceProblem?.(input.transform) ?? null : null;
+      if (held) {
+        message.textContent = `${held} The saved scene is still version ${formVersion}; your candidate and decision are kept.`;
         return;
       }
       const body = reviewAttempt.prepare(entry.id, input, () => ({ requestId: crypto.randomUUID(), ...input }));

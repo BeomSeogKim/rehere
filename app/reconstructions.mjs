@@ -411,17 +411,39 @@ function modelContext(manifest, targetId) {
   };
 }
 
+// Shown when the saved surface bytes no longer match the scene's record, so
+// the photographed surfaces cannot be checked against a new arrangement.
+const VISIBLE_SURFACE_UNVERIFIED = 'The photographed surfaces of this scene could not be verified. Nothing was changed.';
+
+// Loaded on first use: single-object scenes never need Three.js on the server.
+let visibleGate = null;
+const loadVisibleGate = () => {
+  if (!visibleGate) {
+    visibleGate = Promise.all([import('./public/visible-surfaces.js'), import('three'), import('three-mesh-bvh')])
+      .then(([helper, THREE, { MeshBVH }]) => ({ ...helper, THREE, MeshBVH }));
+    visibleGate.catch(() => { visibleGate = null; });
+  }
+  return visibleGate;
+};
+
 const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const JPEG = [0xff, 0xd8, 0xff];
 const startsWith = (bytes, signature) => signature.every((value, index) => bytes[index] === value);
 
 export class ReconstructionStore {
-  constructor({ dataDir, drafts, runner, timeoutMs = RECONSTRUCTION_TIMEOUT_MS, proposalModel = null, prepareImage = pythonModelImage() }) {
+  constructor({
+    dataDir, drafts, runner, timeoutMs = RECONSTRUCTION_TIMEOUT_MS, proposalModel = null, prepareImage = pythonModelImage(), visibleSurfaceLimits,
+  }) {
     this.drafts = drafts;
     this.runner = runner;
     this.timeoutMs = timeoutMs;
     this.proposalModel = proposalModel;
     this.prepareImage = prepareImage;
+    // Only fault and budget tests pass limits; the shared gate's defaults apply otherwise.
+    this.visibleSurfaceLimits = visibleSurfaceLimits;
+    // The one last prepared surface: { key, prepared }. Its bytes are still
+    // read and hashed on every check.
+    this.visibleCache = null;
     // The one policy instance every route and the share store read through.
     this.sourcePolicies = new SourcePolicies({ dataDir, drafts });
     this.activeProposal = null;
@@ -920,10 +942,69 @@ export class ReconstructionStore {
   // One manifest write holds the new transform, its request receipt and every
   // proposal status change, so no partial apply can be observed or persisted.
   // Every receipt names the contributions its transform depends on.
-  saveVersion(manifest, edit, receipt, proposals = manifest.proposals ?? [], extra = {}) {
+  // Every new main version passes the visible-surface gate before anything is written.
+  async saveVersion(manifest, edit, receipt, proposals = manifest.proposals ?? [], extra = {}) {
+    await this.assertVisibleArrangement(manifest, edit);
     const changes = { ...extra, edit, edits: [...manifest.edits, receipt] };
     if (manifest.proposals || proposals.length > 0) changes.proposals = staleProposals(proposals, edit.version, new Date().toISOString());
     return this.update(manifest, changes);
+  }
+
+  // Callers hold the mutex. Refuses with a fixed 409 unless the two named
+  // objects' photographed surfaces are clear of each other in `arrangement`.
+  // Single-object scenes have nothing to compare. The surface is read from the
+  // job and must match its recorded size and checksum on every call.
+  async assertVisibleArrangement(manifest, arrangement) {
+    if (!isTwoObject(manifest)) return;
+    let result;
+    try {
+      const { checkVisibleArrangement, visibleSurfaceProblem } = await loadVisibleGate();
+      const prepared = await this.#visibleGeometry(manifest);
+      if (!prepared) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+      result = visibleSurfaceProblem(checkVisibleArrangement(prepared, arrangement, this.visibleSurfaceLimits));
+    } catch (error) {
+      if (error instanceof RequestError) throw error;
+      console.error(`scene ${manifest.id} visible-surface check failed: ${error?.name ?? 'error'}`);
+      throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+    }
+    if (result) throw new RequestError(409, result);
+  }
+
+  // The prepared surface geometry for the scene's verified surface.json, or
+  // null when the file is missing, changed, oversized or not the scene's own.
+  async #visibleGeometry(manifest) {
+    const entry = manifest.derivedAssets?.find((item) => item.name === 'surface.json');
+    if (!entry || !Number.isInteger(entry.size) || entry.size <= 0 || entry.size > OUTPUTS['surface.json'].maxBytes) return null;
+    const assets = path.join(this.jobDir(manifest.draftId, manifest.id), 'assets');
+    // Every folder from the data root to the assets folder must be real, and
+    // the file's own size is checked before any bytes are allocated.
+    if (!(await safeJobDirectory(assets, this.rootDir))) return null;
+    const file = path.join(assets, 'surface.json');
+    let bytes;
+    try {
+      const info = await lstat(file);
+      if (!info.isFile() || info.size !== entry.size) return null;
+      bytes = await readFile(file);
+    } catch {
+      return null;
+    }
+    if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) return null;
+    const key = `${manifest.draftId}/${manifest.id}/${entry.sha256}`;
+    let prepared = this.visibleCache?.key === key ? this.visibleCache.prepared : null;
+    if (!prepared) {
+      const { THREE, MeshBVH, prepareVisibleGeometry } = await loadVisibleGate();
+      let surface;
+      try {
+        surface = JSON.parse(bytes.toString('utf8'));
+      } catch {
+        return null;
+      }
+      prepared = prepareVisibleGeometry(THREE, MeshBVH, surface);
+      this.visibleCache = { key, prepared };
+    }
+    // The checked meshes must turn about the same pivots the scene records.
+    const parts = prepared.parts?.map(({ id, pivot }) => ({ id, pivot: [...pivot] }));
+    return sameValues(parts, objectPivots(manifest)) ? prepared : null;
   }
 
   async editableScene(draftId, jobId) {
@@ -1026,7 +1107,7 @@ export class ReconstructionStore {
     const proposals = manifest.proposals ?? [];
     const current = proposals.find((item) => item.id === proposalId);
     if (!current) throw new RequestError(404, 'This proposal could not be found.');
-    const changes = change(current, manifest);
+    const changes = await change(current, manifest);
     if (!changes) return current;
     const next = { ...current, ...changes, updatedAt: new Date().toISOString() };
     await this.update(manifest, { proposals: proposals.map((item) => (item.id === proposalId ? next : item)) });
@@ -1092,7 +1173,7 @@ export class ReconstructionStore {
       });
       if (!dispatched) return;
       const outcome = await dispatched.call;
-      await this.serialize(async () => { const allowed = await modelAllowed(); return this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
+      await this.serialize(async () => { const allowed = await modelAllowed(); return this.changeProposal(draftId, jobId, proposal.id, async (current, manifest) => {
         const record = { model: outcome?.model ?? null, usage: outcome?.usage ?? null, responseId: outcome?.responseId ?? null };
         // A canceled or stale proposal keeps its status; only what was spent is recorded.
         if (current.status !== 'processing') return record;
@@ -1118,9 +1199,26 @@ export class ReconstructionStore {
         const { result } = checked;
         if (result.action === 'clarify') return { ...record, status: 'clarify', result, question: result.question };
         // The candidate is merged into the whole arrangement and must keep its rule.
-        if (twoObjects && !checkRelationship(withTarget(arrangementOf(manifest.edit), current.targetId, result.transform), objectPivots(manifest)).ok) {
-          console.error(`proposal ${current.id} plan rejected: relationship`);
-          return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.relationship };
+        if (twoObjects) {
+          const arrangement = withTarget(arrangementOf(manifest.edit), current.targetId, result.transform);
+          if (!checkRelationship(arrangement, objectPivots(manifest)).ok) {
+            console.error(`proposal ${current.id} plan rejected: relationship`);
+            return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.relationship };
+          }
+          // A candidate whose photographed surfaces overlap is never offered.
+          let held = null;
+          try {
+            await this.assertVisibleArrangement(manifest, arrangement);
+          } catch (error) {
+            held = error.message;
+          }
+          // close() aborts outside the mutex, so a shutdown that began while
+          // the surfaces were read wins over both a ready and a held result.
+          if (signal.aborted || this.closed) return { ...record, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
+          if (held) {
+            console.error(`proposal ${current.id} plan rejected: visible surfaces`);
+            return { ...record, status: 'failed', error: held };
+          }
         }
         return { ...record, status: 'ready', result };
       }); });

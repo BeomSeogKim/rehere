@@ -97,7 +97,8 @@ unfinished scene keeps its own status rather than opening a substitute.
 
 ## Getting started
 
-Requires Node.js 26 or later. Three.js is pinned for the spatial viewer.
+Requires Node.js 26 or later. Three.js and three-mesh-bvh are pinned for the
+spatial viewer and named visible-surface checks.
 Set up the local workspace owner and retain its private access card using
 [the access guide](ACCESS.md) before signing in. No web visitor can create or
 claim the owner account.
@@ -251,8 +252,11 @@ Foreground controls create a preview. **Apply and save** checks the saved
 version and persists an offset and rotation before reporting success. An old
 base version is refused; saving the same request again does not create another
 version. The source surface and background remain unchanged. This is manual
-editing of inferred visible surfaces; no historical layout or collision check
-is claimed.
+editing of inferred visible surfaces; no historical layout is claimed.
+Two-object arrangements additionally check intersections between the two
+named visible surfaces before saving. See [the two-object guide](OBJECTS.md)
+for contact handling, bounded checks and the geometry that remains unknown.
+One-foreground scenes do not have that intersection gate.
 
 | Endpoint | Purpose |
 |---|---|
@@ -305,7 +309,9 @@ Review the target point and direction arrow before confirming the relation.
 The blue direction line stays level with the object's centre; a separate grey
 line connects it to the inferred target height. Only the upright-axis turn is
 proposed.
-Collision and fixed-relation validation are not implemented.
+Two-object plans also keep the explicit left/right rule and pass the named
+visible-surface gate before being offered and applied. These checks do not
+recover hidden geometry or establish physical clearance.
 
 Preview changes only the display. Apply saves the approved transform, proposal
 state and version receipt together. A changed base version requires a new
@@ -345,7 +351,9 @@ response storage and is not a zero-retention guarantee. Credit-program terms
 and account privacy controls must be checked before using nonpublic material.
 
 Three.js uses the MIT license; its notice is supplied with the package and
-served at `/vendor/THREE-LICENSE`. The project license remains undecided.
+served at `/vendor/THREE-LICENSE`. The MIT notice for three-mesh-bvh is served
+privately at `/vendor/THREE-MESH-BVH-LICENSE`. The project license remains
+undecided.
 
 ## Upload limits
 

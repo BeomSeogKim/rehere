@@ -10,6 +10,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "three": "0.187.0"
+    "three": "0.187.0",
+    "three-mesh-bvh": "0.9.17"
   }
 }

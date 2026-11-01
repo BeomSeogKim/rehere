@@ -297,6 +297,7 @@ describe('the visitor listener', () => {
         `${scene.scene}/edit`, `${scene.scene}/shares`, `${scene.scene}/shares/previews`, `${scene.scene}/collaboration`, `${scene.scene}/contributions`, `${scene.scene}/proposals`,
         `${scene.scene}/assets/texture.jpg`, '/api/intakes', `/api/drafts/${scene.draft.id}/sources/${scene.sourceId}/policy`,
         '/app.js', '/space.js', '/collaboration.js', '/access-ui.js', '/shares.js', '/intake.js', '/index.html', '/data/access.json', '/server.mjs',
+        '/visible-surfaces.js', '/vendor/three-mesh-bvh.js', '/vendor/THREE-MESH-BVH-LICENSE',
         '/../app.js', '/%2e%2e/app.js', '/%2F..%2Fapp.js', '//api/drafts', '/api/visit/../drafts', '/visits.js/../app.js', `http://127.0.0.1:${privatePort}/api/drafts`,
       ];
       const forged = { cookie: app.cookie, origin: app.base, 'x-forwarded-host': `127.0.0.1:${privatePort}`, 'x-forwarded-proto': 'http', forwarded: `host=127.0.0.1:${privatePort}`, ...bearer(token) };

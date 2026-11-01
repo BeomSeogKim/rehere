@@ -4,7 +4,7 @@ A scene can be built from one photograph with exactly two named objects
 instead of one selected foreground. Each object can then be moved and turned
 on its own, and the owner can declare one explicit left/right relationship
 between them. This is manual arrangement of model-inferred visible surfaces
-from a single viewpoint, not a scene graph, collision check or recovered
+from a single viewpoint, not a scene graph or recovered
 historical layout. Scenes built with one foreground box are unchanged.
 
 ## Build and confirm
@@ -46,6 +46,22 @@ breaks the current rule is refused and the last saved version stays intact.
 Adding, changing or removing the rule is its own explicit, confirmed save.
 Restoring an earlier version whose rule differs needs a separate confirmation.
 
+Before a new arrangement is saved, the editor and server check whether the
+two named photographed surfaces overlap. This uses the actual drawn triangles,
+including their holes and depth discontinuities, rather than their boxes or
+centres. Positive-area coplanar overlap and interior surface penetration hold
+the change; boundary-only contact is allowed. An unfinished or unreadable
+check also holds the change. Numerically uncertain contact, including contact
+on an internal triangle seam, is held rather than treated as clearance. The
+saved version stays intact and the preview can be adjusted.
+
+The same gate covers manual edits, rule saves, model proposals, recollection
+adoption, alternatives and restoration. Existing historical arrangements are
+kept as recorded; restoring one is a new checked change. This tests only the
+two named visible surfaces. Background intersections, hidden backs, solid
+volumes, a movement's path and physical room boundaries are not checked. The
+relative depth is an estimate, so a clear result is not physical clearance.
+
 ## Planning, recollections and stories
 
 A memory proposal names one confirmed object. The planner sees both objects
@@ -54,14 +70,14 @@ server refuses a plan for any other object. The planner is instructed to ask a
 clarifying question when the memory names the other object, is ambiguous, or
 asks to face the other object. A facing direction must point at background in
 the photo, not at either object or an unassigned pixel. The server merges the
-plan into the whole arrangement and checks the rule before offering it and
+plan into the whole arrangement and checks the rule and named surfaces before offering it and
 again before applying it. Changing the selected object never retargets an
 existing plan. Any new version makes older plans stale.
 
 Adopting a recollection or keeping it as an alternative also names the object
 it positions. The server places that transform into the current whole
 arrangement and keeps the rule; a contribution cannot clear the rule. If the
-rule blocks adoption, the recollection remains as submitted.
+rule or surface check blocks adoption, the recollection remains as submitted.
 
 A story on a two-object scene names its object explicitly, and the story list
 and evidence show which one. Stories are never moved to the other object or

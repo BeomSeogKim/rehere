@@ -51,6 +51,8 @@ export class OrbitControls {
 const SHIMS = {
   '/vendor/three.module.js': `data:text/javascript,${encodeURIComponent(threeShim)}`,
   '/vendor/OrbitControls.js': `data:text/javascript,${encodeURIComponent(controlsShim)}`,
+  // The actual library; the browser route serves its bundled ESM build.
+  '/vendor/three-mesh-bvh.js': import.meta.resolve('three-mesh-bvh'),
 };
 
 export function installViewerShim() {

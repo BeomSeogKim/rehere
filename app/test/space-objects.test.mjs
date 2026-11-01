@@ -51,7 +51,27 @@ function job(overrides = {}) {
     ...overrides,
   };
 }
-const surface = { schema_version: 2, width: 4, height: 3, depth: [], regions: [], objects: [], source: { image_size: [1000, 800] }, assumptions: { horizontal_fov_degrees: 55, max_triangle_depth_span: 0.35 } };
+// A surface the real two-object builder and the photographed-surface check
+// accept: region 1 (object A) on columns 2-6 and region 2 (object B) on
+// columns 13-17 of rows 6-13, all at depth 3, so the arrangements these
+// tests save keep the two surfaces apart.
+const GRID = 20;
+const surface = {
+  schema_version: 2,
+  width: GRID,
+  height: GRID,
+  depth: Array(GRID * GRID).fill(3),
+  regions: Array.from({ length: GRID * GRID }, (_, i) => {
+    const [x, y] = [i % GRID, Math.floor(i / GRID)];
+    return y >= 6 && y <= 13 ? (x >= 2 && x <= 6 ? 1 : x >= 13 && x <= 17 ? 2 : 0) : 0;
+  }),
+  objects: [
+    { id: 'object-1', label: 'Counter', box_xyxy: [0, 435, 226, 790] },
+    { id: 'object-2', label: 'Flour stack', box_xyxy: [490, 450, 982, 781] },
+  ],
+  source: { image_size: [1000, 800] },
+  assumptions: { horizontal_fov_degrees: 55, max_triangle_depth_span: 0.35 },
+};
 
 let requests;
 let routes;
@@ -454,7 +474,8 @@ describe('two-object scene', () => {
       assert.doesNotMatch(unconfirmed.text(), /Camera moved/);
 
       routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, job()));
-      routes[`GET ${JOB_URL}/assets/surface.json`] = () => Promise.resolve(json(200, surface));
+      // A surface the scene builder refuses, so no 3D view starts.
+      routes[`GET ${JOB_URL}/assets/surface.json`] = () => Promise.resolve(json(200, { ...surface, depth: [] }));
       const fallback = await mount();
       await openScene(fallback);
       assert.match(fallback.text(), /could not be shown/, 'no 3D view');

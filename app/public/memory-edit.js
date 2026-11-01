@@ -131,7 +131,10 @@ const reasonOf = (result) => (typeof result.body?.error === 'string' ? result.bo
 const withReason = (result, note) => (reasonOf(result) ? `${reasonOf(result)} ${note}` : note);
 
 // bridge: { jobUrl, textureUrl, source, editor(), showTransform(edit|null),
-// setLocked(boolean), saved(edit), unconfirmed(), conflict(), targets? }.
+// setLocked(boolean), saved(edit), unconfirmed(), conflict(), targets?,
+// surfaceProblem? }. surfaceProblem(candidate) -> null | text, given only on
+// two-object scenes, is the photographed-surface check for what an apply or a
+// return would save (a target transform or a whole arrangement).
 // editor(targetId?) returns { version, offset, yaw, clean, relationship? } for the
 // manual editor's state (on two-object scenes, the saved transform of the
 // object named, or of the selected one when none is named). targets, given only for two-object scenes: { selected() -> id |
@@ -662,6 +665,12 @@ export function mountMemoryEdit(container, bridge) {
 
   function applyProposal(frontConfirmed) {
     const target = current;
+    // A hold sends nothing and keeps the proposal and its preview.
+    const held = bridge.surfaceProblem?.({ targetId: targetOf(target), ...target.result.transform }) ?? null;
+    if (held) {
+      message.textContent = `${held} The saved arrangement is still version ${bridge.editor().version}; the proposal is kept.`;
+      return;
+    }
     mutate(async () => {
       if (!reusable(applyAttempt) || applyAttempt.id !== target.id) {
         applyAttempt = { id: target.id, body: { requestId: crypto.randomUUID(), baseVersion: bridge.editor().version, frontConfirmed } };
@@ -706,6 +715,13 @@ export function mountMemoryEdit(container, bridge) {
 
   function undoTo(targetVersion, ruleChangeConfirmed = false) {
     ruleUndoVersion = null;
+    const entry = history.find((item) => item.version === targetVersion);
+    const held = bridge.surfaceProblem && entry?.objects ? bridge.surfaceProblem(entry) : null;
+    if (held) {
+      message.textContent = `${held} The saved arrangement is still version ${bridge.editor().version}; version ${targetVersion} stays in the history.`;
+      sync();
+      return;
+    }
     mutate(async () => {
       const extra = bridge.targets ? { ruleChangeConfirmed } : {};
       if (!reusable(undoAttempt) || undoAttempt.body.targetVersion !== targetVersion || undoAttempt.body.ruleChangeConfirmed !== extra.ruleChangeConfirmed) {

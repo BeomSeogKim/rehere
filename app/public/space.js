@@ -20,6 +20,56 @@ const POLL_MS = 2000;
 const SOURCE_BLOCKED_TEXT = 'Its photo is no longer allowed to be used for reconstructing this place, or its use was stopped. Every saved version depends on that photo, so none can be restored. The original photo is kept, not deleted.';
 const sourceBlocked = (job) => job.blockedReason === 'source';
 const UNCONFIRMED_BUILD = 'Rehere could not confirm whether the build was accepted. Pressing Build again safely repeats the same request.';
+export const SURFACE_SCOPE = 'Before an arrangement is saved, Rehere checks that the two objects’ surfaces seen in the photo do not overlap. Only those photographed surfaces are checked, not unseen backs, the background or the room, so a clear check does not mean the arrangement is physically possible.';
+export const SURFACE_PENDING = 'Rehere is still preparing the check of the two photographed surfaces. Nothing was changed. Try again in a moment.';
+export const SURFACE_FAILED = 'Rehere could not prepare the check of the two photographed surfaces, so no arrangement can be saved here. Nothing was changed. Reload the page to try again.';
+
+// The shared photographed-surface check for one loaded two-object surface.
+// The geometry is prepared once after its modules load; each distinct arrangement
+// is checked once, only when an action would save it, never per slider input.
+// Until preparation succeeds every check holds. A preparation that finishes
+// after its scene closed is dropped and calls nothing. The server checks
+// again and remains authoritative.
+function visibleSurfaceGate(surface, current, onReady) {
+  let state = 'loading';
+  let prepared = null;
+  let visible = null;
+  let lastKey = null;
+  let lastText = null;
+  (async () => {
+    try {
+      const [THREE, bvh, helper] = await Promise.all([import('/vendor/three.module.js'), import('/vendor/three-mesh-bvh.js'), import('./visible-surfaces.js')]);
+      if (!current()) return;
+      // Synchronous: nothing else runs between building and keeping it.
+      prepared = helper.prepareVisibleGeometry(THREE, bvh.MeshBVH, surface);
+      [visible, state] = [helper, 'ready'];
+    } catch {
+      if (!current()) return;
+      state = 'failed';
+    }
+    onReady();
+  })();
+  return {
+    // Null only for a clear check; otherwise the fixed text to show.
+    problem(arrangement) {
+      if (state === 'loading') return SURFACE_PENDING;
+      if (state === 'failed') return SURFACE_FAILED;
+      const key = JSON.stringify(arrangement.objects);
+      if (key !== lastKey) {
+        let result;
+        try {
+          result = visible.checkVisibleArrangement(prepared, arrangement);
+        } catch {
+          result = { status: 'unresolved', reason: 'error', scope: 'named-visible-surfaces' };
+        }
+        // Anything but an explicit clear holds.
+        lastText = result?.status === 'clear' ? null : visible.visibleSurfaceProblem(result?.status === 'intersects' ? result : { ...result, status: 'unresolved' });
+        lastKey = key;
+      }
+      return lastText;
+    },
+  };
+}
 // A ready scene: the 3D stage and its always-visible notes on one side, the
 // tools that act on it on the other (one column on small or short screens).
 // The same nodes are placed once, before the viewer starts.
@@ -1086,6 +1136,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     if (disposed || token !== panelGeneration) return;
 
     const session = createArrangementSession(job.edit, () => crypto.randomUUID());
+    const surfaces = visibleSurfaceGate(surface, () => !disposed && token === panelGeneration, () => showEdit());
     // Set while the memory or collaboration panel previews or saves: manual
     // changes and switching objects pause, and the viewer shows that preview.
     const lockedBy = new Set();
@@ -1389,6 +1440,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         return;
       }
       if (breaks(session.preview)) return;
+      const held = surfaces.problem(session.preview);
+      if (held) {
+        editMessage.textContent = `${held} The saved arrangement is still version ${session.saved.version}; your preview is kept.`;
+        showEdit();
+        return;
+      }
       const body = session.saveRequest(selected);
       saving = true;
       editMessage.textContent = '';
@@ -1414,6 +1471,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     });
 
     async function saveRule(relationship) {
+      // A rule change saves the saved arrangement again as a new version.
+      const held = surfaces.problem(session.saved);
+      if (held) {
+        ruleMessage.textContent = `${held} The rule and the saved arrangement (version ${session.saved.version}) are unchanged.`;
+        return;
+      }
       const input = { baseVersion: session.saved.version, relationship };
       // An unknown earlier outcome is retried exactly, whatever the form shows now.
       if (!ruleUncertain && (!ruleAttempt || JSON.stringify(ruleAttempt.input) !== JSON.stringify(input))) ruleAttempt = { input, body: { requestId: crypto.randomUUID(), ...input, confirmed: true } };
@@ -1475,6 +1538,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         el('fieldset', { className: 'space-edit' }, [
           el('legend', { textContent: 'Move the chosen object' }),
           el('p', { className: 'hint', textContent: 'Only the chosen object moves; the other object and the background stay as saved. Changes are a preview until you apply and save them.' }),
+          el('p', { className: 'hint', textContent: SURFACE_SCOPE }),
           ...controls.map(({ name, range, number: field }) => el('div', { className: 'space-axis' }, [el('span', { textContent: name }), range, field])),
           el('div', { className: 'actions' }, [toggle]),
           editStatus,
@@ -1562,6 +1626,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         conflict = true;
         showEdit();
       };
+      // The photographed-surface check for what an action would save: a whole
+      // arrangement, or one object's transform over the saved arrangement.
+      const surfaceProblem = (candidate) => surfaces.problem(asArrangement(candidate));
       memoryEdit = mountMemoryEdit(memorySection, {
         jobUrl,
         textureUrl: assetUrl(jobId, 'texture.jpg'),
@@ -1575,6 +1642,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           return viewer ? viewer.showGuide(transform, point, targetId) : null;
         },
         setLocked: lockFor('memory'),
+        surfaceProblem,
         saved: savedFrom(() => [collaborationPanel, sharesPanel, storiesPanel]),
         unconfirmed,
         conflict: conflicted,
@@ -1593,6 +1661,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           return Boolean(viewer && transform);
         },
         setLocked: lockFor('collaboration'),
+        surfaceProblem,
         blocked() {
           if (disposed || token !== panelGeneration) return;
           openScene(jobId);

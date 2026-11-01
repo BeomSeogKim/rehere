@@ -1206,6 +1206,9 @@ export class CollaborationStore {
           assertRelationship(manifest, fields);
         }
         if (adopt) edit = { version: manifest.edit.version + 1, ...fields };
+        // An adoption is checked when its version is saved; an alternative is
+        // never saved as a version, so it is checked here before it is stored.
+        else if (twoObjects) await this.reconstructions.assertVisibleArrangement(manifest, fields);
         variant = {
           id: randomUUID(),
           kind: 'candidate',

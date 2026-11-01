@@ -21,6 +21,7 @@ const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 const DEFAULT_DATA_DIR = fileURLToPath(new URL('./data/', import.meta.url));
 const DEFAULT_PORT = 4317;
 const THREE_DIR = fileURLToPath(new URL('./node_modules/three/', import.meta.url));
+const BVH_DIR = fileURLToPath(new URL('./node_modules/three-mesh-bvh/', import.meta.url));
 const JSON_BODY_BYTES = 16 * 1024;
 // A written recollection may hold 10,000 UTF-16 code units; even with every
 // unit escaped as \uXXXX (6 bytes) the body stays under this cap.
@@ -51,6 +52,7 @@ const STATIC_FILES = new Map([
   ['/intake.js', ['intake.js', 'text/javascript; charset=utf-8']],
   ['/scene-relations.js', ['scene-relations.js', 'text/javascript; charset=utf-8']],
   ['/arrangement.js', ['arrangement.js', 'text/javascript; charset=utf-8']],
+  ['/visible-surfaces.js', ['visible-surfaces.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // The account-free visitor listener serves only the visit page and the exact
@@ -90,6 +92,14 @@ const VENDOR_FILES = new Map([
   ['/vendor/three.core.js', ['build/three.core.js', 'text/javascript; charset=utf-8']],
   ['/vendor/OrbitControls.js', ['examples/jsm/controls/OrbitControls.js', 'text/javascript; charset=utf-8', (text) => text.replace("from 'three';", "from '/vendor/three.module.js';")]],
   ['/vendor/THREE-LICENSE', ['LICENSE', 'text/plain; charset=utf-8']],
+]);
+
+// The pinned surface-intersection library, for the owner's editor only; the
+// visitor listener never serves it. Its bundled ESM imports the bare
+// specifier 'three' once, rewritten like OrbitControls.
+const PRIVATE_VENDOR_FILES = new Map([
+  ['/vendor/three-mesh-bvh.js', ['build/index.module.js', 'text/javascript; charset=utf-8', (text) => text.replace("from 'three';", "from '/vendor/three.module.js';")]],
+  ['/vendor/THREE-MESH-BVH-LICENSE', ['LICENSE', 'text/plain; charset=utf-8']],
 ]);
 
 const SECURITY_HEADERS = {
@@ -371,13 +381,14 @@ export function createAppServer({
   contributionPhotoDecoder = pythonPhotoDecoder(),
   recordingPreparer = createRecordingPreparer(),
   mediaVerifier = createMediaVerifier(),
+  visibleSurfaceLimits,
 } = {}) {
   // Validated before anything else is created, so a bad value starts nothing.
   const visitor = visitorOrigin === null ? null : parseVisitorOrigin(visitorOrigin);
   const store = new DraftStore(dataDir);
   const attempts = attemptLimiter();
   const reconstructions = new ReconstructionStore({
-    dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage,
+    dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage, visibleSurfaceLimits,
   });
   const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder, prepareRecording: recordingPreparer });
   const stories = new StoryStore({ reconstructions, audioDecoder });
@@ -951,7 +962,13 @@ export function createAppServer({
       await sendStatic(req, res, path.join(THREE_DIR, name), type, transform);
       return;
     }
-    if (staticFile || vendorFile || pathname.startsWith('/api/drafts')) {
+    const bvhFile = PRIVATE_VENDOR_FILES.get(pathname);
+    if (bvhFile && reading) {
+      const [name, type, transform] = bvhFile;
+      await sendStatic(req, res, path.join(BVH_DIR, name), type, transform);
+      return;
+    }
+    if (staticFile || vendorFile || bvhFile || pathname.startsWith('/api/drafts')) {
       sendJson(res, 405, { error: 'Method not allowed.' });
       return;
     }
