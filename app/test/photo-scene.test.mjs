@@ -59,6 +59,15 @@ describe('build permission', () => {
     assert.doesNotMatch(buildBlockedReason(record({ place: false, model: true, share: true })), /when this memory was saved/, 'a later narrowing is not described as the original choice');
   });
 
+  it('names a truthful next step without suggesting a copy of the restricted photo', () => {
+    const reason = buildBlockedReason(record({ place: false, model: false }));
+    assert.match(reason, /^Building a scene needs “Use to reconstruct this place” and “Use for model processing”, which are not allowed for this photo\. /);
+    assert.match(reason, /The uses of a saved photo cannot be broadened\. To build a scene, choose another photo whose uses already allow both, or add new material with both uses allowed before you save it\.$/);
+    assert.doesNotMatch(reason, /upload|copy|again/i);
+    assert.doesNotMatch(buildBlockedReason(null), /broadened/, 'the legacy text is unchanged');
+    assert.equal(buildBlockedReason(record({ place: true, model: true }, 'text')), 'Only photos can be used to build a scene.');
+  });
+
   it('explains legacy photos without granting anything', () => {
     assert.match(buildBlockedReason(null), /no uses were granted/);
   });

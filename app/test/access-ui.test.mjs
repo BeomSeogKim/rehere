@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { resolveObjectURL } from 'node:buffer';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { FakeElement } from './fake-dom.mjs';
-import { accessCard, freshKeys, mountAccess, nameProblem, newKey, parseAccessCard } from '../public/access-ui.js';
+import { accessCard, freshKeys, mountAccess, nameProblem, newKey, parseAccessCard, setupCommand, setupPort } from '../public/access-ui.js';
 
 const KEY = /^(rha|rhr)_[A-Za-z0-9_-]{43}$/;
 const ORIGIN = 'http://127.0.0.1:4317';
@@ -111,10 +111,37 @@ describe('session gate', () => {
     routes['GET /api/session'] = () => Promise.resolve(json(200, { initialized: false, principal: null }));
     const view = await mount();
     assert.match(view.container.textContent, /not set up yet/);
-    assert.match(view.container.textContent, /access-cli\.mjs init/);
+    assert.match(view.container.textContent, /From the repository root, run:/);
+    assert.equal(
+      view.find((node) => node.tag === 'pre')[0].textContent,
+      'mkdir -m 700 -p app/data\nPORT=4317 node app/access-cli.mjs init \\\n  --credentials-file app/data/owner-card.json --name "Workspace owner"',
+      'the ACCESS.md command for the port this page came from',
+    );
+    assert.match(view.container.textContent, /same host and port the card names; localhost and 127\.0\.0\.1 are kept apart/);
+    assert.match(view.container.textContent, /follow app\/ACCESS\.md/);
+    assert.doesNotMatch(view.container.textContent, /outside the app/);
     assert.equal(view.inputs('password').length, 0, 'no browser sign-up or sign-in');
     assert.deepEqual(view.events, []);
     assert.deepEqual(requests.map((r) => r.url), ['/api/session']);
+  });
+
+  it('derives only a validated port for the setup command, from this page’s own address', async () => {
+    assert.equal(setupPort('http://127.0.0.1:4400'), 4400);
+    assert.equal(setupPort('http://localhost'), 80, 'an http address without a port is port 80');
+    for (const unusable of ['https://127.0.0.1', 'https://127.0.0.1:4400', 'ftp://127.0.0.1:4400', 'http://127.0.0.1:0', 'http://127.0.0.1:70000', 'not an address', undefined, null]) {
+      assert.equal(setupPort(unusable), 4317, String(unusable));
+    }
+    assert.match(setupCommand(4400), /^mkdir -m 700 -p app\/data\nPORT=4400 node app\/access-cli\.mjs init /);
+    globalThis.location = { origin: 'http://localhost:4400' };
+    try {
+      routes['GET /api/session'] = () => Promise.resolve(json(200, { initialized: false, principal: null }));
+      const view = await mount();
+      const command = view.find((node) => node.tag === 'pre')[0].textContent;
+      assert.match(command, /^mkdir -m 700 -p app\/data\nPORT=4400 /, 'a test server on another port gets a matching card');
+      assert.doesNotMatch(command, /localhost/, 'no host text goes into the command');
+    } finally {
+      globalThis.location = { origin: ORIGIN };
+    }
   });
 
   it('starts the owner app only for a signed-in owner, with no role choice', async () => {

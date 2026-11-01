@@ -123,11 +123,14 @@ Saved memories and workspace authority are written to `app/data/`, which is
 ignored by Git. Deleting that folder removes both, including any access card
 kept inside it. Keep a separate secure copy of the current card.
 
-Saving a photo requires Pillow in the prepared Python environment. Saving a
-recording requires local FFmpeg, found on `PATH` or selected for this process
+Saving a photo requires Pillow in the selected Python environment. The
+[photo-checking-only setup](spatial/README.md#photo-checking-only) needs no
+model weights. Saving a recording requires local FFmpeg, found on `PATH` or
+selected for this process
 with `REHERE_FFMPEG`. These checks run locally and do not load model weights or
-send files to a provider. If a checker is unavailable or busy, received files
-stay in place and saving again retries the missing file.
+send files to a provider. If photo checking is not set up, complete that setup
+before saving again. An unavailable or busy checker keeps already received
+files in place; saving again retries the missing file.
 
 Photo reconstruction additionally requires the isolated Python environment
 and locally cached model weights described in [the worker guide](spatial/README.md).

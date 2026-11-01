@@ -12,9 +12,30 @@ The command does not fetch URLs, check source permissions, or isolate jobs.
 The caller must confirm that the person allowed model processing and must give
 each job its own output directory.
 
-## Setup
+## Photo checking only
 
-Python 3.12 in an isolated environment:
+Saving owner photographs needs Pillow, without reconstruction models or
+weights. Keep an existing suitable environment, or create one from the
+repository root with `uv` and Python 3.12 available:
+
+```sh
+uv venv --python 3.12 app/spatial/.venv
+uv pip install --python app/spatial/.venv/bin/python pillow==13.0.0
+```
+
+This uses the Pillow version pinned in `requirements.txt`. The app uses
+`app/spatial/.venv/bin/python` by default; `PHOTO_PYTHON` can select another
+Python environment with Pillow. Restart the server after changing that
+setting, then save again. Text-only input needs neither Python nor weights.
+Recording checks separately need FFmpeg.
+
+This recipe enables owner photo checking, not reconstruction or every
+contributor/model image helper. For those, use the full environment below.
+
+## Reconstruction setup
+
+Run from the repository root. If the photo-checking environment already
+exists, skip its creation and install the full requirements into it:
 
 ```sh
 cd app/spatial
@@ -40,7 +61,11 @@ or account tokens. Set `HF_HUB_CACHE` if the cache lives elsewhere.
 
 ## Usage
 
+These commands run from `app/spatial`, as above. Use your permitted image
+and a fresh job directory; its parent must exist:
+
 ```sh
+mkdir -p jobs
 .venv/bin/python reconstruct.py --image photo.jpg --output jobs/JOB_ID \
   --source-id 3f2b6c1e-8d4a-4b7e-9c2f-1a2b3c4d5e6f --box 490 450 982 781
 ```

@@ -7,6 +7,10 @@ uses a separate port and configured visitor origin while account and editing
 routes stay private. It supplies no proxy, TLS or hosted deployment. No external
 publication occurs when testing a local link.
 
+In this development version, the scene photo must be marked as public
+material and allow both place construction and sharing. Scene photos with
+any other origin stay private; a public label alone does not grant a use.
+
 ## Preview before issuing
 
 Open a ready scene and expand **Share a saved view with visitors**. Choose a

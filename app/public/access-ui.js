@@ -6,6 +6,28 @@
 
 export const NAME_LIMIT = 80;
 
+// The owner setup command shown before the workspace exists, matching
+// app/ACCESS.md. The port is a validated number taken from this page's own
+// address, so the card names the server it was opened from; nothing else from
+// the address goes into the text. Only an http address counts: without a port
+// it is 80; any other scheme or an unusable port shows the server's default.
+const DEFAULT_PORT = 4317;
+export function setupPort(origin = globalThis.location?.origin) {
+  try {
+    const url = new URL(origin);
+    // The private server speaks plain HTTP on loopback; any other scheme is
+    // not this server's own address.
+    if (url.protocol !== 'http:') return DEFAULT_PORT;
+    if (url.port === '') return 80;
+    const port = Number(url.port);
+    return /^\d+$/.test(url.port) && port >= 1 && port <= 65535 ? port : DEFAULT_PORT;
+  } catch {
+    return DEFAULT_PORT;
+  }
+}
+export const setupCommand = (port) =>
+  `mkdir -m 700 -p app/data\nPORT=${port} node app/access-cli.mjs init \\\n  --credentials-file app/data/owner-card.json --name "Workspace owner"`;
+
 const PREFIX = { access: 'rha_', recovery: 'rhr_' };
 const KEY = { access: /^rha_[A-Za-z0-9_-]{43}$/, recovery: /^rhr_[A-Za-z0-9_-]{43}$/, invitation: /^rhi_[A-Za-z0-9_-]{43}$/ };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -208,8 +230,13 @@ export function mountAccess(container, { onOwner, onSignedOut, renderContributor
       el('section', { className: 'panel access' }, [
         el('h1', { textContent: 'This workspace is not set up yet' }),
         el('p', { textContent: 'The owner sets it up once on this computer with the command line tool, which creates the owner’s access card. There is no sign-up in the browser.' }),
-        el('pre', { className: 'access-command', textContent: 'node app/access-cli.mjs init --credentials-file <path outside the app> --name <your name>' }),
-        el('p', { className: 'hint', textContent: 'Reload this page after setup.' }),
+        el('p', { textContent: 'From the repository root, run:' }),
+        el('pre', { className: 'access-command', textContent: setupCommand(setupPort()) }),
+        el('p', {
+          className: 'hint',
+          textContent:
+            'Keep the card private and keep a separate secure copy. Sign in at the same host and port the card names; localhost and 127.0.0.1 are kept apart by the browser. Reload this page after setup. To retry an interrupted setup or recover lost keys, follow app/ACCESS.md.',
+        }),
       ]),
     );
   }

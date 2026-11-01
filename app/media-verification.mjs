@@ -59,6 +59,8 @@ export const MEDIA_MESSAGES = Object.freeze({
   duration: 'This recording is longer than five minutes. Record a shorter take of five minutes or less.',
   busy: 'Another file is being checked. Nothing was changed. Try again in a moment.',
   unavailable: 'Files cannot be checked on this computer right now. Nothing was changed.',
+  // Only for the known photo-checker setup failures below; never inferred from decoder output.
+  setup: 'Photo checking is not set up on this computer. Follow app/spatial/README.md, or set PHOTO_PYTHON to a Python environment with Pillow, then save again. Nothing was changed.',
   timeout: 'Checking this file took too long. Nothing was changed. Try again.',
   aborted: 'The app is shutting down. Nothing was changed.',
 });
@@ -74,6 +76,12 @@ export class MediaVerificationError extends RequestError {
     this.permanent = permanent;
   }
 }
+
+// The configured photo checker could not run at all (missing or not executable),
+// as opposed to any other spawn fault, which stays 'unavailable'.
+const SETUP_SPAWN_CODES = new Set(['ENOENT', 'EACCES']);
+// verify_owner_photo.py exits 3 only when Pillow cannot be imported.
+const EXIT_SETUP = 3;
 
 // Spawns the owner photo verifier: fixed script, one fixed format argument and
 // the stored bytes on stdin; success prints exactly {"width","height"}. The call
@@ -110,8 +118,8 @@ export function pythonPhotoVerifier({
     }
     try {
       child = spawnProcess(python, [PHOTO_SCRIPT, '--expect', expect], { cwd: SPATIAL_DIR, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
-    } catch {
-      return settle(new MediaVerificationError('unavailable', 'photo'));
+    } catch (error) {
+      return settle(new MediaVerificationError(SETUP_SPAWN_CODES.has(error?.code) ? 'setup' : 'unavailable', 'photo'));
     }
     timer = setTimeout(() => stop('timeout'), timeoutMs);
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -126,10 +134,11 @@ export function pythonPhotoVerifier({
     // Drained and discarded; never kept, returned or logged.
     child.stderr.on('data', () => {});
     child.stdin.on('error', () => {});
-    child.on('error', () => stop('unavailable'));
+    child.on('error', (error) => stop(SETUP_SPAWN_CODES.has(error?.code) ? 'setup' : 'unavailable'));
     child.on('close', (code) => {
       if (code === 2) return settle(new MediaVerificationError('content', 'photo'));
       if (code === 4) return settle(new MediaVerificationError('pixels', 'photo'));
+      if (code === EXIT_SETUP) return settle(new MediaVerificationError('setup', 'photo'));
       if (code !== 0) return settle(new MediaVerificationError('unavailable', 'photo'));
       let result = null;
       try {

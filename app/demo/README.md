@@ -1,5 +1,8 @@
 # Demonstration fixtures
 
+Run these commands from the repository root. If the quickstart left you in
+`app/`, return to the repository root first with `cd ..`.
+
 ## Synthetic relation fixture
 
 This technical diagram tests whether a new sentence changes a proposed visual
@@ -9,7 +12,7 @@ demand. The counter's marked front is a drawing convention.
 Generate an SVG with Python 3 and no packages:
 
 ```sh
-python3 generate_room.py --output /tmp/rehere-room.svg
+python3 app/demo/generate_room.py --output /tmp/rehere-room.svg
 ```
 
 The command refuses to overwrite an existing file and checks its geometry
@@ -54,10 +57,10 @@ Generate the PNGs with the reconstruction environment's Pillow; no model is
 called:
 
 ```sh
-../spatial/.venv/bin/python generate_two_objects.py
+app/spatial/.venv/bin/python app/demo/generate_two_objects.py
 ```
 
-Files go to `generated/two-objects/`, which Git ignores, or to
+Files go to `app/demo/generated/two-objects/`, which Git ignores, or to
 `--output-dir`; existing files are never overwritten. Each image is checked
 against its frozen SHA-256. Use the Pillow version pinned in
 [the worker requirements](../spatial/requirements.txt); any hash mismatch fails,
@@ -75,13 +78,13 @@ Generate a separate reference with the same backdrop and chair as room A,
 but with the counter drawing 80 pixels left:
 
 ```sh
-../spatial/.venv/bin/python generate_contribution_photo.py
+app/spatial/.venv/bin/python app/demo/generate_contribution_photo.py
 ```
 
 The command uses the pinned Pillow environment, refuses existing output and
 checks the baseline against room A's frozen hash. It writes `baseline.png`,
 `counter-left.png` and their hashes and diagram coordinates in `fixture.json`
-under `generated/contributor-photo/`, or `--output-dir`. The original A/B
+under `app/demo/generated/contributor-photo/`, or `--output-dir`. The original A/B
 planner inputs and expected answers stay unchanged. No inference runs.
 
 Use the baseline's existing chair and counter boxes to prepare a two-object
@@ -112,7 +115,7 @@ from an existing contributor-photo fixture folder. Python 3 and its standard
 library are sufficient:
 
 ```sh
-python3 generate_album_comparison.py --input-dir generated/contributor-photo --output-dir /tmp/rehere-album
+python3 app/demo/generate_album_comparison.py --input-dir app/demo/generated/contributor-photo --output-dir /tmp/rehere-album
 ```
 
 The command refuses an existing output folder. It accepts the inputs only when
@@ -138,13 +141,13 @@ This is an archival photograph, not a synthetic diagram or a supplied personal
 memory. Python 3 and its standard library are sufficient:
 
 ```sh
-python3 fetch_archival_counter.py --output-dir /tmp/rehere-archival-counter
+python3 app/demo/fetch_archival_counter.py --output-dir /tmp/rehere-archival-counter
 ```
 
 The command downloads only the fixed official image, checks its exact byte
 count and SHA-256, refuses existing output, and writes `source.jpg` and
 `fixture.json`. It does not sign in, upload, infer, grant uses or issue a link.
-The default output is `generated/archival-counter/`, ignored by Git.
+The default output is `app/demo/generated/archival-counter/`, ignored by Git.
 
 The 1024 by 820 image is a display derivative, not the preservation master.
 Keep its provider, public source link and catalog-attributed year with it.

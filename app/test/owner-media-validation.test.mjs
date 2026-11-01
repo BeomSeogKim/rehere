@@ -205,7 +205,7 @@ describe('photo verifier process', () => {
     const saved = process.env.MODEL_API_KEY;
     process.env.MODEL_API_KEY = 'synthetic-secret';
     try {
-      const outcomes = [[0, '{"width":40,"height":30}', { width: 40, height: 30 }], [2, '', 'content'], [4, '', 'pixels'], [3, '', 'unavailable'],
+      const outcomes = [[0, '{"width":40,"height":30}', { width: 40, height: 30 }], [2, '', 'content'], [4, '', 'pixels'], [3, '', 'setup'],
         [1, '', 'unavailable'], [0, 'not json', 'unavailable'], [0, '{"width":0,"height":3}', 'unavailable'], [0, '{"width":40,"height":30,"x":1}', 'unavailable']];
       for (const [exit, out, expected] of outcomes) {
         let seen;
@@ -237,6 +237,36 @@ describe('photo verifier process', () => {
       if (saved === undefined) delete process.env.MODEL_API_KEY;
       else process.env.MODEL_API_KEY = saved;
     }
+  });
+
+  it('reports a checker that cannot run or lacks Pillow as a fixed setup outcome, and other faults as unavailable', async () => {
+    const SETUP = 'Photo checking is not set up on this computer. Follow app/spatial/README.md, or set PHOTO_PYTHON to a Python environment with Pillow, then save again. Nothing was changed.';
+    const withCode = (code) => Object.assign(new Error(`spawn /private/configured/python ${code ?? ''}`), code ? { code } : {});
+    const cases = [
+      ['async ENOENT', (child) => child.emit('error', withCode('ENOENT')), 'setup'],
+      ['async EACCES', (child) => child.emit('error', withCode('EACCES')), 'setup'],
+      ['async EPERM', (child) => child.emit('error', withCode('EPERM')), 'unavailable'],
+      ['async without a code', (child) => child.emit('error', withCode(null)), 'unavailable'],
+      ['exit 3 with stderr', (child) => {
+        child.stderr.emit('data', Buffer.from('Traceback: No module named PIL at /private/configured'));
+        child.emit('close', 3);
+      }, 'setup'],
+    ];
+    for (const [label, act, expected] of cases) {
+      const child = fakeChild();
+      const pending = pythonPhotoVerifier({ python: '/private/configured/python', spawnProcess: () => child })({ bytes: SIGNATURE_PNG, type: 'image/png', signal: new AbortController().signal });
+      act(child);
+      const outcome = await pending.catch((error) => error);
+      assert.ok(outcome instanceof MediaVerificationError, label);
+      assert.deepEqual([outcome.code, outcome.status, outcome.permanent], [expected, 503, false], label);
+      assert.equal(outcome.message, expected === 'setup' ? SETUP : MEDIA_MESSAGES.unavailable, label);
+      assert.ok(!/private|configured|Traceback|PIL\b/.test(outcome.message), label);
+    }
+    for (const [label, error, expected] of [['sync ENOENT', withCode('ENOENT'), 'setup'], ['sync EACCES', withCode('EACCES'), 'setup'], ['sync other', new TypeError('bad argument'), 'unavailable']]) {
+      const outcome = await pythonPhotoVerifier({ python: '/private/configured/python', spawnProcess: () => { throw error; } })({ bytes: SIGNATURE_PNG, type: 'image/png' }).catch((value) => value);
+      assert.deepEqual([outcome.code, outcome.status, outcome.permanent], [expected, 503, false], label);
+    }
+    assert.equal(MEDIA_MESSAGES.setup, SETUP);
   });
 
   it('settles once on overflow, the time limit or abort even when kill throws or fails and no close follows', async () => {
@@ -727,6 +757,41 @@ describe('direct saves', () => {
       assert.equal((await draftIds(dataDir)).length, 2);
     } finally {
       gate.resolve();
+      await app.close();
+    }
+  });
+});
+
+describe('photo checker setup', () => {
+  it('refuses saves with the setup message while the configured checker is missing, then accepts the same files once it can run', async () => {
+    // A real spawn of a path that does not exist; after "setup" a scripted
+    // decoder stands in for a working checker (no install happens here).
+    const missing = pythonPhotoVerifier({ python: path.join(await tempDir('rehere-no-checker-'), 'missing', 'python') });
+    let photo = missing;
+    const verifier = createMediaVerifier({ photo: (call) => photo(call), voice: async () => ({ durationMs: 1000 }) });
+    const { app, dataDir, owner } = await workspace({ verifier });
+    try {
+      const direct = await owner.request('/api/drafts', { method: 'POST', body: directForm([SIGNATURE_PNG]) });
+      assert.equal(direct.status, 503);
+      assert.deepEqual(await direct.json(), { error: MEDIA_MESSAGES.setup });
+      assert.deepEqual(await draftIds(dataDir), []);
+      assert.deepEqual(await incoming(dataDir), []);
+
+      const planned = part(SIGNATURE_PNG);
+      const { id } = await openIntake(owner, [planned]);
+      const refused = await upload(owner, id, planned.partId, SIGNATURE_PNG);
+      assert.equal(refused.status, 503);
+      assert.deepEqual(await refused.json(), { error: MEDIA_MESSAGES.setup });
+      const kept = (await stored(dataDir, id)).parts[0];
+      assert.deepEqual([kept.status, kept.error, kept.verification], ['missing', null, undefined], 'not failed, not stored, not attested');
+      await assert.rejects(readFile(path.join(dataDir, 'intakes', id, 'parts', `${planned.partId}.bin`)), { code: 'ENOENT' });
+
+      photo = async () => ({ width: 40, height: 30 });
+      assert.equal((await upload(owner, id, planned.partId, SIGNATURE_PNG)).status, 200, 'the same part is accepted on the next save');
+      assert.equal((await commit(owner, id)).status, 201);
+      assert.equal((await owner.request('/api/drafts', { method: 'POST', body: directForm([SIGNATURE_PNG]) })).status, 201);
+      assert.equal((await draftIds(dataDir)).length, 2);
+    } finally {
       await app.close();
     }
   });

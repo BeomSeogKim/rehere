@@ -331,8 +331,8 @@ describe('resumable saving in the app', () => {
     await save();
     assert.deepEqual(intakePosts().filter((request) => request.includes('/parts/')), [`POST /api/intakes/${OLD}/parts/${P2}`], 'only the reselected photo is sent');
     assert.equal(intakePosts().filter((request) => request === 'POST /api/intakes').length, 0, 'the same intake, never a new one');
-    // The saved input held photos, so the next step offered is building the place.
-    assert.match(message(), /^Saved\. Continue to building this place/);
+    // Holding photos is not a promise that a scene can be built from them.
+    assert.equal(message(), 'Saved. View what you saved');
     assert.equal(byId('photo-list').children.length, 0, 'the form resets only after the final answer');
     assert.equal(storage.size, 0);
   });
@@ -352,7 +352,9 @@ describe('resumable saving in the app', () => {
     requests.length = 0;
     await save();
     assert.deepEqual(intakePosts().filter((request) => request.includes('/parts/')), [sentParts[1]], 'the received photo is not sent again');
-    assert.match(message(), /^Saved\./);
+    // These photos were saved with no uses allowed: nothing promises building.
+    assert.equal(message(), 'Saved. View what you saved');
+    assert.doesNotMatch(message(), /build/i);
   });
 
   it('says what to do about a file that failed its content check, keeps the rest, and retries a busy check with the same file', async () => {

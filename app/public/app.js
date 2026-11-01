@@ -326,13 +326,13 @@ function sourceProblem(voice) {
   return null;
 }
 
-// hasPhoto: true only when the saved input is known to have held a photo; a
-// scene can then be built from it. The link is navigation only.
-function savedNotice(id, hasPhoto = false) {
+// The link is navigation only; a saved photo alone does not mean a scene can
+// be built from it, so the notice promises nothing about building.
+function savedNotice(id) {
   const fragment = document.createDocumentFragment();
   const link = document.createElement('a');
   link.href = `#/memories/${id}`;
-  link.textContent = hasPhoto ? 'Continue to building this place' : 'View what you saved';
+  link.textContent = 'View what you saved';
   fragment.append('Saved. ', link);
   return fragment;
 }
@@ -386,7 +386,7 @@ async function save(includeVoice) {
     const session = intake;
     const outcome = await session.save(intended, files, renderIntake);
     if (!stillOwner(generation) || session !== intake) return;
-    settleIntake(outcome, intended.parts.some((part) => part.kind === 'photo'));
+    settleIntake(outcome);
   } catch (error) {
     if (error?.name !== 'AbortError') throw error;
   } finally {
@@ -401,11 +401,11 @@ async function save(includeVoice) {
 }
 
 // What the form says after an attempt. Only a final draft ID means Saved.
-function settleIntake(outcome, hasPhoto = false) {
+function settleIntake(outcome) {
   switch (outcome.kind) {
     case 'saved':
       resetForm();
-      setMessage(savedNotice(outcome.draftId, hasPhoto), 'success');
+      setMessage(savedNotice(outcome.draftId), 'success');
       loadSaved();
       break;
     case 'discarded':
