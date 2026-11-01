@@ -64,14 +64,14 @@ export async function createViewer(viewport, surface, textureUrl, label, { onDra
     }
   };
   try {
-    return await setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw);
+    return await setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, () => released);
   } catch (error) {
     release();
     throw error;
   }
 }
 
-async function setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw) {
+async function setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, isReleased) {
   let renderer;
   try {
     renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -117,6 +117,48 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   const tangent = Math.tan(((composition ? 55 : surface.assumptions.horizontal_fov_degrees) * Math.PI) / 360);
   const verticalFov = composition ? 55 : objects.verticalFovDegrees ?? (2 * Math.atan((tangent * imageHeight) / imageWidth) * 180) / Math.PI;
   const camera = new THREE.PerspectiveCamera(verticalFov, 1, 0.01, 50);
+  const point = new THREE.Vector3(), viewMatrix = new THREE.Matrix4();
+  const meshBounds = meshes.map((mesh) => {
+    const position = mesh.geometry.getAttribute('position'), index = mesh.geometry.index;
+    const box = new THREE.Box3();
+    for (let i = 0; i < (index?.count ?? position.count); i += 1) {
+      box.expandByPoint(point.fromBufferAttribute(position, index ? index.getX(i) : i));
+    }
+    return { mesh, position, index, box };
+  });
+  const updateClipping = () => {
+    objects.scene.updateMatrixWorld(true);
+    camera.updateMatrixWorld(true);
+    let nearest = Infinity, farthest = 0;
+    for (const { mesh, position, index, box } of meshBounds) {
+      viewMatrix.multiplyMatrices(camera.matrixWorldInverse, mesh.matrixWorld);
+      let min = Infinity, max = -Infinity;
+      for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+        point.set(x, y, z).applyMatrix4(viewMatrix);
+        min = Math.min(min, -point.z);
+        max = Math.max(max, -point.z);
+      }
+      if (max <= 0) continue;
+      farthest = Math.max(farthest, max);
+      if (min >= 0.01) nearest = Math.min(nearest, min);
+      else {
+        // An empty box corner near the eye must not collapse depth precision.
+        // Verify drawn vertices before reducing the ordinary near distance.
+        // Any triangle crossing the eye itself still meets a positive near plane.
+        for (let i = 0; i < (index?.count ?? position.count); i += 1) {
+          point.fromBufferAttribute(position, index ? index.getX(i) : i).applyMatrix4(viewMatrix);
+          if (point.z < 0) nearest = Math.min(nearest, -point.z);
+        }
+      }
+    }
+    const near = nearest < 0.01 ? nearest / 2 : 0.01;
+    const far = farthest >= 50 ? farthest * 1.01 : 50;
+    if (camera.near !== near || camera.far !== far) {
+      camera.near = near;
+      camera.far = far;
+      camera.updateProjectionMatrix();
+    }
+  };
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   const canvas = renderer.domElement;
   canvas.setAttribute('role', 'img');
@@ -146,6 +188,8 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     if (interactive) canvas.focus();
   };
   const draw = () => {
+    if (isReleased()) return;
+    updateClipping();
     renderer.render(objects.scene, camera);
     onDraw?.();
   };

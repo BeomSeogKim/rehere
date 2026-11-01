@@ -286,3 +286,129 @@ describe('photo framing', () => {
     viewer.dispose();
   });
 });
+
+describe('clip planes follow rendered geometry', () => {
+  it('includes an actual two-object surface at depth 60 without changing its source projection', async () => {
+    const size = 20;
+    const regions = Array.from({ length: size * size }, (_, i) => {
+      const x = i % size, y = Math.floor(i / size);
+      return y >= 6 && y <= 13 ? x >= 2 && x <= 6 ? 1 : x >= 13 && x <= 17 ? 2 : 0 : 0;
+    });
+    const surface = {
+      schema_version: 2, width: size, height: size, regions,
+      depth: regions.map((region) => region === 2 ? 60 : 3.5),
+      objects: [{ id: 'object-1', label: 'Near object', box_xyxy: [0, 0, 450, 800] }, { id: 'object-2', label: 'Far object', box_xyxy: [450, 0, 1000, 800] }],
+      assumptions: { horizontal_fov_degrees: 55, max_triangle_depth_span: 0.35 }, source: { image_size: [1000, 800] },
+    };
+    const viewport = viewportOf(1000, 800), viewer = await createViewer(viewport, surface, 'blob:texture', 'Deep observed surfaces');
+    viewer.setPhotoFraming(true);
+    const camera = globalThis.viewerCamera.camera, parts = photoScene.objectSurfaceMeshes(surface);
+    const far = parts.objects[1];
+    assert.ok(far.indices.length / 3 >= 32);
+    for (let i = 0; i < far.positions.length; i += 3) {
+      const point = new THREE.Vector3(...far.positions.slice(i, i + 3)).add(new THREE.Vector3(...far.pivot));
+      assert.ok(point.clone().project(camera).z < 1, 'the source depth is inside the far plane');
+    }
+    assert.ok(camera.far > 60);
+    assert.equal(camera.near, 0.01);
+    assert.deepEqual(viewer.getCamera(), { position: [0, 0, 0], target: [0, 0, -3] });
+    for (const pixel of LANDMARKS(1000, 800)) {
+      const actual = drawnAt(viewport, sourceRay(surface, pixel, 60)), expected = containPoint(viewport, [1000, 800], pixel);
+      close(actual[0], expected[0], 'deep source x'); close(actual[1], expected[1], 'deep source y');
+    }
+    viewer.dispose();
+  });
+
+  it('keeps close positive-depth geometry in front of the near plane and restores safe legacy defaults', async () => {
+    const surface = visitorSurface();
+    surface.depth = surface.foreground.map((selected) => selected ? 0.001 : 4);
+    const viewer = await createViewer(viewportOf(600, 500), surface, 'blob:texture', 'Close surface');
+    const camera = globalThis.viewerCamera.camera;
+    assert.ok(camera.near > 0 && camera.near < 0.001);
+    assert.ok(new THREE.Vector3(0, 0, -0.001).project(camera).z > -1);
+    assert.equal(camera.far, 50);
+    viewer.applyEdit({ offset: [0, 0, -1], yaw: 0 });
+    assert.equal(camera.near, 0.01);
+    assert.equal(camera.far, 50);
+    viewer.dispose();
+  });
+
+  it('does not reduce near for an empty tilted bounding-box corner close to the eye', async () => {
+    const surface = compositionSurface();
+    surface.context = null;
+    const parent = surface.components[0].surface;
+    parent.depth = parent.foreground.map((selected, i) => selected ? 3.9 + 0.04 * (i % parent.width) : 4);
+    const parts = photoScene.objectSurfaceMeshes(surface), part = parts.objects[0];
+    const local = new THREE.Float32BufferAttribute(part.positions, 3), box = new THREE.Box3().setFromBufferAttribute(local);
+    const quaternion = quaternionFromEuler([0, -Math.PI / 4, 0]);
+    const rotation = new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion(...quaternion));
+    const rotated = Array.from({ length: local.count }, (_, i) => new THREE.Vector3().fromBufferAttribute(local, i).applyMatrix4(rotation));
+    const closest = rotated.reduce((a, b) => b.z > a.z || (b.z === a.z && Math.abs(b.y) < Math.abs(a.y)) ? b : a);
+    let cornerZ = -Infinity;
+    for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+      cornerZ = Math.max(cornerZ, new THREE.Vector3(x, y, z).applyMatrix4(rotation).z);
+    }
+    const position = [-closest.x, 0, 5 - cornerZ - 1e-10];
+    const viewer = await createViewer(viewportOf(800, 600), surface, textureUrls, 'Tilted relief');
+    viewer.applyArrangement({ frame: 'owner-composition', objects: [
+      { id: 'object-1', position, quaternion, scale: 1 },
+      { id: 'object-2', position: [2, 0, -2], quaternion: [0, 0, 0, 1], scale: 1 },
+    ], relationship: null });
+    const camera = globalThis.viewerCamera.camera, world = closest.clone().add(new THREE.Vector3(...position));
+    assert.ok(5 - world.z > 0.05, 'all drawn vertices are safely beyond the ordinary near plane');
+    assert.equal(camera.near, 0.01);
+    assert.equal(camera.far, 50);
+    const ndc = world.project(camera), maxDepth24 = 2 ** 24 - 1;
+    assert.ok(Math.abs(ndc.x) < 1 && Math.abs(ndc.y) < 1);
+    assert.ok(Math.round(((ndc.z + 1) / 2) * maxDepth24) < maxDepth24 - 1, 'the visible surface does not collapse into the far depth bucket');
+    viewer.dispose();
+  });
+
+  it('includes rotated and scaled composition meshes after edits and camera changes', async () => {
+    const surface = compositionSurface();
+    surface.components[1].surface.depth = surface.components[1].surface.foreground.map((selected) => selected ? 60 : 4);
+    const viewer = await createViewer(viewportOf(800, 600), surface, textureUrls, 'Transformed surfaces');
+    const edit = { frame: 'owner-composition', objects: [
+      { id: 'object-1', position: [0, 0, 4.999], quaternion: [0, 0, 0, 1], scale: 1 },
+      { id: 'object-2', position: [0, 0, 0], quaternion: quaternionFromEuler([0, Math.PI / 2, 0]), scale: 5 },
+    ], relationship: null };
+    viewer.applyArrangement(edit);
+    const camera = globalThis.viewerCamera.camera;
+    assert.ok(camera.near < 0.001);
+    const object = photoScene.objectSurfaceMeshes(surface).objects[1];
+    const point = new THREE.Vector3(...object.positions.slice(0, 3));
+    const q = new THREE.Quaternion(...edit.objects[1].quaternion);
+    point.multiplyScalar(5).applyQuaternion(q);
+    const opposite = new THREE.Vector3(...object.positions.slice(-3)).multiplyScalar(5).applyQuaternion(q);
+    const deep = point.z < opposite.z ? point : opposite;
+    assert.ok(5 - deep.z > 50);
+    assert.ok(deep.clone().project(camera).z < 1);
+    assert.ok(camera.far > 50);
+    viewer.setCamera({ position: [0, 0, -5], target: [0, 0, -6] });
+    assert.equal(camera.near, 0.01);
+    assert.ok(deep.clone().project(camera).z < 1);
+    viewer.dispose();
+  });
+
+  it('does not introduce extra draws or compute new clip planes after disposal in onDraw', async () => {
+    let viewer, draws = 0, stop = false;
+    viewer = await createViewer(viewportOf(600, 500), visitorSurface(), 'blob:texture', 'Lifecycle', { onDraw: () => {
+      draws += 1;
+      if (stop) viewer.dispose();
+    } });
+    const initial = draws, camera = globalThis.viewerCamera.camera;
+    let renders = 0;
+    globalThis.viewerRenderer.render = () => { renders += 1; };
+    stop = true;
+    viewer.applyEdit({ offset: [0, 0, 0.1], yaw: 0 });
+    assert.equal(draws, initial + 1);
+    assert.equal(renders, 1);
+    const clipping = [camera.near, camera.far];
+    viewer.setCamera({ position: [0, 0, 49], target: [0, 0, 48] });
+    for (const observer of observers) observer.callback();
+    assert.deepEqual([camera.near, camera.far], clipping);
+    assert.equal(draws, initial + 1);
+    assert.equal(renders, 1);
+    assert.equal(globalThis.viewerLog.filter((entry) => entry === 'renderer.dispose').length, 1);
+  });
+});
