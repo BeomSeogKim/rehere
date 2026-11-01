@@ -43,6 +43,7 @@ const STATIC_FILES = new Map([
   ['/outline-editor.js', ['outline-editor.js', 'text/javascript; charset=utf-8']],
   ['/photo-scene.js', ['photo-scene.js', 'text/javascript; charset=utf-8']],
   ['/composition-scene.js', ['composition-scene.js', 'text/javascript; charset=utf-8']],
+  ['/composition-description.js', ['composition-description.js', 'text/javascript; charset=utf-8']],
   ['/composition-editor.js', ['composition-editor.js', 'text/javascript; charset=utf-8']],
   ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
   ['/access-ui.js', ['access-ui.js', 'text/javascript; charset=utf-8']],
@@ -69,7 +70,7 @@ const STATIC_FILES = new Map([
 const VISITOR_FILES = new Map([
   ['/', ['visit.html', 'text/html; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
-  ...['visitor-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'composition-scene.js', 'story-player.js', 'playback.js', 'arrangement.js']
+  ...['visitor-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'composition-scene.js', 'composition-description.js', 'story-player.js', 'playback.js', 'arrangement.js']
     .map((name) => [`/${name}`, [name, 'text/javascript; charset=utf-8']]),
 ]);
 // Visitors never record or share location.

@@ -4,6 +4,8 @@
 // Apply that the server confirms. The browser never computes a transform.
 
 import { isComposition } from './composition-scene.js';
+import { compositionDifference, describeComposition } from './composition-description.js';
+import { withObject } from './arrangement.js';
 import { OBJECT_IDS } from './photo-scene.js';
 
 export const TEXT_LIMIT = 2000;
@@ -409,6 +411,15 @@ export function mountMemoryEdit(container, bridge) {
       nodes.push(
         el('p', {}, [el('strong', { textContent: 'Proposal (AI suggestion): ' }), proposalTitle(result)]),
         el('p', { className: 'hint', textContent: `Reason given: ${result.reason}` }),
+      );
+      if (composition) {
+        const before = editor.arrangement;
+        const after = before ? withObject(before, targetOf(current), result.transform) : null;
+        nodes.push(
+          el('p', { className: 'hint', textContent: `Saved now (version ${editor.version}): ${describeComposition(before, bridge.targets?.nameOf)}` }),
+          ...compositionDifference(before, after, bridge.targets?.nameOf).map((entry) => el('p', { className: 'hint', textContent: `After this change: ${entry.text}` })),
+        );
+      } else nodes.push(
         el('p', { className: 'hint', textContent: `Saved now (version ${editor.version}): ${formatTransform(editor)}` }),
         el('p', { className: 'hint', textContent: `After this change: ${formatTransform(result.transform)}` }),
       );

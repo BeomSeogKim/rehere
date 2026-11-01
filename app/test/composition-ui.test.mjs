@@ -153,6 +153,9 @@ describe('composition owner workspace', () => {
     const proposal = { id: 'proposal', targetId: 'object-1', baseVersion: 1, status: 'ready', statement: { text: 'The cabinet faced the table.' }, createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', result: { action: 'face_object', targetId: 'object-1', faceObjectId: 'object-2', sourceIds: SOURCES, transform, reason: 'It faced the table.' } };
     routes[`GET ${JOB_URL}/proposals`] = () => Promise.resolve(json(200, [proposal]));
     const ui = await mount();
+    assert.match(ui.container.textContent, /Saved now \(version 1\): In the owner's assumed layout/);
+    assert.match(ui.container.textContent, /After this change: In the owner's assumed layout/);
+    assert.doesNotMatch(ui.container.textContent, /owner position|orientation 0\.\d+,/);
     ui.button('Preview on the scene').dispatch('click');
     assert.equal(ui.button('Apply and save this proposal').disabled, true);
     const front = ui.find((node) => node.tag === 'label' && /I choose this photographed side/.test(node.textContent))[0].children[0];
@@ -251,6 +254,74 @@ function publicPacket() {
     views: [{ id: 'view-1', label: 'Assumed layout', edit: structuredClone(initial), evidence: { photos: [{ objectId: 'object-1', providerLabel: 'Archive A' }, { objectId: 'object-2', providerLabel: 'Archive B' }], arrangement: 'initial' } }], stories: [] };
 }
 describe('composition visitor', () => {
+  for (const fallback of [false, true]) it(`explains a saved relation change without numeric poses in ${fallback ? '2D fallback' : '3D'}`, async () => {
+    if (fallback) globalThis.viewerFail = 'webgl';
+    const packet = publicPacket();
+    const changed = structuredClone(packet.views[0]);
+    changed.id = 'view-2'; changed.label = 'Another arrangement';
+    changed.edit.objects[0] = { id: 'object-1', ...pose([2, 0.8, -2.5], 0.7, [0, Math.PI / 2, 0]) };
+    packet.views.push(changed);
+    const container = new FakeElement('section');
+    const visitor = mountVisitor(container, { kind: 'preview', manifest: async () => packet, check: async () => true,
+      asset: async () => ({ ok: true, json: async () => compositionSurface, blob: async () => new Blob(['photo']) }) });
+    mounted.push(visitor); await settle();
+    container.findAll((node) => node.tag === 'button' && node.textContent === changed.label)[0].dispatch('click');
+    const details = container.findAll((node) => node.className === 'visit-details')[0].textContent;
+    assert.match(details, /A: Cabinet.*right of B: Table/);
+    assert.match(details, /owner[’']s assumed layout/i);
+    assert.match(details, /assumed relative size/i);
+    assert.doesNotMatch(details, /owner position|position, orientation.*different|0\.125678|0\.512345/);
+  });
+
+  for (const fallback of [false, true]) it(`keeps recollections on the selected object and saved view in ${fallback ? '2D fallback' : '3D'}`, async () => {
+    if (fallback) globalThis.viewerFail = 'webgl';
+    const packet = publicPacket();
+    const support = (objectId, providerLabel) => ({ kind: 'human_recollection', objectId, providerLabel, status: 'owner-selected' });
+    packet.views[0].evidence.support = [support('object-1', 'Person A'), support('object-2', '<b>Person B</b>')];
+    packet.views.push({ ...structuredClone(packet.views[0]), id: 'view-2', label: 'Another recollection', evidence: {
+      ...structuredClone(packet.views[0].evidence), support: [support('object-1', 'Another person'), support(null, 'Unknown target')],
+    } });
+    const container = new FakeElement('section');
+    const visitor = mountVisitor(container, { kind: 'preview', manifest: async () => packet, check: async () => true,
+      asset: async () => ({ ok: true, json: async () => compositionSurface, blob: async () => new Blob(['photo']) }) });
+    mounted.push(visitor); await settle();
+    assert.equal(visitor.state(), fallback ? '2d' : '3d');
+    const button = (text) => container.findAll((node) => node.tag === 'button' && node.textContent === text)[0];
+    const evidence = () => container.findAll((node) => node.className === 'object-evidence')[0];
+    button('A: Cabinet').dispatch('click');
+    assert.match(evidence().textContent, /about A: Cabinet by Person A/);
+    assert.doesNotMatch(evidence().textContent, /Person B|Unknown target/);
+    button('B: Table').dispatch('click');
+    assert.match(evidence().textContent, /about B: Table by <b>Person B<\/b>/);
+    assert.doesNotMatch(evidence().textContent, /Person A/);
+    assert.equal(evidence().findAll((node) => node.tag === 'b').length, 0, 'provider text is not markup');
+    button('Another recollection').dispatch('click');
+    assert.match(evidence().textContent, /in “Another recollection”/);
+    assert.match(evidence().textContent, /No recollection about this object/);
+    assert.match(evidence().textContent, /object was not recorded. It is not assigned to this object/);
+    assert.doesNotMatch(evidence().textContent, /Person B|Another person|Unknown target/);
+    button('A: Cabinet').dispatch('click');
+    assert.match(evidence().textContent, /about A: Cabinet by Another person/);
+    assert.doesNotMatch(evidence().textContent, /Person A|Person B/);
+    assert.equal(container.findAll((node) => node.className === 'memory-text').length, 0, 'support attribution does not grant a quotation');
+  });
+
+  it('leaves the object unknown for older composition support with no target field', async () => {
+    const packet = publicPacket();
+    packet.views[0].evidence.support = [{ kind: 'human_recollection', providerLabel: 'Earlier contributor', status: 'owner-selected' }];
+    const container = new FakeElement('section');
+    const visitor = mountVisitor(container, { kind: 'preview', manifest: async () => packet, check: async () => true,
+      asset: async () => ({ ok: true, json: async () => compositionSurface, blob: async () => new Blob(['photo']) }) });
+    mounted.push(visitor); await settle();
+    for (const label of ['A: Cabinet', 'B: Table']) {
+      container.findAll((node) => node.tag === 'button' && node.textContent === label)[0].dispatch('click');
+      const evidence = container.findAll((node) => node.className === 'object-evidence')[0];
+      assert.match(evidence.textContent, /No recollection about this object/);
+      assert.match(evidence.textContent, /object was not recorded/);
+      assert.doesNotMatch(evidence.textContent, /by Earlier contributor/);
+    }
+  });
+
   it('closes the whole visitor when either texture is unavailable, and drops a late second texture after disposal', async () => {
     const container = new FakeElement('section');
     const source = { kind: 'preview', manifest: async () => publicPacket(), check: async () => true, asset: async (view, name) => ({ ok: name !== 'texture-2.jpg', json: async () => compositionSurface, blob: async () => new Blob([name]) }) };

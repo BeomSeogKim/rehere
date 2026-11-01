@@ -3,6 +3,7 @@
 // save in flight. It holds no spatial math; relation checks belong to the
 // shared scene-relations module and the server.
 import { copyArrangement as copyWholeArrangement, copyPose, isComposition } from './composition-scene.js';
+import { describeComposition } from './composition-description.js';
 
 const copyObject = (object) => object.position ? { id: object.id, ...copyPose(object) } : { id: object.id, offset: [...object.offset], yaw: object.yaw };
 export const copyArrangement = copyWholeArrangement;
@@ -111,6 +112,7 @@ const placeText = (pose) => pose.position
 
 // The whole arrangement in words: both objects and the rule.
 export function describeArrangement(arrangement, nameOf) {
+  if (arrangement?.frame === 'owner-composition') return `${describeComposition(arrangement, nameOf)} Rule: ${ruleText(arrangement.relationship ?? null, nameOf)}`;
   const objects = (arrangement?.objects ?? []).map((object) => `${nameOf(object.id)} ${placeText(object)}`);
   return `${objects.join('; ')}; rule: ${ruleText(arrangement?.relationship ?? null, nameOf)}`;
 }

@@ -56,6 +56,18 @@ poses, with each photo's evidence kept separate. Restricting either source
 blocks the whole dependent scene and its visitor snapshots, even if that
 object is offscreen. Originals and earlier scenes remain unchanged.
 
+Saved layouts and comparisons describe left/right, height, front/back,
+photographed-side direction and assumed relative size in words. Directions
+use the fixed owner layout, independent of the viewing camera. Small changes
+remain visible in the description; these words are not physical measurements
+or historical claims. The same descriptions remain available in the 2D fallback.
+
+Selecting an object in a composition visit also shows the recollections
+recorded as supporting that object in the selected saved view. Attribution
+does not mean a recollection was the only basis for the layout, or grant its
+words for sharing. Older snapshots without a recorded object keep that
+association unknown. Changing the saved view updates the evidence together.
+
 ## Build and confirm two objects from one photo
 
 Draw two boxes on a permitted photo and give each a name of 1 to 80
@@ -286,7 +298,10 @@ and `texture-2.jpg`. Their whole arrangements record `frame:
 "owner-composition"` and each object's position, unit quaternion and relative
 scale. The initial arrangement is stored explicitly. Public packets use
 object-specific `sourceIndex` and `evidence.photos`, without private source or
-parent identifiers. Single-photo representations keep their existing shapes.
+parent identifiers. New composition `evidence.support` entries include the
+recorded public `objectId`, or `null` when it cannot be established from the
+review and variant lineage. Quoted words still require explicit selection
+and current permission. Single-photo representations keep their existing shapes.
 
 These representations cover exactly two named objects. More objects, physical
 solid collision, automatic multi-view alignment and automatic object identity

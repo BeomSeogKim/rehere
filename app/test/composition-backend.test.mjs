@@ -224,6 +224,30 @@ it('keeps scale and whole arrangements through contribution alternatives, adopti
   } finally { await f.app.close(); }
 });
 
+for (const [index, objectId] of ids.entries()) it(`shares a retained recollection about ${objectId}, without adding private lineage or quotation rights`, async () => {
+  const f = await fixture();
+  try {
+    const { route } = await composed(f);
+    const contribution = await jsonResponse(await f.owner.post(`${route}/contributions`, { requestId: randomUUID(), text: 'Synthetic statement about the first object.', periodClaim: '', permissions: { place: true, model: false, share: true } }), 200);
+    const review = await jsonResponse(await f.owner.post(`${route}/contributions/${contribution.id}/review`, {
+      requestId: randomUUID(), baseVersion: 1, baseRevision: 1, decision: 'alternative', reason: 'Synthetic choice', conflict: 'unknown',
+      transform: { targetId: objectId, pose: { position: [index === 0 ? -3.7 : 3.7, 0.2, -3], quaternion: pose(-3).quaternion } },
+    }), 200);
+    const view = { id: randomUUID(), kind: 'variant', version: null, variantId: review.variant.id };
+    const published = await shared(f, route, 1, { views: [view], startViewId: view.id, contributionIds: [contribution.id] });
+    const evidence = published.preview.publicView.views[0].evidence;
+    assert.deepEqual(evidence.support, [{ kind: 'human_recollection', providerLabel: contribution.provider.displayName, status: 'owner-selected', objectId }]);
+    assert.equal(Object.hasOwn(evidence.recollections[0], 'objectId'), false);
+    const bytes = JSON.stringify(published.preview.publicView);
+    for (const privateId of [contribution.id, review.variant.id, ...f.draft.sources.map((source) => source.id), ...f.parents.map((parent) => parent.id)]) assert.equal(bytes.includes(privateId), false);
+    const unquoted = await shared(f, route, 1, { views: [view], startViewId: view.id });
+    assert.deepEqual(unquoted.preview.publicView.views[0].evidence.support, evidence.support);
+    assert.deepEqual(unquoted.preview.publicView.views[0].evidence.recollections, [], 'object attribution never grants the words');
+    await jsonResponse(await f.owner.post(`${route}/contributions/${contribution.id}/withdraw`, { requestId: randomUUID() }), 200);
+    assert.equal((await f.owner.request('/api/visit', { headers: published.headers })).status, 404);
+  } finally { await f.app.close(); }
+});
+
 it('prepares exactly two permitted model contexts and preserves quaternion tilt and scale on proposal apply', async () => {
   const calls = [];
   const proposalModel = async (call) => {

@@ -5,6 +5,7 @@
 // returns to view; any doubt closes the scene.
 
 import { copyPose, isComposition, poseProblem } from './composition-scene.js';
+import { compositionDifference } from './composition-description.js';
 import { createExploreToggle, createViewer } from './scene-viewer.js';
 import { createStoryPlayer } from './story-player.js';
 import { describeArrangement, objectNames, ruleText } from './arrangement.js';
@@ -115,7 +116,20 @@ const ARRANGEMENT_TEXT = Object.freeze({
 });
 const arrangementText = (value) => (typeof value === 'string' && Object.hasOwn(ARRANGEMENT_TEXT, value) ? ARRANGEMENT_TEXT[value] : ARRANGEMENT_TEXT.unknown);
 
-function viewDetails(view, labelOf, summary = []) {
+const knownObjectId = (id) => id === 'object-1' || id === 'object-2';
+
+function objectRecollections(view, objectId, nameOf) {
+  const support = (view.evidence?.support ?? []).filter((item) => item?.kind === 'human_recollection');
+  const related = support.filter((item) => item.objectId === objectId);
+  const nodes = [el('h4', { textContent: `Recollections used for ${nameOf(objectId)} in “${view.label}”` })];
+  if (related.length) {
+    for (const item of related) nodes.push(el('p', { textContent: `This saved view uses a recollection about ${nameOf(objectId)} by ${item.providerLabel || 'an unnamed person'}, selected by the owner. This does not establish history or mean it was the only basis for the layout.` }));
+  } else nodes.push(el('p', { className: 'hint', textContent: 'No recollection about this object is recorded as supporting this saved view.' }));
+  if (support.some((item) => !knownObjectId(item.objectId))) nodes.push(el('p', { className: 'hint', textContent: 'This view also uses a recollection whose object was not recorded. It is not assigned to this object.' }));
+  return nodes;
+}
+
+function viewDetails(view, labelOf, summary = [], nameOf = objectNames(null)) {
   const nodes = [el('h3', { textContent: view.label })];
   nodes.push(el('p', { textContent: eraText(view.era, labelOf) }));
   if (view.era && view.era.kind !== 'unknown' && view.era.statement) {
@@ -139,7 +153,9 @@ function viewDetails(view, labelOf, summary = []) {
     nodes.push(
       el('p', {
         className: 'hint',
-        textContent: `Arrangement: based on a recollection by ${support.providerLabel || 'an unnamed person'}, selected by the owner. This is separate from the model’s shape estimate.`,
+        textContent: isComposition(view.edit)
+          ? `This saved view uses a recollection by ${support.providerLabel || 'an unnamed person'}${knownObjectId(support.objectId) ? ` about ${nameOf(support.objectId)}` : ', with no recorded object'}, selected by the owner. This is separate from the model’s shape estimate and does not identify the only basis for its current layout.`
+          : `Arrangement: based on a recollection by ${support.providerLabel || 'an unnamed person'}, selected by the owner. This is separate from the model’s shape estimate.`,
       }),
     );
   }
@@ -188,17 +204,10 @@ function arrangementDifference(view, start, views, objects, nameOf) {
     if (!others) return [];
     return [el('p', { className: 'hint', textContent: `${base} is the published starting view. Other views’ saved arrangements are compared with it. ${DIFFERENCE_NOTE}` })];
   }
-  const lines = objects.map((object) => {
+  const lines = isComposition(view.edit) ? compositionDifference(start.edit, view.edit, nameOf).map((entry) => entry.text) : objects.map((object) => {
     const now = placement(view.edit, object.id);
     const then = placement(start.edit, object.id);
     if (!now || !then) return `${nameOf(object.id)}: unknown; its saved placement is not available in both views.`;
-    if (isComposition(view.edit)) {
-      const changed = [];
-      if (now.position.some((n, i) => n !== then.position?.[i])) changed.push('position');
-      if (now.quaternion.some((n, i) => n !== then.quaternion?.[i])) changed.push('orientation');
-      if (now.scale !== then.scale) changed.push('assumed relative scale');
-      return `${nameOf(object.id)}: ${changed.length ? `${changed.join(', ')} different` : 'position, orientation and assumed relative scale unchanged'}.`;
-    }
     const changed = [];
     const same = [];
     AXES.forEach(([name, more, less], i) => {
@@ -331,14 +340,15 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     const sideButton = el('button', { type: 'button', className: 'secondary', textContent: SIDE_CHOOSE, hidden: true, disabled: true });
     const sideStatus = el('p', { className: 'hint', role: 'status' });
     const evidence = el('div', { className: 'object-evidence' });
-    const evidenceSummary = el('summary', { textContent: 'Photo evidence (choose an object)' });
+    const evidenceTitle = composition ? 'Photo and memory evidence' : 'Photo evidence';
+    const evidenceSummary = el('summary', { textContent: `${evidenceTitle} (choose an object)` });
     const evidenceBox = el('details', { className: 'source-details' }, [evidenceSummary, evidence]);
     const credit = el('p', { className: 'hint' });
     const renderObjects = () => {
       if (!objects) return;
       for (const button of objectButtons.children) if (button.objectId !== undefined) button.setAttribute('aria-pressed', String(button.objectId === objectId));
       const object = objects.find((entry) => entry.id === objectId);
-      evidenceSummary.textContent = object ? `Photo evidence for ${nameOf(object.id)}` : 'Photo evidence (choose an object)';
+      evidenceSummary.textContent = object ? `${evidenceTitle} for ${nameOf(object.id)}` : `${evidenceTitle} (choose an object)`;
       if (!object) {
         evidence.replaceChildren();
         return;
@@ -352,6 +362,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           ? `Photo evidence for ${nameOf(object.id)}: this box encloses its current outline. This scene includes an owner-made outline correction; the depth remains a model estimate. Neither establishes history.`
           : `Photo evidence for ${nameOf(object.id)}: the box the owner drew. The outline inside it is a model estimate.` }),
         el('div', { className: 'anchor-frame' }, [el('img', { src: textureFor(object.id), alt: `The source photo for ${nameOf(object.id)} in “${manifest.title}”, with its box` }), box]),
+        ...(composition ? objectRecollections(views.get(currentId), object.id, nameOf) : []),
       );
     };
     // Offered only with a working 3D view of two objects and a chosen object;
@@ -483,7 +494,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       const view = views.get(id);
       if (view.edit?.objects) viewer?.applyArrangement(view.edit);
       else viewer?.applyEdit(view.edit);
-      details.replaceChildren(...viewDetails(view, labelOf, arrangementDifference(view, views.get(manifest.startViewId), manifest.views, objects, nameOf)));
+      details.replaceChildren(...viewDetails(view, labelOf, arrangementDifference(view, views.get(manifest.startViewId), manifest.views, objects, nameOf), nameOf));
       const provider = view.evidence?.photo?.providerLabel;
       credit.textContent = composition ? (view.evidence?.photos ?? []).map((photo) => `${nameOf(photo.objectId)}: photo provided by ${photo.providerLabel || 'an unnamed provider'}`).join('; ') : provider ? `Photo provided by ${provider}` : '';
       if (objects && view.edit?.objects) {
@@ -492,6 +503,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           el('p', { className: 'hint', textContent: `Arrangement in this view: ${describeArrangement(view.edit, nameOf)}.` }),
         );
       }
+      if (composition) renderObjects();
       renderStories(id);
       renderContributorPhotos(id);
       for (const button of buttons.children) button.setAttribute('aria-pressed', String(button.viewId === id));

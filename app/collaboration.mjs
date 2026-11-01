@@ -426,7 +426,7 @@ const UNKNOWN_ERA = Object.freeze({
 // version receipt, which alone identifies the target of a pre-field adoption.
 const knownObject = (value) => (OBJECT_IDS.includes(value) ? value : undefined);
 
-function reviewTarget(manifest, contribution) {
+export function reviewTarget(manifest, contribution) {
   const review = contribution?.review;
   if (!isTwoObject(manifest) || !review || (review.decision !== 'adopt' && review.decision !== 'alternative')) return null;
   const variants = collaborationOf(manifest).variants.filter((item) => item.id === review.variantId);

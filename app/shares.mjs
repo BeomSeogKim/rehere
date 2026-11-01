@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { OBJECT_IDS, arrangementOf, assertObjectsConfirmed, isTwoObject } from './arrangements.mjs';
-import { captionsIntact, contributionAllows, versionDependencies } from './collaboration.mjs';
+import { captionsIntact, contributionAllows, reviewTarget, versionDependencies } from './collaboration.mjs';
 import { photoAttested, readPlayback, readReviewPhoto } from './contribution-photos.mjs';
 import { RequestError } from './drafts.mjs';
 import { geometrySources } from './geometry-sources.mjs';
@@ -457,7 +457,8 @@ export class ShareStore {
       // Every supporting recollection is acknowledged without its wording; only
       // the explicitly selected quotes add text.
       const support = dependencies.map((id) => contributions.find((item) => item.id === id))
-        .map((item) => ({ kind: 'human_recollection', providerLabel: item.provider.displayName, status: 'owner-selected' }));
+        .map((item) => ({ kind: 'human_recollection', providerLabel: item.provider.displayName, status: 'owner-selected',
+          ...(isComposition(manifest) ? { objectId: reviewTarget(manifest, item) } : {}) }));
       const supporting = quotes.filter((item) => dependencies.includes(item.id));
       const unattached = quotes.filter((item) => !selected.some((other) => other.dependencies.includes(item.id)));
       return {
