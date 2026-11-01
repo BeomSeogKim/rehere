@@ -1,9 +1,11 @@
 # Saved visitor views
 
 A visitor link opens a fixed saved snapshot without an account. It cannot edit
-the place, submit recollections or open private originals. The current server
-is loopback-only: links work on the same computer, not as an internet-hosted
-product. No external publication occurs when testing a local link.
+the place, submit recollections or open private originals. By default links
+work on the same computer. An optional [visitor-only ingress](VISITOR-INGRESS.md)
+uses a separate port and configured visitor origin while account and editing
+routes stay private. It supplies no proxy, TLS or hosted deployment. No external
+publication occurs when testing a local link.
 
 ## Preview before issuing
 
@@ -145,7 +147,7 @@ stopped; this does not recall visitor copies or erase device backups.
 Spatial views, permitted writing and explicitly selected [recorded stories with
 captions](STORIES.md) and captioned contributor recordings can be shared.
 A story stays with its exact saved view; private edits do not rebind it.
-Hosted operation is not connected. Owners can narrow
+An external proxy is not configured by the app. Owners can narrow
 original-source grants or stop their use through [source controls](SOURCE-USES.md);
 current restrictions override every affected frozen snapshot. One server process
 owns the data directory; no multi-server or power-loss guarantee is claimed.

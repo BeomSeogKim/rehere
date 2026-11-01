@@ -26,6 +26,25 @@ export function visitToken(crypto = globalThis.crypto) {
 // the fragment, which browsers never send to a server.
 export const visitLink = (origin, token) => `${origin}/#/visit/${token}`;
 
+// The visitor address the server is configured with, from an issue answer.
+// Only an exact origin is used: HTTPS, or HTTP on localhost or 127.0.0.1 with
+// an explicit port other than 0. Anything else (a path, credentials, another
+// scheme, an unusual spelling) gives null and no link is built from it. A configured
+// address is not proof that it is reachable.
+export function visitorOrigin(value) {
+  if (typeof value !== 'string') return null;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.origin !== value || url.port === '0' || url.hostname.includes('*')) return null;
+  if (url.protocol === 'https:') return url.origin;
+  if (url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1') && url.port !== '') return url.origin;
+  return null;
+}
+
 // A recollection can be quoted only if its writer allowed both reconstruction
 // and sharing and it is still in use.
 // The contributions a saved view depends on: a version's recorded
@@ -191,7 +210,7 @@ export function mountShares(container, bridge) {
       el('p', {
         className: 'hint',
         textContent:
-          'Visitors see only what you choose here, without signing in, and cannot change anything. The link works only on this computer’s local address; nothing is published on the internet. Uses that a photo’s or a recollection’s provider did not allow cannot be added here.',
+          'Visitors see only what you choose here, without signing in, and cannot change anything. The link uses this computer’s local address, or a visitor address set up for this server; Rehere publishes nothing on the internet itself. Uses that a photo’s or a recollection’s provider did not allow cannot be added here.',
       }),
       field('Title visitors see', title),
       el('label', { className: 'memory-consent' }, [synthetic, ' Label this as synthetic test material']),
@@ -496,7 +515,23 @@ export function mountShares(container, bridge) {
     }
     issueAttempt = null;
     issuedFor = target.id;
-    const link = visitLink(location.origin, body.token);
+    // A configured visitor address is used only when it is a safe exact
+    // origin; an unusable one shows the receipt without any link.
+    const configured = result.body && Object.hasOwn(result.body, 'visitOrigin');
+    const origin = configured ? visitorOrigin(result.body.visitOrigin) : location.origin;
+    if (!origin) {
+      issueBox.replaceChildren(
+        el('div', { className: 'access-keys' }, [
+          el('p', {
+            textContent: `A visitor link was issued until ${when(result.body.expiresAt)}, but the configured visitor address in Rehere’s answer is not a usable address, so no link is shown. Revoke it under Shared views, check the visitor address setting, and issue another.`,
+          }),
+        ]),
+      );
+      message.textContent = '';
+      await loadList();
+      return;
+    }
+    const link = visitLink(origin, body.token);
     const copy = el('button', { type: 'button', className: 'secondary', textContent: 'Copy link' });
     copy.addEventListener('click', async () => {
       try {
@@ -511,7 +546,9 @@ export function mountShares(container, bridge) {
     issueBox.replaceChildren(
       el('div', { className: 'access-keys' }, [
         el('p', {
-          textContent: `Visitor link, shown only now. It works on this computer’s local address until ${when(result.body.expiresAt)} or until you revoke it. If you lose it, revoke this one and issue another.`,
+          textContent: configured
+            ? `Visitor link for the configured visitor address ${origin}, shown only now. Rehere has not checked that this address can be reached from elsewhere. The link stops working at ${when(result.body.expiresAt)} or when you revoke it. If you lose it, revoke this one and issue another.`
+            : `Visitor link, shown only now. It works on this computer’s local address until ${when(result.body.expiresAt)} or until you revoke it. If you lose it, revoke this one and issue another.`,
         }),
         el('div', { className: 'access-key' }, [el('code', { textContent: link })]),
         el('div', { className: 'actions' }, [copy, done]),

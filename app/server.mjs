@@ -53,6 +53,36 @@ const STATIC_FILES = new Map([
   ['/arrangement.js', ['arrangement.js', 'text/javascript; charset=utf-8']],
 ]);
 
+// The account-free visitor listener serves only the visit page and the exact
+// modules it loads, plus the pinned Three.js files below; never app.js, owner
+// code or raw files. `/` is the standalone visit page.
+const VISITOR_FILES = new Map([
+  ['/', ['visit.html', 'text/html; charset=utf-8']],
+  ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+  ...['visitor-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'story-player.js', 'playback.js', 'arrangement.js']
+    .map((name) => [`/${name}`, [name, 'text/javascript; charset=utf-8']]),
+]);
+// Visitors never record or share location.
+const VISITOR_PERMISSIONS = 'microphone=(), camera=(), geolocation=()';
+const VISITOR_NOT_FOUND = 'Not found.';
+
+// An exact canonical origin for the visitor listener: https, or http only on
+// localhost or 127.0.0.1 with an explicit port for local checks. No
+// credentials, path, query, fragment or wildcard. Throws for anything else.
+export function parseVisitorOrigin(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    url = null;
+  }
+  const local = url && (url.hostname === 'localhost' || url.hostname === '127.0.0.1') && url.port !== '' && url.port !== '0';
+  const valid = typeof value === 'string' && url && value === url.origin && !url.username && !url.password
+    && (url.protocol === 'https:' || (url.protocol === 'http:' && local)) && url.port !== '0' && !url.hostname.includes('*');
+  if (!valid) throw new TypeError('The visitor origin must be an exact https origin, or http on localhost or 127.0.0.1 with a port.');
+  return { origin: url.origin, host: url.host };
+}
+
 // Pinned local Three.js files. OrbitControls imports the bare specifier
 // 'three', which browsers cannot resolve without an inline import map.
 const VENDOR_FILES = new Map([
@@ -337,10 +367,13 @@ export function createAppServer({
   prepareModelImage = pythonModelImage(),
   accessStore = new AccessStore({ dataDir }),
   audioDecoder = createAudioDecoder(),
+  visitorOrigin = null,
   contributionPhotoDecoder = pythonPhotoDecoder(),
   recordingPreparer = createRecordingPreparer(),
   mediaVerifier = createMediaVerifier(),
 } = {}) {
+  // Validated before anything else is created, so a bad value starts nothing.
+  const visitor = visitorOrigin === null ? null : parseVisitorOrigin(visitorOrigin);
   const store = new DraftStore(dataDir);
   const attempts = attemptLimiter();
   const reconstructions = new ReconstructionStore({
@@ -706,7 +739,10 @@ export function createAppServer({
       }
       if (sharesMatch && req.method === 'POST') {
         const body = strictBody(await readJsonBody(req), ['requestId', 'previewId', 'previewDigest', 'token', 'consent']);
-        sendJson(res, 201, await shares.issue(draftId, jobId, owner, body));
+        // The configured visitor origin is added to the response only; the
+        // stored receipt and token are unchanged.
+        const receipt = await shares.issue(draftId, jobId, owner, body);
+        sendJson(res, 201, visitor ? { ...receipt, visitOrigin: visitor.origin } : receipt);
         return;
       }
       if (sharesMatch && reading) {
@@ -922,6 +958,54 @@ export function createAppServer({
     sendJson(res, 404, { error: 'Not found.' });
   }
 
+  // The visitor listener: the exact configured Host, GET/HEAD only, the visit
+  // page files and the existing Bearer-only visit routes. Being a separate
+  // socket, it has no private route to reach whatever the headers say. No
+  // cookie is read or set, and a POST is refused before its body is read.
+  async function handleVisitor(req, res) {
+    const writeHead = res.writeHead.bind(res);
+    res.writeHead = (status, headers = {}) => {
+      const { 'set-cookie': ignored, ...rest } = headers;
+      return writeHead(status, { ...rest, 'permissions-policy': VISITOR_PERMISSIONS });
+    };
+    if (req.headers.host !== visitor.host) {
+      sendJson(res, 403, { error: 'This address is not allowed.' }, { connection: 'close' });
+      return;
+    }
+    const target = req.url ?? '';
+    const pathname = target.split('?')[0];
+    if (!target.startsWith('/') || (req.method !== 'GET' && req.method !== 'HEAD')) {
+      sendJson(res, 404, { error: VISITOR_NOT_FOUND }, { connection: 'close' });
+      return;
+    }
+    if (pathname === '/api/visit' || pathname.startsWith('/api/visit/')) {
+      await handleVisit(req, res, pathname);
+      return;
+    }
+    const file = VISITOR_FILES.get(pathname);
+    if (file) {
+      await sendStatic(req, res, path.join(PUBLIC_DIR, file[0]), file[1]);
+      return;
+    }
+    const vendorFile = VENDOR_FILES.get(pathname);
+    if (vendorFile) {
+      const [name, type, transform] = vendorFile;
+      await sendStatic(req, res, path.join(THREE_DIR, name), type, transform);
+      return;
+    }
+    sendJson(res, 404, { error: VISITOR_NOT_FOUND });
+  }
+  const visitorServer = visitor && http.createServer((req, res) => {
+    handleVisitor(req, res).catch(() => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      console.error('visitor request failed: unexpected server error');
+      sendJson(res, 500, { error: 'Something went wrong. Please try again.' }, { connection: 'close' });
+    });
+  });
+
   const server = http.createServer((req, res) => {
     handle(req, res).catch((error) => {
       if (res.headersSent) {
@@ -940,16 +1024,88 @@ export function createAppServer({
   });
   // Closing the server also stops an active model process.
   const closeServer = server.close.bind(server);
+  // Closing the app also closes the visitor listener; closing only the
+  // visitor listener leaves the private app running.
+  // The visitor listener is bound from its 'listening' event until its own
+  // 'close' event, which fires only after its connections have drained, also
+  // when it was closed directly.
+  let visitorBound = false;
+  visitorServer?.on('listening', () => (visitorBound = true));
+  visitorServer?.on('close', () => (visitorBound = false));
+  // Completion waits until the visitor listener has also drained its
+  // connections: it is closed here if still listening, or awaited if a
+  // direct close is still draining. Never bound or already closed: nothing to wait for.
   server.close = (callback) => {
-    const stopping = Promise.all([reconstructions.close(), intakes.close(), mediaVerifier.close()]);
+    let visitorClosed = Promise.resolve();
+    if (visitorServer?.listening) visitorClosed = new Promise((resolve) => visitorServer.close(() => resolve()));
+    else if (visitorBound) visitorClosed = new Promise((resolve) => visitorServer.once('close', resolve));
+    const stopping = Promise.all([reconstructions.close(), intakes.close(), mediaVerifier.close(), visitorClosed]);
     return closeServer((error) => stopping.then(() => callback?.(error), () => callback?.(error)));
   };
+  // Unbound until its owner listens; null when no visitor origin is configured.
+  server.visitorServer = visitorServer;
   return server;
+}
+
+// The optional visitor listener from REHERE_VISITOR_ORIGIN and
+// REHERE_VISITOR_PORT: both or neither, a valid port different from the app's.
+// Returns null when neither is set; throws for anything incomplete or invalid.
+export function visitorSettings(env, appPort) {
+  const { REHERE_VISITOR_ORIGIN: origin, REHERE_VISITOR_PORT: rawPort } = env;
+  if (origin === undefined && rawPort === undefined) return null;
+  if (origin === undefined || rawPort === undefined) throw new TypeError('Set both REHERE_VISITOR_ORIGIN and REHERE_VISITOR_PORT, or neither.');
+  const port = /^[0-9]{1,5}$/.test(rawPort) ? Number(rawPort) : NaN;
+  if (!(port >= 1 && port <= 65_535) || port === appPort) throw new TypeError('REHERE_VISITOR_PORT must be a TCP port different from the app port.');
+  return { origin: parseVisitorOrigin(origin).origin, port };
+}
+
+// Starts the app, and its visitor listener when configured, on loopback only.
+// Resolves once every listener is up; if any cannot start, closes whatever
+// started and rejects, so one listener is never left running alone.
+export function listenAll(app, port, visitorPort = null) {
+  return new Promise((resolve, reject) => {
+    const failed = () => {
+      app.removeListener('error', failed);
+      app.visitorServer?.removeListener('error', failed);
+      if (app.visitorServer?.listening) app.visitorServer.close();
+      app.close(() => reject(new Error('Rehere could not start.')));
+    };
+    app.once('error', failed);
+    app.listen(port, '127.0.0.1', () => {
+      if (!app.visitorServer) {
+        app.removeListener('error', failed);
+        resolve();
+        return;
+      }
+      app.visitorServer.once('error', failed);
+      app.visitorServer.listen(visitorPort, '127.0.0.1', () => {
+        app.removeListener('error', failed);
+        app.visitorServer.removeListener('error', failed);
+        resolve();
+      });
+    });
+  });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT ?? DEFAULT_PORT);
-  createAppServer({ proposalModel: metaModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'model-budget.json') }) }).listen(port, '127.0.0.1', () => {
-    console.log(`Rehere is running at http://127.0.0.1:${port}/`);
+  let settings;
+  try {
+    settings = visitorSettings(process.env, port);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+  const app = createAppServer({ proposalModel: metaModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'model-budget.json') }), visitorOrigin: settings?.origin ?? null });
+  listenAll(app, port, settings?.port ?? null).then(() => {
+    if (!settings) {
+      console.log(`Rehere is running at http://127.0.0.1:${port}/`);
+      return;
+    }
+    console.log(`Rehere is running at http://127.0.0.1:${port}/ (private, this computer only)`);
+    console.log(`Visitor links are served at http://127.0.0.1:${settings.port}/ for ${settings.origin}; forward only this port behind an HTTPS proxy.`);
+  }, (error) => {
+    console.error(error.message);
+    process.exit(1);
   });
 }

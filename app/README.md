@@ -109,10 +109,13 @@ npm start   # http://127.0.0.1:4317/ (set PORT to change it)
 npm test
 ```
 
-The server listens on the loopback interface only. Saved memories and workspace
-authority are written to `app/data/`, which is ignored by Git. Deleting that
-folder removes both, including any access card kept inside it. Keep a separate
-secure copy of the current card.
+The private server listens on the loopback interface only. An optional
+[visitor-only ingress](VISITOR-INGRESS.md) adds a separate loopback port for
+saved visits behind an independently operated HTTPS proxy; account and editing
+routes remain private. No proxy or public deployment is configured by the app.
+Saved memories and workspace authority are written to `app/data/`, which is
+ignored by Git. Deleting that folder removes both, including any access card
+kept inside it. Keep a separate secure copy of the current card.
 
 Saving a photo requires Pillow in the prepared Python environment. Saving a
 recording requires local FFmpeg, found on `PATH` or selected for this process

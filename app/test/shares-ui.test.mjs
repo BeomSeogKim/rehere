@@ -22,6 +22,7 @@ let storyMatchesView;
 let quotable;
 let previewProblem;
 let visitLink;
+let visitorOrigin;
 let requests;
 let routes;
 let mounted;
@@ -59,7 +60,7 @@ before(async () => {
     const handler = routes[`${options.method ?? 'GET'} ${url}`] ?? (url.includes('/assets/') ? () => Promise.resolve(json(200, visitorSurface())) : null);
     return handler ? handler(body) : Promise.resolve(json(404, { error: 'Not found.' }));
   };
-  ({ mountShares, quotable, previewProblem, visitLink, viewChoices, storyMatchesView } = await import('../public/shares.js'));
+  ({ mountShares, quotable, previewProblem, visitLink, viewChoices, storyMatchesView, visitorOrigin } = await import('../public/shares.js'));
 });
 
 after(() => {
@@ -341,5 +342,53 @@ describe('owner sharing panel', () => {
     assert.deepEqual(sent[1].body, sent[0].body);
     assert.deepEqual(Object.keys(sent[0].body), ['requestId']);
     assert.match(ui.message(), /cannot be removed/);
+  });
+});
+
+describe('configured visitor address on an issued link', () => {
+  const RECEIPT = { id: 's1', createdAt: '2026-10-31T00:00:00.000Z', expiresAt: '2026-11-07T00:00:00.000Z', status: 'active', previewId: 'p1', digest: 'd1' };
+  async function issue(answer) {
+    const ui = await mount();
+    await previewed(ui);
+    ui.tick('Visitors may see the selected reconstruction');
+    routes[`POST ${SHARES}`] = () => Promise.resolve(json(201, answer));
+    ui.button('Issue a visitor link').dispatch('click');
+    await flush();
+    const [sent] = requests.filter((r) => r.method === 'POST' && r.url === SHARES);
+    return { ui, token: sent.body.token, code: ui.find((node) => node.tag === 'code')[0]?.textContent };
+  }
+
+  it('accepts only an exact HTTPS origin, or HTTP on localhost or 127.0.0.1 with a port', () => {
+    for (const ok of ['https://visit.example.org', 'https://visit.example.org:8443', 'http://127.0.0.1:4318', 'http://localhost:4318']) assert.equal(visitorOrigin(ok), ok, ok);
+    for (const bad of [
+      'https://visit.example.org/', 'https://visit.example.org/path', 'https://visit.example.org?x=1', 'https://visit.example.org#f',
+      'https://user:pw@visit.example.org', 'http://visit.example.org', 'http://127.0.0.1', 'http://192.168.0.2:4318', 'HTTPS://Visit.example.org',
+      'https://*.example.org', 'https://*', 'https://visit.*.example.org:8443', 'https://visit.example.org:0', 'http://127.0.0.1:0', 'http://localhost:0', 'http://127.0.0.1:00',
+      'javascript:alert(1)', 'data:text/html,x', 'ftp://visit.example.org', '//visit.example.org', '', ' https://visit.example.org', null, 42, {},
+    ]) assert.equal(visitorOrigin(bad), null, String(bad));
+  });
+
+  it('builds the link on a configured address and says it is configured, not checked', async () => {
+    const { ui, token, code } = await issue({ ...RECEIPT, visitOrigin: 'https://visit.example.org' });
+    assert.equal(code, `https://visit.example.org/#/visit/${token}`);
+    assert.match(ui.root.textContent, /configured visitor address https:\/\/visit\.example\.org, shown only now\. Rehere has not checked that this address can be reached from elsewhere\./);
+    const receipt = ui.find((node) => node.className === 'access-keys')[0].textContent;
+    assert.doesNotMatch(receipt, /live|deployed|published|this computer’s local address/);
+  });
+
+  it('shows the receipt without any link when the configured address is not usable', async () => {
+    for (const visitOrigin of ['javascript:alert(1)', 'https://visit.example.org/evil', 'http://visit.example.org', null]) {
+      const { ui } = await issue({ ...RECEIPT, visitOrigin });
+      assert.equal(ui.find((node) => node.tag === 'code').length, 0, String(visitOrigin));
+      assert.equal(ui.button('Copy link'), undefined);
+      assert.match(ui.root.textContent, /A visitor link was issued until .*, but the configured visitor address in Rehere’s answer is not a usable address, so no link is shown\. Revoke it under Shared views/);
+      assert.doesNotMatch(ui.root.textContent, /evil|javascript/);
+    }
+  });
+
+  it('keeps the local link and wording when no visitor address is configured', async () => {
+    const { ui, token, code } = await issue(RECEIPT);
+    assert.equal(code, `http://127.0.0.1:4317/#/visit/${token}`);
+    assert.match(ui.root.textContent, /works on this computer’s local address/);
   });
 });
