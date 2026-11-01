@@ -111,6 +111,7 @@ export function isOpenState(body) {
     typeof body.id === 'string' &&
     Number.isInteger(body.revision) &&
     typeof body.text === 'string' &&
+    (body.placeName === undefined || body.placeName === null || typeof body.placeName === 'string') &&
     body.metadata !== null &&
     typeof body.metadata === 'object' &&
     Array.isArray(body.parts) &&
@@ -167,10 +168,30 @@ function restoredInput(fresh, details, kept) {
   return { ...fresh, dates: { ...fresh.dates, fileCreatedAt: kept.dates?.fileCreatedAt ?? null, fileModifiedAt: kept.dates?.fileModifiedAt ?? null } };
 }
 
+// The owner's optional place name: at most 120 UTF-16 units and one line,
+// checked on the raw text before trimming. Only outer whitespace is trimmed;
+// empty means unnamed (null). Nothing else is changed: no case or Unicode
+// normalization. The server applies the same rules. Fixed messages never
+// repeat the input.
+export const PLACE_NAME_LIMIT = 120;
+// C0 and C1 controls (line breaks included) and bidirectional formatting
+// controls; ordinary right-to-left letters are allowed.
+const PLACE_NAME_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+export function placeNameProblem(raw) {
+  if (typeof raw !== 'string') return 'The place name could not be read.';
+  if (raw.length > PLACE_NAME_LIMIT) return `Keep the place name to ${PLACE_NAME_LIMIT} characters or fewer.`;
+  if (PLACE_NAME_CONTROLS.test(raw)) return 'The place name must be one line without control or text-direction characters.';
+  return null;
+}
+export const canonicalPlaceName = (raw) => (typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null);
+
 // The plan the form holds now. items: photos then at most one voice, each
 // { kind, file|null, details, partId, sha256, size, hints, keptInput? }.
 // keptInput is the source input a restored item had on the server.
-export function planFrom({ text, photos, voice, textDetails, textKeptInput = null }) {
+// placeName: canonical (canonicalPlaceName), always sent, null when unnamed, so
+// an omitted name never reads as a change. The server keeps an unnamed plan's
+// digest equal to the one from before names existed.
+export function planFrom({ text, photos, voice, textDetails, textKeptInput = null, placeName = null }) {
   const metadata = buildMetadata({
     photos: photos.map((item) => ({ details: item.details, file: item.file })),
     text,
@@ -182,13 +203,14 @@ export function planFrom({ text, photos, voice, textDetails, textKeptInput = nul
   if (metadata.voice) metadata.voice = restoredInput(metadata.voice, voice.details, voice.keptInput);
   if (metadata.text) metadata.text = restoredInput(metadata.text, textDetails, textKeptInput);
   const part = (item) => ({ partId: item.partId, kind: item.kind, size: item.size, sha256: item.sha256, hints: item.hints });
-  return { text, parts: [...photos.map(part), ...(voice ? [part(voice)] : [])], metadata };
+  return { text, parts: [...photos.map(part), ...(voice ? [part(voice)] : [])], metadata, placeName: placeName ?? null };
 }
 
 const planOf = (state) => ({
   text: state.text,
   parts: state.parts.map(({ partId, kind, size, sha256, hints }) => ({ partId, kind, size, sha256, hints })),
   metadata: state.metadata,
+  placeName: state.placeName ?? null,
 });
 // Whether a returned state is the plan this client recorded on base: the next
 // revision with the whole plan equal, text, parts with hints, and every

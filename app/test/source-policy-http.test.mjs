@@ -179,7 +179,10 @@ describe('archive reads after a stop', () => {
       assert.ok(!('name' in marker) && !('origin' in marker), 'no original file name or origin reference');
 
       const summary = (await owner.json('/api/drafts')).find((item) => item.id === draft.id);
-      assert.deepEqual(summary, { id: draft.id, createdAt: draft.createdAt, photoCount: 1, hasVoice: false, textPreview: '' });
+      assert.deepEqual(summary, {
+        id: draft.id, createdAt: draft.createdAt, photoCount: 1, hasVoice: false, textPreview: '',
+        place: { name: null, revision: 0, updatedAt: null, unavailable: false },
+      });
 
       for (const init of [{}, { method: 'HEAD' }, { headers: { range: 'bytes=0-3' } }, { headers: { range: 'bytes=999999-' } }, { headers: { 'if-none-match': '*' } }]) {
         await denied(await owner.request(asset(stoppedPhoto), init), `photo ${JSON.stringify(init)}`);

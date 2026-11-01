@@ -643,8 +643,26 @@ export class CollaborationStore {
       : principal.role === 'contributor' && Array.isArray(principal.draftIds) ? principal.draftIds.filter(isId) : [];
     const places = [];
     for (const draftId of draftIds) {
-      for (const job of await this.reconstructions.list(draftId)) {
-        if (job.status === 'ready') places.push({ draftId, jobId: job.id, label: `Saved place ${draftId.slice(0, 8)}`, version: job.edit.version });
+      const jobs = (await this.reconstructions.list(draftId)).filter((job) => job.status === 'ready');
+      if (jobs.length === 0) continue;
+      // Only granted drafts reach here. Their owner-chosen name and context
+      // are structured; the label never carries an ID fragment. The scene
+      // ordinal is a display-order cue among ready scenes, not an identity,
+      // and buildRequestedAt is when the build was requested, not finished.
+      const drafts = this.reconstructions.drafts;
+      const draft = await drafts.get(draftId).catch(() => null);
+      const place = await drafts.place(draftId);
+      const base = place.unavailable ? 'Place name unavailable' : place.name ?? 'Unnamed place';
+      const ordinals = new Map([...jobs].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map((job, index) => [job.id, index + 1]));
+      for (const job of jobs) {
+        const index = Array.isArray(draft?.photos) ? draft.photos.findIndex((photo) => photo?.sourceId === job.sourceId) : -1;
+        const sceneOrdinal = ordinals.get(job.id);
+        places.push({
+          draftId, jobId: job.id, version: job.edit.version,
+          label: jobs.length > 1 ? `${base} · scene ${sceneOrdinal}` : base,
+          placeName: place.name, nameUnavailable: place.unavailable, draftSavedAt: draft?.createdAt ?? null,
+          photoNumber: index >= 0 ? index + 1 : null, buildRequestedAt: job.createdAt, sceneOrdinal, sceneCount: jobs.length,
+        });
       }
     }
     return places;

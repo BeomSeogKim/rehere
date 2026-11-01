@@ -173,10 +173,12 @@ audio { width: 100%; margin-top: 12px; }
   text-decoration: none;
 }
 .saved-list a:hover { border-color: var(--accent); }
+.saved-name { display: block; font-weight: 600; overflow-wrap: anywhere; }
 .saved-meta { color: var(--muted); font-size: 0.85rem; }
 .saved-preview { display: block; margin-top: 4px; overflow-wrap: anywhere; }
 
 .back { color: var(--accent); display: inline-block; margin-top: 24px; }
+#viewer-title { overflow-wrap: anywhere; }
 .memory-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 20px 0; }
 
 .source-details { margin-top: 8px; font-size: 0.875rem; }
@@ -186,7 +188,7 @@ audio { width: 100%; margin-top: 12px; }
 .source-summary { display: block; color: var(--muted); font-weight: 400; overflow-wrap: anywhere; }
 .source-field { margin-top: 10px; }
 .source-field label, .source-permissions legend { display: block; font-weight: 600; }
-.source-field input, .source-field select {
+.source-field input, .source-field select, #place-name, .place-name-editor input {
   width: 100%;
   margin-top: 4px;
   padding: 8px;

@@ -423,8 +423,9 @@ describe('draft sources', () => {
     await writeFile(path.join(dataDir, 'drafts', id, 'draft.json'), JSON.stringify(legacy));
     await writeFile(path.join(dataDir, 'drafts', id, 'photo-1.jpg'), JPEG);
 
-    const reopened = await (await fetch(`${app.base}/api/drafts/${id}`)).json();
+    const { place, ...reopened } = await (await fetch(`${app.base}/api/drafts/${id}`)).json();
     assert.deepEqual(reopened, legacy);
+    assert.deepEqual(place, { name: null, revision: 0, updatedAt: null, unavailable: false });
     assert.equal(reopened.sources, undefined);
     assert.equal(canUseSource(reopened, 'anything', 'place'), false);
     assert.deepEqual(await bytes(await fetch(`${app.base}/api/drafts/${id}/assets/photo-1.jpg`)), JPEG);

@@ -313,6 +313,38 @@ function grantsText(permissions) {
 // again repeats that ID, and only an explicit new submission gets a new one.
 // The browser keeps only that opaque ID, per principal and place, never the
 // words, the photo, its name or its settings.
+// Contributor choices: the owner's place name (or an honest unnamed or
+// unavailable state) with the scene's own photo and build time, composed from
+// the server's structured fields. The time is when the build was requested,
+// not when it finished or when the photo was taken. No ID fragment is shown; a choice ordinal is
+// added only when two full labels would still read the same. Rows from a
+// server without these fields keep its own label.
+const shortDate = (iso) => new Date(iso).toLocaleDateString('en-US', { dateStyle: 'medium' });
+const longDate = (iso) => new Date(iso).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+const validDate = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value));
+function placeChoiceLabels(rows) {
+  const labels = rows.map((row) => {
+    if (typeof row?.nameUnavailable !== 'boolean' || !validDate(row.buildRequestedAt)) return String(row?.label ?? 'A place');
+    const place = row.nameUnavailable
+      ? 'Place name unavailable'
+      : typeof row.placeName === 'string' && row.placeName !== ''
+        ? row.placeName
+        : `Unnamed place${validDate(row.draftSavedAt) ? ` saved ${shortDate(row.draftSavedAt)}` : ''}`;
+    const photo = Number.isInteger(row.photoNumber) && row.photoNumber > 0 ? `photo ${row.photoNumber}` : 'a photo no longer shown';
+    const scene = Number.isInteger(row.sceneCount) && row.sceneCount > 1 && Number.isInteger(row.sceneOrdinal) ? `, scene ${row.sceneOrdinal} of ${row.sceneCount}` : '';
+    return `${place} · scene from ${photo}, build requested ${longDate(row.buildRequestedAt)}${scene}`;
+  });
+  const seen = new Map();
+  for (const label of labels) seen.set(label, (seen.get(label) ?? 0) + 1);
+  const counted = new Map();
+  return labels.map((label) => {
+    if (seen.get(label) === 1) return label;
+    const index = (counted.get(label) ?? 0) + 1;
+    counted.set(label, index);
+    return `${label} (choice ${index} of ${seen.get(label)})`;
+  });
+}
+
 export function mountContributor(container, { principal = null, media = null } = {}) {
   let disposed = false;
   let place = null;
@@ -1476,11 +1508,13 @@ export function mountContributor(container, { principal = null, media = null } =
       return;
     }
     for (const entry of result.body) placesById.set(`${entry.draftId}/${entry.jobId}`, entry);
+    const labels = placeChoiceLabels(result.body);
     placeSelect.replaceChildren(
       el('option', { value: '', textContent: result.body.length ? 'Choose a place' : 'No scene is ready yet' }),
-      ...result.body.map((entry) => el('option', { value: `${entry.draftId}/${entry.jobId}`, textContent: entry.label })),
+      ...result.body.map((entry, index) => el('option', { value: `${entry.draftId}/${entry.jobId}`, textContent: labels[index] })),
     );
-    if (result.body.length === 1) {
+    // A single place is chosen for the person only when its name could be read.
+    if (result.body.length === 1 && result.body[0].nameUnavailable !== true) {
       placeSelect.value = `${result.body[0].draftId}/${result.body[0].jobId}`;
       choose(result.body[0]);
     }
@@ -1514,9 +1548,10 @@ export function mountInvitations(container, { draftId }) {
   const issued = el('div');
   const message = el('p', { className: 'form-message', role: 'alert' });
 
+  const summary = el('summary', { textContent: 'Invite someone to add a recollection' });
   container.replaceChildren(
     el('details', { className: 'source-details collab-invitations' }, [
-      el('summary', { textContent: 'Invite someone to add a recollection' }),
+      summary,
       el('p', {
         className: 'hint',
         textContent:
@@ -1537,6 +1572,15 @@ export function mountInvitations(container, { draftId }) {
       message.textContent = 'Invitations could not be loaded.';
       return;
     }
+    // The place is named from the owner's own authorized rows, when there are any.
+    const named = result.body.find((invite) => invite.draftId === draftId && (typeof invite.nameUnavailable === 'boolean' || invite.placeName !== undefined));
+    summary.textContent = !named
+      ? 'Invite someone to add a recollection'
+      : named.nameUnavailable === true
+        ? 'Invite someone to add a recollection to this place (name unavailable)'
+        : typeof named.placeName === 'string' && named.placeName !== ''
+          ? `Invite someone to add a recollection to “${named.placeName}”`
+          : 'Invite someone to add a recollection to this unnamed place';
     list.replaceChildren(
       ...result.body
         .filter((invite) => invite.draftId === draftId)

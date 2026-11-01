@@ -101,7 +101,9 @@ describe('collaboration route authority', () => {
       await readyScene(owner);
       const { session: contributor } = await enrolledContributor(owner, app.base, scene.draft.id);
       const places = await contributor.json('/api/contributor/places');
-      assert.deepEqual(places.map((place) => Object.keys(place).sort()), [['draftId', 'jobId', 'label', 'version']]);
+      assert.deepEqual(places.map((place) => Object.keys(place).sort()), [[
+        'buildRequestedAt', 'draftId', 'draftSavedAt', 'jobId', 'label', 'nameUnavailable', 'photoNumber', 'placeName', 'sceneCount', 'sceneOrdinal', 'version',
+      ]]);
       assert.equal(places[0].draftId, scene.draft.id);
       assert.equal(places[0].jobId, scene.job.id);
       assert.ok(!JSON.stringify(places).includes(scene.draft.photos[0].sourceId));

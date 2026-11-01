@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { INTAKE_RECEIPT, LIMITS, RequestError, detectMedia } from './drafts.mjs';
+import { INTAKE_RECEIPT, LIMITS, RequestError, detectMedia, parsePlaceName } from './drafts.mjs';
 import { MediaVerificationError, POLICY_SHA256, attestation, attested } from './media-verification.mjs';
 import { parseSourceMetadata } from './sources.mjs';
 
@@ -49,9 +49,10 @@ function parsePart(part) {
   return { partId: part.partId, kind: part.kind, size: part.size, sha256: part.sha256, hints: { name, type, lastModified } };
 }
 
-// A whole plan: raw text kept exactly, planned parts, and source settings in
-// the existing strict schema. Blank text counts as no text, as at commit.
-function parsePlan({ text, parts, metadata }, limits) {
+// A whole plan: raw text kept exactly, planned parts, source settings in the
+// existing strict schema, and the optional place name (omitted means none).
+// Blank text counts as no text, as at commit; a name alone is no content.
+function parsePlan({ text, parts, metadata, placeName }, limits) {
   if (typeof text !== 'string' || !Array.isArray(parts)) throw fail(400, UNREADABLE);
   if (text.length > limits.textChars) throw fail(413, `The written memory must be ${limits.textChars.toLocaleString('en-US')} characters or fewer.`);
   const parsed = parts.map(parsePart);
@@ -68,10 +69,15 @@ function parsePlan({ text, parts, metadata }, limits) {
   if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) throw fail(400, 'The source details could not be read.');
   const sources = parseSourceMetadata(JSON.stringify(metadata), { photoCount: photos.length, hasText, hasVoice: voices.length === 1 });
   if (!sources) throw fail(400, 'The source details could not be read.');
-  return { text, parts: parsed, metadata };
+  return { text, parts: parsed, metadata, placeName: parsePlaceName(placeName) };
 }
 
-const planDigest = (plan) => sha256(JSON.stringify([plan.text, plan.parts, plan.metadata]));
+// Unnamed plans keep the exact earlier digest, so open intakes, replays and
+// receipts made before names existed still match; a name extends it.
+const planDigest = (plan) => sha256(JSON.stringify(plan.placeName === null
+  ? [plan.text, plan.parts, plan.metadata] : [plan.text, plan.parts, plan.metadata, plan.placeName]));
+// The plan body keys, with the optional place name.
+const planKeys = (body, keys) => exactKeys(body, keys) || exactKeys(body, [...keys, 'placeName']);
 const identity = (part) => JSON.stringify([part.partId, part.kind, part.size, part.sha256]);
 
 // One part with new state; a part that is not received keeps no verification.
@@ -99,7 +105,7 @@ function terminal(record) {
 function projectOpen(record) {
   return {
     id: record.id, status: 'open', revision: record.revision, createdAt: record.createdAt, updatedAt: record.updatedAt,
-    text: record.text, metadata: record.metadata,
+    text: record.text, metadata: record.metadata, placeName: record.placeName ?? null,
     // The private verification record is never projected; the part shape is unchanged.
     parts: record.parts.map(({ verification, ...part }) => ({ ...part, hints: { ...part.hints } })),
   };
@@ -335,7 +341,7 @@ export class IntakeStore {
   }
 
   async create(owner, body) {
-    if (!exactKeys(body, ['requestId', 'text', 'parts', 'metadata']) || !isUuid(body.requestId)) throw fail(400, UNREADABLE);
+    if (!planKeys(body, ['requestId', 'text', 'parts', 'metadata']) || !isUuid(body.requestId)) throw fail(400, UNREADABLE);
     const plan = parsePlan(body, this.limits);
     const initialSha256 = planDigest(plan);
     return this.serialize(async () => {
@@ -348,7 +354,7 @@ export class IntakeStore {
       const record = {
         id: body.requestId, status: 'open', revision: 1, ownerId: owner.id, draftId: randomUUID(), createdAt: now, updatedAt: now,
         initialSha256, planSha256: initialSha256, planRequests: {},
-        text: plan.text, metadata: plan.metadata,
+        text: plan.text, metadata: plan.metadata, placeName: plan.placeName,
         parts: plan.parts.map((part) => ({ ...part, status: 'missing', error: null, detectedType: null })),
       };
       await mkdir(this.root, { recursive: true, mode: 0o700 });
@@ -381,7 +387,7 @@ export class IntakeStore {
   }
 
   async plan(id, body) {
-    if (!exactKeys(body, ['requestId', 'baseRevision', 'text', 'parts', 'metadata']) || !isUuid(body.requestId)
+    if (!planKeys(body, ['requestId', 'baseRevision', 'text', 'parts', 'metadata']) || !isUuid(body.requestId)
       || !Number.isInteger(body.baseRevision) || body.baseRevision < 1) throw fail(400, UNREADABLE);
     const plan = parsePlan(body, this.limits);
     const digest = sha256(JSON.stringify([body.baseRevision, planDigest(plan)]));
@@ -394,6 +400,11 @@ export class IntakeStore {
         return projectIntake(record);
       }
       if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      // An older client that omits the name never clears an existing one;
+      // only an explicit null does. Exact replays were answered above.
+      if (!Object.hasOwn(body, 'placeName') && (record.placeName ?? null) !== null) {
+        throw fail(409, 'This upload has a place name. Reload it and include the name, or clear it, before changing it.');
+      }
       if (body.baseRevision !== record.revision) throw fail(409, 'The upload changed elsewhere. Reload it before changing it.');
       const current = new Map(record.parts.map((part) => [part.partId, part]));
       const parts = plan.parts.map((part) => {
@@ -406,7 +417,7 @@ export class IntakeStore {
       const removed = record.parts.filter((part) => !plan.parts.some((item) => item.partId === part.partId));
       const next = {
         ...record, revision: record.revision + 1, updatedAt: new Date().toISOString(), planSha256: planDigest(plan),
-        planRequests: { ...record.planRequests, [body.requestId]: digest }, text: plan.text, metadata: plan.metadata, parts,
+        planRequests: { ...record.planRequests, [body.requestId]: digest }, text: plan.text, metadata: plan.metadata, placeName: plan.placeName, parts,
       };
       await this.#write(next);
       for (const part of removed) await rm(this.#partFile(id, part.partId), { force: true });
@@ -634,9 +645,10 @@ export class IntakeStore {
     const sources = parseSourceMetadata(JSON.stringify(record.metadata), { photoCount: photos.length, hasText: Boolean(text), hasVoice: Boolean(voice) });
     if (!sources) throw fail(400, 'The source details could not be read.');
     const receipt = { ownerId: owner.id, intakeId: id, commitRequestId: body.requestId, revision: record.revision, planSha256: record.planSha256 };
-    // The draft folder rename is the commit boundary; a close before it saves nothing.
+    // The draft folder rename is the commit boundary; a close before it saves
+    // nothing. The initial name is published by the same rename.
     await this.drafts.create({
-      text, sources,
+      text, sources, placeName: record.placeName ?? null,
       photos: photos.map(({ bytes, type, extension }) => ({ bytes, type, extension })),
       voice: voice && { bytes: voice.bytes, type: voice.type, extension: voice.extension },
     }, { id: record.draftId, receipt, signal: this.shutdown.signal });

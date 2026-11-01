@@ -7,6 +7,9 @@ presses Record, and declining it never blocks saving.
 
 ## What it does
 
+- Optionally name a place for yourself and people invited to contribute. Rename
+  it later without changing its original material or a visitor link's title.
+  Unnamed places stay explicitly unnamed; names are never inferred.
 - Add and remove photo previews, write a memory, and optionally record, stop,
   listen back to and discard a voice recording. Recording stops automatically
   just before five minutes (4:59), leaving room for encoder padding under the
@@ -21,11 +24,13 @@ presses Record, and declining it never blocks saving.
   replace or retry it without sending successful files again. An unclear
   response is checked against the same unfinished save before retrying.
 - After a refresh, explicitly resume an unfinished save from the server.
-  Received files, text and source settings return; files that never reached
-  the server must be selected again, removed or replaced. A missing recording
+  Received files, text, the optional place name and source settings return;
+  files that never reached the server must be selected again, removed or
+  replaced. A missing recording
   needs a new take. Temporary received files are labelled as not saved yet.
 - Saved memories are listed and can be reopened to view photos, read the text
-  and play the recording. Saved memories cannot be edited.
+  and play the recording. Original material is unchanged by a place rename;
+  saved photos, writing and recordings cannot be edited through that control.
 
 Each photo, written memory and recording has its own source details: provider
 label, origin/reference, and separate permissions for place construction,
@@ -140,10 +145,32 @@ failed save leaves no partial memory and does not affect earlier ones.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/drafts` | Multipart fields `text`, `photos` (repeatable) and `voice` |
+| `POST /api/drafts` | Multipart fields `text`, `photos` (repeatable), `voice` and optional `placeName` |
 | `GET /api/drafts` | Summaries, newest first |
-| `GET /api/drafts/<id>` | One saved memory |
+| `GET /api/drafts/<id>` | One saved memory with current private place metadata |
+| `POST /api/drafts/<id>/place-name` | Owner rename or clear using `requestId`, `baseRevision` and `name` |
 | `GET /api/drafts/<id>/assets/<name>` | A file listed in that memory; supports byte ranges |
+
+The optional name is mutable owner metadata in `drafts/<id>/place.json`,
+separate from `draft.json`, originals and source-use policy. A named creation
+publishes that sidecar in the draft's single staging-directory rename. No file
+means unnamed, including old drafts; naming does not migrate their source
+records. Owner responses include the current name, its revision and an explicit
+unavailable state if that sidecar cannot be read. An unreadable optional name
+does not hide unrelated originals or other places.
+
+Renames check their name revision and preserve each successful request receipt,
+including no-ops. Retrying an exact request never reapplies an old name over a
+later change; the response identifies the processed revision and current name.
+A conflict or unclear result keeps the typed input for explicit review or the
+same-request retry. Renaming does not remount a scene or discard its unsaved
+preview. These are single-process, atomic-file guarantees, without fsync.
+
+Authorized contributor and owner-invitation choices identify the place by its
+name and existing photo/scene context. IDs remain the authoritative hidden
+selection values. Names are not sent to a model, inferred from material or
+copied into visitor payloads. Visitor titles remain separate explicit input;
+renaming never rewrites a previously issued snapshot.
 
 The entry screen first creates an owner-private unfinished save under
 `data/intakes/<id>/`. Adding a file does not upload it; only Save starts the
@@ -155,12 +182,12 @@ are display hints, never paths or source dates.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/intakes` | Start or reopen the same explicit Save using `requestId`, raw `text`, `parts` and `metadata` |
+| `POST /api/intakes` | Start or reopen the same explicit Save using `requestId`, raw `text`, `parts`, `metadata` and optional `placeName` |
 | `GET /api/intakes` | Open unfinished saves, newest first |
 | `GET /api/intakes/<id>` | Current progress or a terminal saved/discarded receipt |
 | `POST /api/intakes/<id>/parts/<part>` | Send one planned original as `application/octet-stream` |
 | `GET /api/intakes/<id>/parts/<part>` | Received bytes of an active part of an open save; supports ranges |
-| `POST /api/intakes/<id>/plan` | Update text, settings and active parts using `requestId` and `baseRevision` |
+| `POST /api/intakes/<id>/plan` | Update text, optional name, settings and active parts using `requestId` and `baseRevision` |
 | `POST /api/intakes/<id>/commit` | Commit all received originals using `requestId` and `baseRevision` |
 | `POST /api/intakes/<id>/discard` | Explicitly discard temporary progress using `requestId` |
 
@@ -170,7 +197,7 @@ same draft. Terminal intake routes return identifiers and receipts only;
 content goes through the saved draft's current source-use controls. Temporary
 part access ends even when cleanup fails. Open progress has no automatic
 expiry; explicitly discard it when no longer needed. Browser storage holds
-only opaque pending IDs scoped to the owner, never text, files or source details.
+only opaque pending IDs scoped to the owner, never names, text, files or source details.
 Unavailable browser storage still permits recovery from the server's open list.
 These guarantees coordinate one process and process restarts, without fsync
 or multi-process locking.
@@ -367,6 +394,7 @@ are discarded; the original bytes and their checksums remain unchanged.
 | Photos | Up to 20, 20 MiB each, JPEG or PNG, fully decoded within 32 megapixels; HEIC is refused |
 | Voice | One recording, 50 MiB, WebM, Ogg or MP4, with a decodable first audio track of at most 300 seconds |
 | Text | 10,000 characters before trimming; whitespace-only text is empty |
+| Place name | Optional one-line label, up to 120 UTF-16 units before trimming; not source material |
 | Empty save | Refused unless there is a photo, text or a recording |
 
 An intake plan also limits aggregate original bytes to 64 MiB. Its create and

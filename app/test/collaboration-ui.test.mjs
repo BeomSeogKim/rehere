@@ -745,3 +745,90 @@ describe('exact untouched candidate values', () => {
     assert.equal(sent.baseVersion, 2);
   });
 });
+
+describe('place names in invited contexts', () => {
+  const D2 = '22222222-2222-4222-8222-222222222222';
+  const D3 = '33333333-3333-4333-8333-333333333333';
+  const D4 = '44444444-4444-4444-8444-444444444444';
+  const J2 = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const BUILT = '2026-10-02T10:00:00.000Z';
+  const long = (iso) => new Date(iso).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+  const row = (draftId, jobId, overrides = {}) => ({
+    draftId,
+    jobId,
+    version: 1,
+    label: 'Unnamed place, scene 1',
+    placeName: 'Corner shop',
+    nameUnavailable: false,
+    draftSavedAt: '2026-10-01T08:00:00.000Z',
+    photoNumber: 1,
+    buildRequestedAt: BUILT,
+    sceneOrdinal: 1,
+    sceneCount: 1,
+    ...overrides,
+  });
+  async function mountWith(rows) {
+    routes['GET /api/contributor/places'] = () => Promise.resolve(json(200, rows));
+    routes[`GET ${JOB_URL}/collaboration`] = () => Promise.resolve(json(200, { revision: 1, contributions: [], variants: [], blocked: false, currentVersion: 1 }));
+    const root = new FakeElement('div');
+    const view = mountContributor(root);
+    await settle();
+    const select = root.findAll((node) => node.tag === 'select')[0];
+    return { view, root, select, options: select.children.slice(1).map((option) => ({ value: option.value, text: option.textContent })) };
+  }
+
+  it('names each scene by place, photo and build time, keeps duplicates apart without IDs, and selects by IDs', async () => {
+    const rows = [
+      row(DRAFT, JOB, { sceneCount: 2 }),
+      row(DRAFT, J2, { photoNumber: 2, buildRequestedAt: '2026-10-03T11:30:00.000Z', sceneOrdinal: 2, sceneCount: 2 }),
+      row(D2, JOB),
+      row(D3, JOB),
+      row(D4, J2, { placeName: null, photoNumber: null }),
+      row('55555555-5555-4555-8555-555555555555', JOB, { placeName: null, nameUnavailable: true }),
+    ];
+    const ui = await mountWith(rows);
+    assert.deepEqual(ui.options.map((option) => option.text), [
+      `Corner shop · scene from photo 1, build requested ${long(BUILT)}, scene 1 of 2`,
+      `Corner shop · scene from photo 2, build requested ${long('2026-10-03T11:30:00.000Z')}, scene 2 of 2`,
+      `Corner shop · scene from photo 1, build requested ${long(BUILT)} (choice 1 of 2)`,
+      `Corner shop · scene from photo 1, build requested ${long(BUILT)} (choice 2 of 2)`,
+      `Unnamed place saved Oct 1, 2026 · scene from a photo no longer shown, build requested ${long(BUILT)}`,
+      `Place name unavailable · scene from photo 1, build requested ${long(BUILT)}`,
+    ]);
+    assert.equal(new Set(ui.options.map((option) => option.text)).size, rows.length, 'every choice reads differently');
+    for (const { text } of ui.options) for (const id of [DRAFT, D2, D3, D4, JOB, J2]) assert.ok(!text.includes(id.slice(0, 8)), 'no ID fragment');
+    assert.deepEqual(ui.options.map((option) => option.value), rows.map((entry) => `${entry.draftId}/${entry.jobId}`), 'chosen by IDs');
+    assert.equal(ui.select.value ?? '', '', 'several places: nothing is chosen for the person');
+    ui.view.dispose();
+  });
+
+  it('never chooses a lone place whose name could not be read, and keeps a server label without the new fields', async () => {
+    const unreadable = await mountWith([row(DRAFT, JOB, { placeName: null, nameUnavailable: true })]);
+    assert.equal(unreadable.select.value ?? '', '');
+    assert.ok(!requests.some((request) => request.url === `${JOB_URL}/collaboration`), 'nothing is read for it until chosen');
+    unreadable.view.dispose();
+    const older = await mountWith([{ draftId: DRAFT, jobId: JOB, version: 1, label: 'Unnamed place, scene 1' }]);
+    assert.deepEqual(older.options.map((option) => option.text), ['Unnamed place, scene 1']);
+    assert.equal(older.select.value, `${DRAFT}/${JOB}`, 'a lone readable place is still chosen');
+    older.view.dispose();
+  });
+
+  it('names the place in the invitation summary only from the owner’s own rows', async () => {
+    const invite = (overrides) => ({ id: 'i1', draftId: DRAFT, expiresAt: '2026-11-01T00:00:00.000Z', status: 'active', ...overrides });
+    const cases = [
+      [[], 'Invite someone to add a recollection'],
+      [[invite({ placeName: 'Corner shop', nameUnavailable: false }), invite({ id: 'i2', draftId: D2, placeName: 'Elsewhere', nameUnavailable: false })], 'Invite someone to add a recollection to “Corner shop”'],
+      [[invite({ placeName: null, nameUnavailable: false })], 'Invite someone to add a recollection to this unnamed place'],
+      [[invite({ placeName: null, nameUnavailable: true })], 'Invite someone to add a recollection to this place (name unavailable)'],
+      [[invite({ id: 'i2', draftId: D2, placeName: 'Elsewhere', nameUnavailable: false })], 'Invite someone to add a recollection'],
+    ];
+    for (const [rows, expected] of cases) {
+      routes['GET /api/invitations'] = () => Promise.resolve(json(200, rows));
+      const root = new FakeElement('div');
+      const view = mountInvitations(root, { draftId: DRAFT });
+      await settle();
+      assert.equal(root.findAll((node) => node.tag === 'summary')[0].textContent, expected);
+      view.dispose();
+    }
+  });
+});

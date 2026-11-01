@@ -23,6 +23,12 @@
 
       <div id="intake-resume" class="intake-resume"></div>
       <form id="draft-form" novalidate>
+        <section id="name-panel" class="panel" aria-labelledby="name-title">
+          <h2 id="name-title"><label for="place-name">Place name</label> <span class="optional">optional</span></h2>
+          <input id="place-name" type="text" maxlength="120" autocomplete="off" aria-describedby="place-name-hint">
+          <p id="place-name-hint" class="hint">Shown to you and to people you invite to this place. It is separate from the title visitors see on a shared view, and it is not used to build scenes. You can change it later.</p>
+        </section>
+
         <section id="photos-panel" class="panel" aria-labelledby="photos-title">
           <div class="panel-head">
             <h2 id="photos-title">Photographs</h2>
@@ -66,6 +72,7 @@
       <a href="#" class="back">Back to adding memories</a>
       <h1 id="viewer-title">Saved memory</h1>
       <p id="viewer-date" class="hint"></p>
+      <div id="viewer-place-name" class="place-name-editor"></div>
       <p id="viewer-message" class="form-message" role="alert"></p>
       <section id="viewer-space" class="space" aria-label="Partial scenes" hidden></section>
       <details id="viewer-materials" class="viewer-materials">

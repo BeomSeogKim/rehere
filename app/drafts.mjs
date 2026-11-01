@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseSourceMetadata, sourceRecord } from './sources.mjs';
@@ -18,7 +18,53 @@ export const LIMITS = Object.freeze({
 
 const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const INTAKE_RECEIPT = 'intake-receipt.json';
-const FIELDS = new Set(['text', 'photos', 'voice', 'metadata']);
+const FIELDS = new Set(['text', 'photos', 'voice', 'metadata', 'placeName']);
+
+// The owner's optional place name lives in place.json beside the immutable
+// draft.json and originals, which naming never rewrites. Without the file a
+// place is unnamed.
+const PLACE_FILE = 'place.json';
+export const PLACE_NAME_MAX = 120;
+export const PLACE_RECEIPTS_MAX = 200;
+// C0 and C1 controls (including line breaks) and bidi formatting controls:
+// the Arabic letter mark, LRM/RLM, embeddings, overrides and isolates. The
+// owner page refuses exactly the same set; ordinary right-to-left letters
+// are allowed.
+const PLACE_NAME_REFUSED = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const PLACE_NAME_INVALID = 'The place name could not be used. Use one line of up to 120 characters.';
+const PLACE_UNAVAILABLE = 'Place names are unavailable right now. Nothing was changed.';
+const UNNAMED = Object.freeze({ name: null, revision: 0, updatedAt: null, unavailable: false });
+const UNAVAILABLE_NAME = Object.freeze({ name: null, revision: null, updatedAt: null, unavailable: true });
+const isUuid = (value) => typeof value === 'string' && ID_PATTERN.test(value);
+
+// The canonical name: raw length and characters are checked before the outer
+// whitespace is trimmed; an empty result means unnamed. Nothing else changes.
+// The fixed error never repeats the input.
+export function parsePlaceName(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string' || value.length > PLACE_NAME_MAX || PLACE_NAME_REFUSED.test(value)) throw new RequestError(400, PLACE_NAME_INVALID);
+  const name = value.trim();
+  return name === '' ? null : name;
+}
+
+function canonicalName(value) {
+  try {
+    return value === parsePlaceName(value);
+  } catch {
+    return false;
+  }
+}
+
+function validPlaceFile(state) {
+  return state?.schemaVersion === 1 && (state.name === null || canonicalName(state.name))
+    && Number.isInteger(state.revision) && state.revision >= 0 && (state.name === null || state.revision >= 1)
+    && (state.updatedAt === null || typeof state.updatedAt === 'string')
+    && Array.isArray(state.receipts) && state.receipts.length <= PLACE_RECEIPTS_MAX
+    && state.receipts.every((item) => isUuid(item?.requestId) && typeof item.digest === 'string' && /^[0-9a-f]{64}$/.test(item.digest)
+      && Number.isInteger(item.revision) && item.revision >= 0);
+}
+
+const placeView = (state) => ({ name: state.name, revision: state.revision, updatedAt: state.updatedAt, unavailable: false });
 
 export class RequestError extends Error {
   constructor(status, message) {
@@ -94,6 +140,7 @@ export async function parseDraft(form, limits = LIMITS) {
   const photoFiles = [];
   let voiceFile = null;
   let metadata = null;
+  let placeName;
 
   for (const [key, value] of form) {
     if (!FIELDS.has(key)) throw new RequestError(400, 'The upload contains an unexpected field.');
@@ -103,6 +150,9 @@ export async function parseDraft(form, limits = LIMITS) {
     } else if (key === 'metadata') {
       if (typeof value !== 'string' || metadata !== null) throw new RequestError(400, 'The source details could not be read.');
       metadata = value;
+    } else if (key === 'placeName') {
+      if (typeof value !== 'string' || placeName !== undefined) throw new RequestError(400, PLACE_NAME_INVALID);
+      placeName = value;
     } else if (typeof value === 'string') {
       throw new RequestError(400, 'The upload could not be read.');
     } else if (key === 'photos') {
@@ -113,6 +163,8 @@ export async function parseDraft(form, limits = LIMITS) {
     }
   }
 
+  // A name is checked before anything else is read, and never counts as content.
+  placeName = parsePlaceName(placeName);
   // Meaningful text is kept exactly as written; whitespace alone is no statement.
   text ??= '';
   if (!text.trim()) text = '';
@@ -131,7 +183,7 @@ export async function parseDraft(form, limits = LIMITS) {
   const voice = voiceFile ? await readVoice(voiceFile, limits) : null;
   const sources = parseSourceMetadata(metadata, { photoCount: photos.length, hasText: Boolean(text), hasVoice: Boolean(voice) });
   if (!sources) throw new RequestError(400, 'The source details could not be read.');
-  return { text, photos, voice, sources };
+  return { text, photos, voice, sources, placeName };
 }
 
 export class DraftStore {
@@ -146,7 +198,9 @@ export class DraftStore {
   // same rename as draft.json; the receipt is never listed or served.
   // `signal` is checked last before the final rename, which is the commit
   // boundary: once that rename has started the draft may be saved.
-  async create({ text, photos, voice, sources }, { id = randomUUID(), receipt = null, signal = null } = {}) {
+  // A given place name is written as place.json in the same staging folder,
+  // so it is published by the same rename as the draft, or not at all.
+  async create({ text, photos, voice, sources, placeName = null }, { id = randomUUID(), receipt = null, signal = null } = {}) {
     const staging = path.join(this.tempDir, id);
     const draft = {
       id,
@@ -185,6 +239,10 @@ export class DraftStore {
         draft.voice = { name, type: voice.type, size: voice.bytes.length, sourceId };
       }
       if (receipt) await writeFile(path.join(staging, INTAKE_RECEIPT), JSON.stringify(receipt, null, 2), { mode: 0o600 });
+      if (placeName !== null) {
+        const place = { schemaVersion: 1, name: placeName, revision: 1, updatedAt: draft.createdAt, receipts: [] };
+        await writeFile(path.join(staging, PLACE_FILE), JSON.stringify(place, null, 2), { mode: 0o600 });
+      }
       await writeFile(path.join(staging, 'draft.json'), JSON.stringify(draft, null, 2));
       await mkdir(this.draftsDir, { recursive: true });
       if (signal?.aborted) throw new RequestError(503, 'The app is shutting down. Nothing was saved.');
@@ -220,6 +278,73 @@ export class DraftStore {
       if (draft) drafts.push(draft);
     }
     return drafts.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  // The stored state, null when there is none, or an error for an unreadable
+  // or invalid file.
+  async #placeState(id) {
+    let text;
+    try {
+      text = await readFile(path.join(this.draftsDir, id, PLACE_FILE), 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw new RequestError(503, PLACE_UNAVAILABLE);
+    }
+    let state;
+    try {
+      state = JSON.parse(text);
+    } catch {
+      throw new RequestError(503, PLACE_UNAVAILABLE);
+    }
+    if (!validPlaceFile(state)) throw new RequestError(503, PLACE_UNAVAILABLE);
+    return state;
+  }
+
+  // The owner metadata of one place, read fresh. Unreadable metadata is
+  // reported as unavailable, never as unnamed, and never hides the draft.
+  async place(id) {
+    if (!ID_PATTERN.test(id)) return { ...UNAVAILABLE_NAME };
+    try {
+      const state = await this.#placeState(id);
+      return state ? placeView(state) : { ...UNNAMED };
+    } catch {
+      return { ...UNAVAILABLE_NAME };
+    }
+  }
+
+  // Owner rename. The caller serializes it (the reconstruction store's mutex).
+  // An exact replay is found before the revision and cap checks and never
+  // reapplies; every successful request, a no-op included, keeps a receipt so
+  // its ID cannot be reused for another change.
+  async renamePlace(id, body) {
+    const valid = body !== null && typeof body === 'object' && !Array.isArray(body) && Object.keys(body).length === 3
+      && isUuid(body.requestId) && Number.isInteger(body.baseRevision) && body.baseRevision >= 0 && Object.hasOwn(body, 'name');
+    if (!valid) throw new RequestError(400, 'The request could not be read.');
+    const name = parsePlaceName(body.name);
+    if (!(await this.get(id))) throw new RequestError(404, 'This memory could not be found.');
+    const state = await this.#placeState(id);
+    const digest = createHash('sha256').update(JSON.stringify([body.baseRevision, name])).digest('hex');
+    const current = state ?? { schemaVersion: 1, name: null, revision: 0, updatedAt: null, receipts: [] };
+    const receipt = current.receipts.find((item) => item.requestId === body.requestId);
+    if (receipt) {
+      if (receipt.digest !== digest) throw new RequestError(409, 'This request was already used with different values.');
+      return { draftId: id, place: placeView(current), changed: false, replayed: true, appliedRevision: receipt.revision };
+    }
+    if (current.receipts.length >= PLACE_RECEIPTS_MAX) throw new RequestError(409, 'This place name cannot be changed again.');
+    if (body.baseRevision !== current.revision) throw new RequestError(409, 'The place name changed elsewhere. Reload it before saving.');
+    const changed = name !== current.name;
+    const next = changed ? { ...current, name, revision: current.revision + 1, updatedAt: new Date().toISOString() } : { ...current };
+    next.receipts = [...current.receipts, { requestId: body.requestId, digest, revision: next.revision }];
+    const file = path.join(this.draftsDir, id, PLACE_FILE);
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(next, null, 2), { flag: 'wx', mode: 0o600 });
+      await rename(temporary, file);
+    } catch {
+      await rm(temporary, { force: true }).catch(() => {});
+      throw new RequestError(503, 'The place name could not be saved. Nothing was changed.');
+    }
+    return { draftId: id, place: placeView(next), changed, replayed: false, appliedRevision: next.revision };
   }
 
   // Only names recorded in the draft's own metadata can be served.

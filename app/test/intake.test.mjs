@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createSourceDetails } from '../public/source-details.js';
-import { createIntakeSession, detailsFromSourceInput, identify, intakeApi, partHints, pendingIds, planFrom, sha256Hex } from '../public/intake.js';
+import {
+  canonicalPlaceName,
+  createIntakeSession,
+  detailsFromSourceInput,
+  identify,
+  intakeApi,
+  partHints,
+  pendingIds,
+  placeNameProblem,
+  planFrom,
+  sha256Hex,
+} from '../public/intake.js';
 
 // A small in-memory server following the intake contract: plan, received
 // parts by exact size and hash, compare-and-swap plans, terminal receipts.
@@ -595,5 +606,57 @@ describe('identity, plan and storage', () => {
       ['/api/intakes/i/parts/p', 'POST', 'application/octet-stream'],
       ['/api/intakes/i/commit', 'POST', 'application/json'],
     ]);
+  });
+});
+
+describe('place names in a plan', () => {
+  it('checks the raw name in UTF-16 units and one line before trimming, then trims only the outer whitespace', () => {
+    assert.equal(placeNameProblem(`${'a'.repeat(118)}😀`), null, 'an emoji counts as two units: 120 in all');
+    assert.match(placeNameProblem(`${'a'.repeat(119)}😀`), /^Keep the place name to 120 characters or fewer\.$/);
+    assert.match(placeNameProblem(' '.repeat(121)), /120 characters/, 'raw length, before trimming');
+    for (const control of ['\n', '\t', '\u0000', '\u007f', '\u0085', '\u061c', '\u200e', '\u200f', '\u202a', '\u202e', '\u2066', '\u2069']) {
+      assert.equal(placeNameProblem(`a${control}b`), 'The place name must be one line without control or text-direction characters.', JSON.stringify(control));
+    }
+    assert.equal(placeNameProblem('\u0645\u0642\u0647\u0649 Caf\u00e9'), null, 'right-to-left letters are ordinary text');
+    assert.equal(canonicalPlaceName('  a  b  '), 'a  b');
+    assert.equal(canonicalPlaceName('   '), null);
+    assert.equal(canonicalPlaceName(''), null);
+    assert.equal(canonicalPlaceName('e\u0301 Ab'), 'e\u0301 Ab', 'no case or Unicode normalization');
+  });
+
+  it('always carries the name, null when unnamed', () => {
+    const base = { text: 't', photos: [], voice: null, textDetails: createSourceDetails() };
+    assert.deepEqual(Object.keys(planFrom(base)).sort(), ['metadata', 'parts', 'placeName', 'text']);
+    assert.equal(planFrom(base).placeName, null);
+    assert.deepEqual(planFrom({ ...base, placeName: null }), planFrom(base));
+    assert.equal(planFrom({ ...base, placeName: 'Shop' }).placeName, 'Shop');
+  });
+
+  // A server answering create with a given name; commit answers saved.
+  function session(serverName) {
+    const calls = [];
+    const state = (body, revision) => ({ id: body.requestId ?? 'i', status: 'open', revision, text: body.text, metadata: body.metadata, parts: [], ...(serverName === undefined ? {} : { placeName: serverName }) });
+    let open = null;
+    const api = {
+      create: async (body) => (calls.push('create'), (open = state(body, 1)), { status: 201, ok: true, body: open }),
+      read: async () => ({ status: 200, ok: true, body: open }),
+      commit: async () => (calls.push('commit'), { status: 201, ok: true, body: { id: open.id, status: 'committed', revision: 1, draftId: 'd1' } }),
+    };
+    return { calls, run: (intended) => createIntakeSession({ api, ids: { add() {}, remove() {}, setCommit() {} }, newId: () => 'i' }).save(intended, new Map()) };
+  }
+  const plan = (placeName) => planFrom({ text: 't', photos: [], voice: null, textDetails: createSourceDetails(), placeName });
+
+  it('treats a plan that differs only in its name as a newer plan from elsewhere', async () => {
+    const differs = session('Someone else’s name');
+    assert.equal((await differs.run(plan('Mine'))).kind, 'conflict');
+    assert.deepEqual(differs.calls, ['create'], 'nothing is committed');
+    const same = session('Mine');
+    assert.deepEqual(await same.run(plan('Mine')), { kind: 'saved', draftId: 'd1' });
+  });
+
+  it('accepts an unnamed answer with no name field or a null name as the same unnamed plan', async () => {
+    assert.equal((await session(undefined).run(plan(null))).kind, 'saved');
+    assert.equal((await session(null).run(plan(null))).kind, 'saved');
+    assert.equal((await session(null).run(plan('Mine'))).kind, 'conflict');
   });
 });

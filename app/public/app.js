@@ -2,7 +2,19 @@ import { mountAccess } from './access-ui.js';
 import { mountContributor } from './collaboration.js';
 import { registerElement, stopAll } from './playback.js';
 import { isStopped, mountSourceControls, renderStoppedMarker } from './source-controls.js';
-import { createIntakeSession, detailsFromSourceInput, identify, intakeApi, isOpenState, isTerminalState, pendingIds, planFrom, sha256Hex } from './intake.js';
+import {
+  canonicalPlaceName,
+  createIntakeSession,
+  detailsFromSourceInput,
+  identify,
+  intakeApi,
+  isOpenState,
+  isTerminalState,
+  pendingIds,
+  placeNameProblem,
+  planFrom,
+  sha256Hex,
+} from './intake.js';
 import { latestOnly } from './latest.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import {
@@ -31,6 +43,7 @@ const els = {
   ownerApp: $('owner-app'),
   compose: $('compose'),
   form: $('draft-form'),
+  placeName: $('place-name'),
   addPhotos: $('add-photos'),
   photoInput: $('photo-input'),
   photoList: $('photo-list'),
@@ -49,6 +62,7 @@ const els = {
   viewer: $('viewer'),
   viewerTitle: $('viewer-title'),
   viewerDate: $('viewer-date'),
+  viewerPlaceName: $('viewer-place-name'),
   viewerMessage: $('viewer-message'),
   viewerPhotos: $('viewer-photos'),
   viewerText: $('viewer-text'),
@@ -61,7 +75,7 @@ const els = {
   savedList: $('saved-list'),
   intakeResume: $('intake-resume'),
   intakeStatus: $('intake-status'),
-  inputPanels: [$('photos-panel'), $('text-panel'), $('voice-panel')],
+  inputPanels: [$('name-panel'), $('photos-panel'), $('text-panel'), $('voice-panel')],
 };
 
 // Each photo object owns its source details, so they follow the photo when
@@ -69,6 +83,9 @@ const els = {
 const photos = [];
 let textSource = { details: createSourceDetails(), state: {} };
 const viewRequests = latestOnly();
+// The saved list: only the most recently started read may replace it, so an
+// older read cannot bring back a name a newer one already shows.
+const listRequests = latestOnly();
 let space = null;
 let spaceGeneration = 0;
 let saving = false;
@@ -285,6 +302,7 @@ function resetForm() {
   for (const photo of photos) URL.revokeObjectURL(photo.url);
   photos.length = 0;
   renderPhotos();
+  els.placeName.value = '';
   els.text.value = '';
   els.textCount.textContent = '0';
   textSource = { details: createSourceDetails(), state: {} };
@@ -337,6 +355,11 @@ async function save(includeVoice) {
       setMessage('Add a photo, a written memory or a voice recording before saving.');
       return;
     }
+    const nameProblem = placeNameProblem(els.placeName.value);
+    if (nameProblem) {
+      setMessage(`${nameProblem} ${KEPT}`);
+      return;
+    }
     const total = photos.reduce((sum, photo) => sum + (photo.file?.size ?? photo.size ?? 0), 0) + (voice?.size ?? 0);
     if (total > REQUEST_BYTES) {
       setMessage('Everything saved at once must total 64 MB or less. Remove a photo or record a shorter message.');
@@ -357,7 +380,7 @@ async function save(includeVoice) {
     const recording = voiceItem ?? (includeVoice ? lostVoice : null);
     for (const item of [...photos, ...(recording ? [recording] : [])]) await identify(item);
     if (!stillOwner(generation)) return;
-    const intended = planFrom({ text, photos, voice: recording, textDetails: textSource.details, textKeptInput });
+    const intended = planFrom({ text, photos, voice: recording, textDetails: textSource.details, textKeptInput, placeName: canonicalPlaceName(els.placeName.value) });
     const files = new Map([...photos, ...(recording ? [recording] : [])].filter((item) => item.file).map((item) => [item.partId, item.file]));
     intake ??= newIntake();
     const session = intake;
@@ -508,12 +531,16 @@ async function discardIntake(session) {
 
 async function loadSaved() {
   const generation = sessionGeneration;
-  let drafts;
-  try {
-    const response = await fetch('/api/drafts');
-    if (!response.ok) throw new Error();
-    drafts = await response.json();
-  } catch {
+  const { current, value: drafts } = await listRequests.run(async () => {
+    try {
+      const response = await fetch('/api/drafts');
+      return response.ok ? await response.json() : null;
+    } catch {
+      return null;
+    }
+  });
+  if (!current) return;
+  if (!Array.isArray(drafts)) {
     if (!stillOwner(generation)) return;
     els.savedEmpty.hidden = false;
     els.savedEmpty.textContent = 'Saved memories could not be loaded. Reload the page to try again.';
@@ -527,6 +554,10 @@ async function loadSaved() {
       const item = document.createElement('li');
       const link = document.createElement('a');
       link.href = `#/memories/${draft.id}`;
+      const name = document.createElement('span');
+      name.className = 'saved-name';
+      name.textContent = placeLabel(placeOf(draft));
+      link.append(name);
       const meta = document.createElement('span');
       meta.className = 'saved-meta';
       const parts = [formatDate(draft.createdAt)];
@@ -577,6 +608,10 @@ let routeScene = null;
 let materialsFor = null;
 
 async function showDraft(id, notice = '', sceneId = null) {
+  // Another memory never shows this one's name, not even while loading.
+  if (placeView?.draftId !== id) clearPlace();
+  // A rename answered while this read was out is newer than what it returns.
+  const epoch = placeView?.epoch ?? null;
   disposeSourceViews();
   els.viewerDate.textContent = '';
   els.viewerMessage.textContent = '';
@@ -608,6 +643,10 @@ async function showDraft(id, notice = '', sceneId = null) {
     els.viewerMaterials.open = draft.photos.length === 0;
   }
   const asset = (name) => `/api/drafts/${draft.id}/assets/${encodeURIComponent(name)}`;
+  // A re-read of the same memory keeps an open rename and its typed text.
+  if (placeView?.draftId !== draft.id) placeView = { draftId: draft.id, place: placeOf(draft), editing: false, value: '', attempt: null, busy: false, message: '', epoch: 0 };
+  else if (!placeView.busy && placeView.epoch === epoch) placeView.place = placeOf(draft);
+  renderPlace();
   els.viewerDate.textContent = `Saved ${formatDate(draft.createdAt)}`;
   els.viewerMessage.textContent = notice;
   // Drafts saved before source details have no sources; each item then shows
@@ -672,6 +711,177 @@ async function showDraft(id, notice = '', sceneId = null) {
   if (draft.photos.length || sceneId) openSpace(draft, source, sceneId);
 }
 
+// ------------------------------------------------------------ place names
+
+// The place metadata the server derives for a saved memory. Anything
+// unreadable is shown as unavailable, never as unnamed.
+function placeOf(record) {
+  const place = record?.place;
+  const named = place?.name === null || (typeof place?.name === 'string' && place.name !== '');
+  if (place?.unavailable === false && named && Number.isInteger(place.revision) && place.revision >= 0) return { name: place.name, revision: place.revision, unavailable: false };
+  return { name: null, revision: null, unavailable: true };
+}
+const placeLabel = (place) => (place.unavailable ? 'Place name unavailable' : place.name ?? 'Unnamed place');
+const quotedName = (place) => (place.unavailable ? 'unavailable' : place.name === null ? 'unnamed' : `“${place.name}”`);
+
+function node(tag, props = {}, children = []) {
+  const element = document.createElement(tag);
+  Object.assign(element, props);
+  element.append(...children);
+  return element;
+}
+
+// The open memory's name and its rename: { draftId, place, editing, value,
+// attempt, busy, message, epoch }. attempt is a rename whose answer is not
+// known yet; Save repeats it exactly while the typed name is the same. epoch
+// counts rename answers applied; a read of the name applies only if none was
+// applied since it began. Renaming changes only the heading, this
+// region and the saved list, never the scene.
+let placeView = null;
+
+function clearPlace() {
+  placeView = null;
+  els.viewerTitle.textContent = 'Saved memory';
+  els.viewerPlaceName.replaceChildren();
+}
+
+function renderPlace() {
+  const view = placeView;
+  if (!view) {
+    els.viewerPlaceName.replaceChildren();
+    return;
+  }
+  els.viewerTitle.textContent = placeLabel(view.place);
+  const nodes = [];
+  if (view.place.unavailable) {
+    nodes.push(node('p', { className: 'hint', textContent: 'The name of this place could not be read, so it cannot be changed right now. Its photos, writing and scenes are not affected.' }));
+  }
+  if (view.editing) {
+    const input = node('input', { type: 'text', maxLength: 120, value: view.value, disabled: view.busy, autocomplete: 'off' });
+    input.setAttribute('aria-label', 'Place name');
+    input.addEventListener('input', () => {
+      view.value = input.value;
+    });
+    const save = node('button', { type: 'button', textContent: 'Save name', disabled: view.busy || view.place.unavailable });
+    save.addEventListener('click', saveName);
+    const cancel = node('button', { type: 'button', className: 'secondary', textContent: 'Cancel', disabled: view.busy });
+    cancel.addEventListener('click', cancelRename);
+    nodes.push(
+      input,
+      node('p', { className: 'hint', textContent: 'Leave it empty to remove the name. Titles of shared views are not changed.' }),
+      node('div', { className: 'actions' }, [cancel, save]),
+    );
+  } else if (!view.place.unavailable) {
+    const rename = node('button', { type: 'button', className: 'secondary', textContent: view.place.name === null ? 'Name this place' : 'Rename' });
+    rename.addEventListener('click', () => {
+      Object.assign(view, { editing: true, value: view.place.name ?? '', message: '' });
+      renderPlace();
+      els.viewerPlaceName.querySelector?.('input')?.focus();
+    });
+    nodes.push(node('div', { className: 'actions' }, [rename]));
+  }
+  if (view.message) nodes.push(node('p', { className: 'hint', role: 'status', textContent: view.message }));
+  els.viewerPlaceName.replaceChildren(...nodes);
+}
+
+async function placeRequest(url, options) {
+  try {
+    const response = await fetch(url, { credentials: 'same-origin', ...options });
+    return { status: response.status, ok: response.ok, body: await response.json().catch(() => null) };
+  } catch {
+    return { status: 0, ok: false, body: null };
+  }
+}
+
+// The current name from the server, or null when it cannot be read now.
+async function readPlace(draftId) {
+  const result = await placeRequest(`/api/drafts/${draftId}`, { cache: 'no-store' });
+  return result.ok && result.body?.id === draftId ? placeOf(result.body) : null;
+}
+
+async function saveName() {
+  const view = placeView;
+  if (!view || view.busy || view.place.unavailable) return;
+  const problem = placeNameProblem(view.value);
+  if (problem) {
+    view.message = `${problem} The name was not changed.`;
+    renderPlace();
+    return;
+  }
+  const name = canonicalPlaceName(view.value);
+  if (view.attempt?.name !== name) view.attempt = { name, body: { requestId: crypto.randomUUID(), baseRevision: view.place.revision, name } };
+  const { body } = view.attempt;
+  view.busy = true;
+  view.message = 'Saving the name…';
+  renderPlace();
+  const generation = sessionGeneration;
+  const result = await placeRequest(`/api/drafts/${view.draftId}/place-name`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  if (!stillOwner(generation) || placeView !== view) return;
+  view.busy = false;
+  const reason = typeof result.body?.error === 'string' ? result.body.error : '';
+  const answered = result.ok && result.body?.draftId === view.draftId && placeOf(result.body).unavailable === false;
+  if (answered) {
+    // The answer names the current place, which a replay may show renamed since.
+    const place = placeOf(result.body);
+    view.epoch += 1;
+    Object.assign(view, { place, editing: false, value: '', attempt: null });
+    view.message =
+      place.name !== body.name
+        ? `That rename was recorded earlier, and the place has been renamed since. Its name is now ${quotedName(place)}.`
+        : result.body.changed === false && result.body.replayed !== true
+          ? 'The name was already this, so nothing changed.'
+          : 'Name saved.';
+    renderPlace();
+    loadSaved();
+    return;
+  }
+  if (result.status === 409) {
+    // Changed elsewhere: show the current name and keep the typed text. Only
+    // a further explicit Save replaces it.
+    view.attempt = null;
+    view.busy = true;
+    renderPlace();
+    const current = await readPlace(view.draftId);
+    if (!stillOwner(generation) || placeView !== view) return;
+    view.busy = false;
+    view.epoch += 1;
+    if (current) view.place = current;
+    view.message = current
+      ? `The name was changed elsewhere, so yours was not saved. It is now ${quotedName(current)}. Your text is still here; press Save name to replace it, or Cancel.`
+      : `${reason || 'The name was changed elsewhere, so yours was not saved.'} Your text is still here. Reload the page to see the current name.`;
+    renderPlace();
+    loadSaved();
+    return;
+  }
+  if (result.status === 0 || result.status >= 500 || !reason || result.ok) {
+    // No clear answer: it may or may not have been saved.
+    view.message = `${reason ? `${reason} ` : ''}Rehere could not confirm the rename. Press Save name to repeat the same request, or Cancel to see the current name.`;
+    renderPlace();
+    return;
+  }
+  view.attempt = null;
+  view.message = `${reason} The name was not changed.`;
+  renderPlace();
+}
+
+async function cancelRename() {
+  const view = placeView;
+  if (!view || view.busy) return;
+  const uncertain = Boolean(view.attempt);
+  Object.assign(view, { editing: false, value: '', attempt: null, message: '' });
+  renderPlace();
+  if (!uncertain) return;
+  // A rename whose answer never arrived: show what the server holds now.
+  const generation = sessionGeneration;
+  const epoch = view.epoch;
+  const current = await readPlace(view.draftId);
+  if (!stillOwner(generation) || placeView !== view || view.editing || view.epoch !== epoch) return;
+  if (current) view.place = current;
+  else view.message = 'The current name could not be read. Reload the page to see it.';
+  renderPlace();
+  loadSaved();
+}
+
 // The 3D module loads only for a memory with photos; if it cannot load, the
 // rest of the memory stays readable.
 async function openSpace(draft, source, sceneId = null) {
@@ -731,6 +941,7 @@ function route() {
   if (!match) {
     stopViewerVoice();
     disposeSourceViews();
+    clearPlace();
   }
   els.compose.hidden = memoryLink;
   els.viewer.hidden = !memoryLink;
@@ -747,6 +958,7 @@ els.photoInput.addEventListener('change', () => {
   addPhotos([...els.photoInput.files]);
   els.photoInput.value = '';
 });
+els.placeName.addEventListener('input', updateResumeLabels);
 els.text.addEventListener('input', () => {
   els.textCount.textContent = els.text.value.length.toLocaleString('en-US');
   updateResumeLabels();
@@ -765,6 +977,7 @@ els.saveWithoutVoice.addEventListener('click', () => save(false));
 window.addEventListener('hashchange', route);
 
 function clearViewer() {
+  clearPlace();
   disposeSourceViews();
   els.viewerDate.textContent = '';
   els.viewerMessage.textContent = '';
@@ -792,7 +1005,7 @@ function startOwner(principal) {
 const TAKE_STATES = new Set(['requesting', 'recording', 'finalizing', 'recorded']);
 function formHasContent() {
   const { state, recording } = recorder.snapshot();
-  return photos.length > 0 || els.text.value.trim() !== '' || Boolean(recording) || TAKE_STATES.has(state);
+  return photos.length > 0 || els.placeName.value.trim() !== '' || els.text.value.trim() !== '' || Boolean(recording) || TAKE_STATES.has(state);
 }
 
 // After sign-in: settle saves this browser was waiting on, then offer every
@@ -930,6 +1143,7 @@ async function resumeIntake(id) {
         identity: file ? { file, partId: part.partId } : null,
       });
     });
+    els.placeName.value = state.placeName ?? '';
     els.text.value = state.text;
     els.textCount.textContent = state.text.length.toLocaleString('en-US');
     if (state.metadata?.text) {

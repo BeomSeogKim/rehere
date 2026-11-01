@@ -50,7 +50,8 @@ describe('intake creation', () => {
       const created = await owner.post('/api/intakes', body);
       assert.equal(created.status, 201);
       const open = await created.json();
-      assert.deepEqual(Object.keys(open).sort(), ['createdAt', 'id', 'metadata', 'parts', 'revision', 'status', 'text', 'updatedAt']);
+      assert.deepEqual(Object.keys(open).sort(), ['createdAt', 'id', 'metadata', 'parts', 'placeName', 'revision', 'status', 'text', 'updatedAt']);
+      assert.equal(open.placeName, null);
       assert.equal(open.id, body.requestId);
       assert.equal(open.status, 'open');
       assert.equal(open.revision, 1);

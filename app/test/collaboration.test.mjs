@@ -161,7 +161,13 @@ describe('collaboration scope', () => {
 
   it('lists only scoped ready places without source details', async () => {
     const ctx = await setup();
-    const expected = [{ draftId: ctx.draftId, jobId: ctx.jobId, label: `Saved place ${ctx.draftId.slice(0, 8)}`, version: 1 }];
+    const draft = await ctx.collaboration.reconstructions.drafts.get(ctx.draftId);
+    const job = await ctx.collaboration.reconstructions.get(ctx.draftId, ctx.jobId);
+    // An unnamed place: structured context, and a label with no ID fragment.
+    const expected = [{
+      draftId: ctx.draftId, jobId: ctx.jobId, version: 1, label: 'Unnamed place', placeName: null, nameUnavailable: false,
+      draftSavedAt: draft.createdAt, photoNumber: 1, buildRequestedAt: job.createdAt, sceneOrdinal: 1, sceneCount: 1,
+    }];
     assert.deepEqual(await ctx.collaboration.places(ctx.alex), expected);
     assert.deepEqual(await ctx.collaboration.places(ctx.owner), expected);
     assert.deepEqual(await ctx.collaboration.places(ctx.outsider), []);

@@ -112,6 +112,7 @@ const SECURITY_HEADERS = {
 
 const ASSET_PATH = /^\/api\/drafts\/([^/]+)\/assets\/([^/]+)$/;
 const DRAFT_PATH = /^\/api\/drafts\/([^/]+)$/;
+const PLACE_NAME_PATH = /^\/api\/drafts\/([^/]+)\/place-name$/;
 const SOURCE_SIZE_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/image-size$/;
 const SOURCE_POLICY_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/policy$/;
 const INTAKE_PATH = /^\/api\/intakes\/([^/]+)$/;
@@ -537,7 +538,12 @@ export function createAppServer({
     }
     if (pathname === '/api/invitations' && reading) {
       const owner = await requireOwner();
-      sendJson(res, 200, await accessStore.invitations(owner.id));
+      // The owner's own invitations only; names are added after that scope.
+      const rows = await accessStore.invitations(owner.id);
+      sendJson(res, 200, await Promise.all(rows.map(async (row) => {
+        const place = await store.place(row.draftId);
+        return { ...row, placeName: place.name, nameUnavailable: place.unavailable };
+      })));
       return;
     }
     if (pathname === '/api/invitations' && req.method === 'POST') {
@@ -924,12 +930,12 @@ export function createAppServer({
         for (const [kind, file] of media) await mediaVerifier.verify({ kind, type: file.type, bytes: file.bytes, signal });
         return store.create(parsed, { signal });
       });
-      sendJson(res, 201, await policies.projectDraft(draft));
+      sendJson(res, 201, { ...(await policies.projectDraft(draft)), place: await store.place(draft.id) });
       return;
     }
     if (pathname === '/api/drafts' && reading) {
       const drafts = await store.list();
-      sendJson(res, 200, (await Promise.all(drafts.map((draft) => policies.projectDraft(draft)))).map(summary));
+      sendJson(res, 200, await Promise.all(drafts.map(async (draft) => ({ ...summary(await policies.projectDraft(draft)), place: await store.place(draft.id) }))));
       return;
     }
     const assetMatch = ASSET_PATH.exec(pathname);
@@ -946,8 +952,17 @@ export function createAppServer({
     const draftMatch = DRAFT_PATH.exec(pathname);
     if (draftMatch && reading) {
       const draft = await store.get(draftMatch[1]);
-      if (draft) sendJson(res, 200, await policies.projectDraft(draft));
+      if (draft) sendJson(res, 200, { ...(await policies.projectDraft(draft)), place: await store.place(draft.id) });
       else sendJson(res, 404, { error: 'This memory could not be found.' });
+      return;
+    }
+    const placeNameMatch = PLACE_NAME_PATH.exec(pathname);
+    if (placeNameMatch) {
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      if (!UUID.test(placeNameMatch[1])) throw new RequestError(404, 'This memory could not be found.');
+      const body = await readJsonBody(req);
+      // Serialized with every other scene and source-setting change.
+      sendJson(res, 200, await reconstructions.serialize(() => store.renamePlace(placeNameMatch[1], body)));
       return;
     }
     const staticFile = STATIC_FILES.get(pathname);
