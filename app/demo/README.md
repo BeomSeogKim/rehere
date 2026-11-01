@@ -105,6 +105,30 @@ older room B swaps background landmarks without moving the counter; it cannot
 establish a counter-position correction and remains a separate discrepancy
 control.
 
+### Static album comparison
+
+To compare the same inputs with an ordinary photo album, build one static page
+from an existing contributor-photo fixture folder. Python 3 and its standard
+library are sufficient:
+
+```sh
+python3 generate_album_comparison.py --input-dir generated/contributor-photo --output-dir /tmp/rehere-album
+```
+
+The command refuses an existing output folder. It accepts the inputs only when
+`fixture.json` matches its frozen hash, each PNG matches its listed hash and
+size, and the baseline matches room A. It creates a private folder with exact
+copies of both PNGs and `album.html`, then reads them back to confirm the bytes.
+
+The page shows both full images without cropping, embedded so it needs no
+other file, script or network. They sit side by side on a wide screen and stack
+on a narrow one. Each card carries its statement, attribution and unknown time:
+the synthetic proposed-turn input "Turn the photographed side of this counter
+toward the window." and the exact fictional contribution from the synthetic
+account **Synthetic reference contributor**. It also states the attribution,
+unknown time, unknowns and source hashes. It shows no model answer, proposal
+outcome or measured movement, and it supports no historical or preference claim.
+
 ## Archival counter example
 
 Fetch a pinned official display JPEG of Walker Evans's **General store
