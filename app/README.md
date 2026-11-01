@@ -308,6 +308,17 @@ earlier saved position creates a new version and preserves intervening history,
 statements and originals. Provider failure produces an explicit failed state;
 there is no prerecorded or local keyword-parser substitute for a model call.
 
+A collapsed "Saved proposals" list shows every stored proposal with its
+target, request time (or "time unknown"), status and the start of its
+statement. Reviewing one is local: nothing is sent, planned or previewed, and
+the review states that the response was stored earlier with its model, not
+newly generated. Choosing another ends any preview, so the guide and front
+check are done again. Choosing is blocked while an action runs, while any
+planning is queued or processing (that planning stays reviewable), or while
+a request outcome is still unknown. A redacted proposal shows only a fixed
+notice. A reviewed proposal that leaves the list is cleared, and no other is
+chosen in its place.
+
 All routes below extend `/api/drafts/<id>/reconstructions/<job>`:
 
 | Endpoint | Purpose |

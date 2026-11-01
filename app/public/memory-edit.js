@@ -67,10 +67,32 @@ export function proposalStatusText(proposal) {
   }
 }
 
-// The server redacts a proposal whose scene depends on a withdrawn
-// recollection: its words, result and question are no longer available.
+// The server redacts a proposal whose scene can no longer be used (for
+// example it depends on a withdrawn or unavailable recollection): its words,
+// result and question are no longer available.
 export const isRedacted = (proposal) => proposal.redacted === true || typeof proposal.statement?.text !== 'string';
-export const REDACTED_TEXT = 'This memory and its proposal are no longer shown, because the scene they were made for depends on a withdrawn recollection.';
+export const REDACTED_TEXT = 'This saved proposal is no longer shown, because the scene it was made for can no longer be used.';
+
+const STATUS_SHORT = {
+  queued: 'Waiting to send',
+  processing: 'Being planned',
+  ready: 'Proposed change',
+  clarify: 'Needs more detail',
+  failed: 'No change proposed',
+  canceled: 'Canceled',
+  stale: 'For an older version',
+  interrupted: 'Interrupted',
+};
+const shortStatus = (proposal) => (proposal.status === 'applied' ? `Applied as version ${proposal.appliedVersion}` : STATUS_SHORT[proposal.status] ?? 'Status unknown');
+const validTime = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value));
+const timeText = (value) => (validTime(value) ? new Date(value).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : 'Time unknown');
+// A short start of the person's own words, cut at a word boundary.
+function excerpt(text) {
+  const words = text.replace(/\s+/g, ' ').trim();
+  if (words.length <= 60) return words;
+  const cut = words.slice(0, 60);
+  return `${(cut.lastIndexOf(' ') > 30 ? cut.slice(0, cut.lastIndexOf(' ')) : cut).trimEnd()}…`;
+}
 
 export function historyLabel(entry) {
   if (entry.kind === 'initial') return 'Original position';
@@ -134,6 +156,19 @@ export function mountMemoryEdit(container, bridge) {
   let applyAttempt = null;
   let cancelAttempt = null;
   let undoAttempt = null;
+  // Which proposal is reviewed: 'unset' until one is shown (the newest
+  // planning, else the newest not applied), 'kept' while one is shown, and
+  // 'removed' once the shown one left the list; nothing is then chosen for
+  // the person again.
+  let selection = 'unset';
+  // A proposal seen redacted stays redacted here, whatever a later read says.
+  const redactedIds = new Set();
+  // A reviewed proposal that left a fresh list stays out of this panel, so no
+  // later or late answer can bring its words or controls back.
+  const removedIds = new Set();
+  const hidden = (id) => redactedIds.has(id) || removedIds.has(id);
+  // updatedAt only moves forward; an older answer never replaces a newer one.
+  const older = (next, than) => Boolean(than) && String(next.updatedAt ?? '') < String(than.updatedAt ?? '');
   const blocked = proposalBlockedReason(bridge.source);
 
   const text = el('textarea', { rows: 3, maxLength: TEXT_LIMIT });
@@ -148,6 +183,9 @@ export function mountMemoryEdit(container, bridge) {
   status.setAttribute('aria-live', 'polite');
   const message = el('p', { className: 'form-message', role: 'alert' });
   const review = el('div', { className: 'memory-review' });
+  const chooserSummary = el('summary', { textContent: 'Saved proposals' });
+  const chooserNote = el('p', { className: 'hint' });
+  const chooser = el('ul', { className: 'memory-proposals' });
   const historyList = el('ol', { className: 'memory-history', reversed: true });
 
   const label = el('label', { htmlFor: text.id, textContent: 'What do you remember about this object?' });
@@ -170,6 +208,7 @@ export function mountMemoryEdit(container, bridge) {
         ]),
     status,
     message,
+    el('details', { className: 'source-details' }, [chooserSummary, chooserNote, chooser]),
     review,
     el('details', { className: 'source-details' }, [el('summary', { textContent: 'Saved versions' }), historyList]),
   );
@@ -207,14 +246,89 @@ export function mountMemoryEdit(container, bridge) {
   // still the saved version; after a reload or another save it is settled.
   const reusable = (attempt) => attempt && attempt.body.baseVersion === bridge.editor().version;
 
+  const anyActive = () => Boolean(current && ACTIVE.has(current.status)) || proposals.some((proposal) => ACTIVE.has(proposal.status));
+  // An unknown plan, cancel, apply or undo outcome; apply and undo only while
+  // their request can still be repeated.
+  const unsettled = () => Boolean(planAttempt || cancelAttempt || (applyAttempt && reusable(applyAttempt)) || (undoAttempt && reusable(undoAttempt)));
+  // Why another proposal cannot be reviewed now, or ''. Planning in progress
+  // stays reachable: only planning proposals can be chosen then.
+  function switchBlock(target) {
+    if (busy) return 'Wait for the current action to finish before reviewing another proposal.';
+    if (unsettled()) return 'Rehere could not confirm an earlier request. Repeat it, or load the saved version, before reviewing another proposal.';
+    if (anyActive() && !(target && ACTIVE.has(target.status))) return 'A memory is being planned. Until it finishes or is canceled, only that planning can be reviewed.';
+    return '';
+  }
+
+  // Shown with the record from the newest read; redacted ones never return.
+  function guard(proposal) {
+    if (isRedacted(proposal)) {
+      redactedIds.add(proposal.id);
+      return proposal;
+    }
+    if (!redactedIds.has(proposal.id)) return proposal;
+    return { ...proposal, statement: { ...proposal.statement, text: null }, result: null, question: null, error: null, model: null, usage: null, redacted: true };
+  }
+
+  // Choosing is local: no request, no preview. A preview of the previous one
+  // ends, so its guide and front check go with it.
+  function choose(id) {
+    const target = proposals.find((proposal) => proposal.id === id);
+    if (!target || target.id === current?.id || switchBlock(target)) return;
+    if (previewing) setPreview(false);
+    frontChecked = false;
+    if (pollingId && pollingId !== id) stopPolling();
+    current = target;
+    selection = 'kept';
+    message.textContent = '';
+    status.textContent = '';
+    if (ACTIVE.has(target.status)) poll(id);
+    sync();
+  }
+
+  // The reviewed proposal is gone from a fresh list: nothing is reviewed and
+  // nothing else is chosen in its place.
+  function dropSelection() {
+    removedIds.add(current.id);
+    if (previewing) setPreview(false);
+    if (pollingId === current?.id) stopPolling();
+    current = null;
+    selection = 'removed';
+    status.textContent = 'The proposal you were reviewing is no longer listed. Choose another one from the saved proposals.';
+  }
+
+  function renderChooser() {
+    chooserSummary.textContent = `Saved proposals (${proposals.length})`;
+    chooserNote.textContent = switchBlock(null);
+    chooser.replaceChildren(
+      ...proposals.map((proposal) => {
+        const target = bridge.targets && targetOf(proposal) ? `${bridge.targets.nameOf(targetOf(proposal)) ?? 'An object'} · ` : '';
+        const label = isRedacted(proposal)
+          ? `${target}${timeText(proposal.createdAt)} · ${REDACTED_TEXT}`
+          : `${target}${timeText(proposal.createdAt)} · ${shortStatus(proposal)} · “${excerpt(proposal.statement.text)}”`;
+        const selected = proposal.id === current?.id;
+        const pick = el('button', { type: 'button', className: 'secondary', textContent: selected ? 'Reviewing' : 'Review this proposal', disabled: selected || Boolean(switchBlock(proposal)) });
+        pick.setAttribute('aria-pressed', String(selected));
+        pick.addEventListener('click', () => choose(proposal.id));
+        return el('li', {}, [el('span', { className: 'space-choice-label', textContent: label }), pick]);
+      }),
+    );
+  }
+
   function sync() {
     if (disposed) return;
+    // Only a shown, unredacted ready proposal can stay on the scene, whatever
+    // status a record claims: a redaction ends its guide, front check and lock.
+    if (previewing && (!current || current.status !== 'ready' || isRedacted(current) || !current.result?.transform)) setPreview(false);
     const editor = bridge.editor();
     const raw = text.value;
     count.textContent = raw.length.toLocaleString('en-US');
-    const active = current && ACTIVE.has(current.status);
+    const active = anyActive();
     const needsTarget = bridge.targets && !bridge.targets.selected();
-    hint.textContent = needsTarget
+    hint.textContent = planAttempt
+      ? 'Pressing Plan repeats the earlier unconfirmed request exactly, as it was sent. Anything you changed since stays here for a new plan once that one is settled.'
+      : active
+      ? 'A memory is being planned. Wait for it to finish, or cancel it, before planning another.'
+      : needsTarget
       ? 'Choose the object this memory is about before planning.'
       : !editor.clean
       ? 'Save or revert your manual change, or load the saved version, before planning from a memory.'
@@ -223,7 +337,11 @@ export function mountMemoryEdit(container, bridge) {
         : !consent.checked
           ? 'Tick the box to allow sending this message and the photo to Meta.'
           : '';
-    plan.disabled = Boolean(blocked) || busy || active || needsTarget || !editorReady() || !raw.trim() || raw.length > TEXT_LIMIT || !consent.checked;
+    // Repeating an unconfirmed plan is always possible; it is not a new plan.
+    plan.disabled = planAttempt
+      ? Boolean(blocked) || busy
+      : Boolean(blocked) || busy || active || needsTarget || !editorReady() || !raw.trim() || raw.length > TEXT_LIMIT || !consent.checked;
+    renderChooser();
     renderReview();
     renderHistory();
   }
@@ -244,6 +362,11 @@ export function mountMemoryEdit(container, bridge) {
     // the scene has moved on, which version is saved now.
     const moved = current.status === 'applied' && current.appliedVersion !== editor.version ? ` The saved scene is now version ${editor.version}.` : '';
     const nodes = [el('p', { className: 'memory-status', textContent: `${proposalStatusText(current)}${moved}` })];
+    // A stored response is reviewed as it was saved; nothing is sent again.
+    if (current.status === 'ready' || current.status === 'clarify') {
+      const when = validTime(current.createdAt) ? `on ${timeText(current.createdAt)}` : 'at an unknown time';
+      nodes.push(el('p', { className: 'hint', textContent: `Saved response from ${current.model ?? 'an unknown model'}, requested ${when}. It was stored then; reviewing it sends nothing new.` }));
+    }
     nodes.push(el('p', { className: 'memory-statement' }, [el('strong', { textContent: 'Your memory: ' }), `“${current.statement.text}”`]));
     // A plan stays with the object it was made for, whatever is chosen now.
     if (bridge.targets && targetOf(current)) nodes.push(el('p', { className: 'hint', textContent: `Planned for ${bridge.targets.nameOf(targetOf(current))}.` }));
@@ -398,14 +521,26 @@ export function mountMemoryEdit(container, bridge) {
     const [list, versions] = await Promise.all([request(`${bridge.jobUrl}/proposals`), request(`${bridge.jobUrl}/history`)]);
     if (disposed || token !== readToken) return;
     if (list.ok && Array.isArray(list.body)) {
-      proposals = list.body;
-      if (current) current = proposals.find((proposal) => proposal.id === current.id) ?? current;
-      else current = proposals.find((proposal) => proposal.status !== 'applied') ?? null;
+      proposals = list.body.filter((proposal) => !removedIds.has(proposal?.id)).map(guard);
+      if (current) {
+        const fresh = proposals.find((proposal) => proposal.id === current.id);
+        // A newer answer already shown (from polling or an action) is kept
+        // over an older listed record; a redacted one always wins.
+        if (!fresh) dropSelection();
+        else if (!isRedacted(fresh) && !isRedacted(current) && String(current.updatedAt ?? '') > String(fresh.updatedAt ?? '')) {
+          proposals = proposals.map((proposal) => (proposal.id === current.id ? current : proposal));
+        } else current = fresh;
+      } else if (selection === 'unset') {
+        current = proposals.find((proposal) => ACTIVE.has(proposal.status)) ?? proposals.find((proposal) => proposal.status !== 'applied') ?? null;
+        if (current) selection = 'kept';
+      }
+      // A poll for a proposal this list shows finished, or no longer reviewed,
+      // is obsolete; its answer is dropped.
+      if (pollingId && (pollingId !== current?.id || !ACTIVE.has(current.status))) stopPolling();
       if (current && ACTIVE.has(current.status) && pollingId !== current.id) poll(current.id);
     }
     if (versions.ok && Array.isArray(versions.body)) history = versions.body;
     if (!list.ok || !versions.ok) status.textContent = 'Saved proposals or versions could not be loaded. Reload the page to try again.';
-    if (previewing && current?.status !== 'ready') setPreview(false);
     sync();
   }
 
@@ -416,8 +551,21 @@ export function mountMemoryEdit(container, bridge) {
     const tick = async () => {
       const result = await request(`${bridge.jobUrl}/proposals/${id}`);
       if (disposed || token !== pollToken) return;
-      if (result.ok && result.body) {
-        current = result.body;
+      // Only the proposal still reviewed is updated by its poll.
+      if (current?.id !== id || removedIds.has(id)) {
+        stopPolling();
+        return;
+      }
+      if (result.ok && result.body?.id === id && older(result.body, current)) {
+        // An answer older than what is shown changes nothing. Polling goes on
+        // while what is shown is still planning, and ends once it finished.
+        if (ACTIVE.has(current.status)) pollTimer = setTimeout(tick, POLL_MS);
+        else stopPolling();
+        return;
+      }
+      if (result.ok && result.body?.id === id) {
+        current = guard(result.body);
+        proposals = proposals.map((proposal) => (proposal.id === id ? current : proposal));
         status.textContent = '';
         if (!ACTIVE.has(current.status)) {
           stopPolling();
@@ -457,8 +605,10 @@ export function mountMemoryEdit(container, bridge) {
       const raw = text.value;
       const { version } = bridge.editor();
       const targetId = bridge.targets ? bridge.targets.selected() : undefined;
-      if (bridge.targets && !targetId) return;
-      if (!planAttempt || planAttempt.text !== raw || planAttempt.baseVersion !== version || planAttempt.targetId !== targetId) {
+      // An unconfirmed plan is repeated exactly until the server answers it;
+      // only then can newer text start a new plan.
+      if (!planAttempt) {
+        if (bridge.targets && !targetId) return;
         planAttempt = { requestId: crypto.randomUUID(), baseVersion: version, text: raw, consent: true, ...(bridge.targets ? { targetId } : {}) };
       }
       const result = await postJson(`${bridge.jobUrl}/proposals`, planAttempt);
@@ -479,7 +629,9 @@ export function mountMemoryEdit(container, bridge) {
       }
       if (previewing) setPreview(false);
       frontChecked = false;
-      current = result.body;
+      if (pollingId) stopPolling();
+      current = guard(result.body);
+      selection = 'kept';
       proposals = [current, ...proposals.filter((proposal) => proposal.id !== current.id)];
       if (ACTIVE.has(current.status)) poll(current.id);
     }),
@@ -500,8 +652,9 @@ export function mountMemoryEdit(container, bridge) {
         message.textContent = serverError(result, 'The planning could not be canceled.');
         return;
       }
-      if (current?.id === target.id) {
-        current = result.body;
+      if (current?.id === target.id && !removedIds.has(target.id) && !older(result.body, current)) {
+        current = guard(result.body);
+        proposals = proposals.map((proposal) => (proposal.id === current.id ? current : proposal));
         if (!ACTIVE.has(current.status)) stopPolling();
       }
     });
@@ -529,7 +682,24 @@ export function mountMemoryEdit(container, bridge) {
         return;
       }
       setPreview(false);
-      current = result.body.proposal ?? current;
+      // The receipt itself may carry the proposal redacted (for example a
+      // replay after its source stopped): that is recorded first.
+      if (result.body.proposal?.id === target.id) guard(result.body.proposal);
+      // The proposal was redacted (now or while this was on its way) or left the list:
+      // its words are not shown again and its edit is not taken into the
+      // editor here; the saved version is loaded explicitly instead. What is
+      // shown is scrubbed at once, without waiting for another read.
+      if (hidden(target.id)) {
+        proposals = proposals.filter((proposal) => !removedIds.has(proposal.id)).map(guard);
+        if (current?.id === target.id) current = removedIds.has(target.id) ? null : guard(current);
+        message.textContent = `Rehere saved this change as version ${result.body.edit.version}, but its proposal is no longer shown here. Load the saved version to see the scene as saved.`;
+        bridge.conflict();
+        return;
+      }
+      if (current?.id === target.id && result.body.proposal?.id === target.id) {
+        current = guard(result.body.proposal);
+        proposals = proposals.map((proposal) => (proposal.id === current.id ? current : proposal));
+      }
       if (adopt(result.body.edit)) status.textContent = `Saved new arrangement version ${result.body.edit.version}.`;
     });
   }

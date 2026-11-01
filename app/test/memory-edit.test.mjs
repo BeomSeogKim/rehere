@@ -59,6 +59,7 @@ before(() => {
     if (url === `${JOB_URL}/proposals`) return state.listGet ? state.listGet() : json(200, state.proposals);
     if (url === `${JOB_URL}/history`) return json(200, state.history);
     if (url === `${JOB_URL}/proposals/${PROPOSAL_ID}`) return state.proposalGet();
+    if (state.byUrl?.[url]) return state.byUrl[url]();
     return json(404, { error: 'Not found.' });
   };
 });
@@ -234,12 +235,14 @@ describe('memory proposal panel', () => {
     view.write('The counter faced the window.');
     view.agree();
     view.button('Plan a change').dispatch('click');
-    state.proposalGet = () => json(200, proposal({ status: 'processing', result: null, model: null, usage: null }));
+    // As on the server: the accepted proposal is listed, and each later state is newer.
+    state.proposalGet = () => json(200, proposal({ status: 'processing', result: null, model: null, usage: null, updatedAt: '2026-10-31T00:00:01.000Z' }));
+    state.proposals = [proposal({ status: 'queued', result: null, model: null, usage: null })];
     posts[0].respond(json(202, proposal({ status: 'queued', result: null, model: null, usage: null })));
     await settle();
     assert.match(view.container.textContent, /Meta is reading your memory/);
     assert.ok(view.button('Cancel planning'));
-    state.proposalGet = () => json(200, proposal());
+    state.proposalGet = () => json(200, proposal({ updatedAt: '2026-10-31T00:00:02.000Z' }));
 
     await new Promise((resolve) => setTimeout(resolve, 2100));
     await settle();
@@ -531,7 +534,7 @@ describe('memory proposal panel', () => {
     const view = mount({ editor: { version: 2, offset: [0, 0, 0], yaw: 0.5, clean: true } });
     await settle();
     const textNow = view.container.textContent;
-    assert.match(textNow, /no longer shown, because the scene they were made for depends on a withdrawn recollection/);
+    assert.match(textNow, /This saved proposal is no longer shown, because the scene it was made for can no longer be used\./);
     assert.match(textNow, /The memory for this change is no longer shown\./);
     assert.doesNotMatch(textNow, /null|AI suggestion|Your memory: /);
     assert.equal(view.button('Preview on the scene'), undefined);
@@ -551,5 +554,392 @@ describe('memory proposal panel', () => {
     const before = gets;
     await new Promise((resolve) => setTimeout(resolve, 2100));
     assert.equal(gets, before);
+  });
+
+});
+
+describe('saved proposals chooser', () => {
+  const ID_A = '0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a';
+  const ID_B = '0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b';
+  const ID_C = '0c0c0c0c-0c0c-4c0c-8c0c-0c0c0c0c0c0c';
+  const statement = (text) => ({ id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', kind: 'human_memory', text, sha256: 'a'.repeat(64), modelConsent: true });
+  // Newest first, as the server lists them.
+  const clarifyA = () => proposal({ id: ID_A, status: 'clarify', result: null, question: 'Which window?', statement: statement('It faced a window.'), createdAt: '2026-10-31T10:00:00.000Z', updatedAt: '2026-10-31T10:00:05.000Z' });
+  const readyB = (overrides = {}) =>
+    proposal({ id: ID_B, statement: statement('The counter was turned toward the door, the way it stood when the shop was busy.'), createdAt: '2026-10-30T09:00:00.000Z', updatedAt: '2026-10-30T09:00:05.000Z', ...overrides });
+  const faceAnchor = (id, label) => ({
+    action: 'face_anchor', targetId: 'selected-foreground', sourceId: 'src', baseVersion: 1, delta: null, yawDelta: null,
+    anchor: { label, point: [0.2, 0.3] }, question: null, reason: `It faced the ${label}.`, transform: { offset: [0, 0, 0], yaw: 0.3 },
+  });
+  const row = (view, words) => view.find((node) => node.tag === 'li' && node.textContent.includes(words))[0];
+  const pick = (view, words) => row(view, words).findAll((node) => node.tag === 'button')[0];
+  const shown = (view) => view.calls.filter(([name, transform]) => name === 'showTransform' && transform);
+
+  it('reviews an older ready response chosen over the newest clarification, sending nothing and moving nothing', async () => {
+    state.proposals = [clarifyA(), readyB()];
+    const view = mount();
+    await settle();
+    view.write('My newer note, not sent.');
+    view.agree();
+    assert.match(view.container.textContent, /Saved proposals \(2\)/);
+    assert.match(view.container.textContent, /Which window\?/, 'the newest not applied is reviewed first');
+    assert.match(row(view, 'It faced a window').textContent, /Oct 31, 2026.*Needs more detail · “It faced a window\.”/);
+    assert.match(row(view, 'toward the door').textContent, /Proposed change · “The counter was turned toward the door, the way it stood…”/);
+    pick(view, 'toward the door').dispatch('click');
+    await settle();
+    assert.equal(posts.length, 0, 'choosing sends nothing');
+    assert.equal(shown(view).length, 0, 'nothing is shown on the scene before Preview');
+    assert.equal(pick(view, 'toward the door').textContent, 'Reviewing');
+    assert.match(view.container.textContent, /Saved response from muse-spark-1\.3, requested on Oct 30, 2026.*It was stored then; reviewing it sends nothing new\./);
+    assert.match(view.container.textContent, /Reason given: The memory says the counter turned toward the window\./);
+    assert.equal(view.text().value, 'My newer note, not sent.');
+    assert.equal(view.consent().checked, true);
+    view.button('Preview on the scene').dispatch('click');
+    assert.equal(shown(view).length, 1, 'only an explicit preview shows it');
+    view.handle.dispose();
+  });
+
+  it('says when a response time is unknown', async () => {
+    state.proposals = [readyB({ createdAt: null, model: null })];
+    const view = mount();
+    await settle();
+    assert.match(view.container.textContent, /Saved response from an unknown model, requested at an unknown time\./);
+    assert.match(row(view, 'toward the door').textContent, /^Time unknown · /);
+    view.handle.dispose();
+  });
+
+  it('ends a preview when another proposal is chosen, so its guide and front check must be done again', async () => {
+    state.proposals = [readyB({ id: ID_C, result: faceAnchor(ID_C, 'window'), statement: statement('Facing the window.') }), readyB({ result: faceAnchor(ID_B, 'door') })];
+    const view = mount();
+    await settle();
+    view.button('Preview on the scene').dispatch('click');
+    const front = () => view.find((node) => node.tag === 'label' && /I checked the scene/.test(node.textContent))[0]?.children[0];
+    front().checked = true;
+    front().dispatch('change');
+    assert.equal(view.button('Apply and save this proposal').disabled, false);
+    pick(view, 'toward the door').dispatch('click');
+    assert.deepEqual(view.calls.at(-2), ['showTransform', null], 'the old guide is removed');
+    assert.deepEqual(view.calls.at(-1), ['setLocked', false]);
+    assert.ok(view.button('Preview on the scene'), 'a fresh preview is needed');
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    view.button('Preview on the scene').dispatch('click');
+    assert.equal(front().checked, false, 'the front check is asked again');
+    assert.equal(posts.length, 0);
+    view.handle.dispose();
+  });
+
+  it('offers no preview for stale, applied or redacted records, and shows no words for a redacted one', async () => {
+    const redacted = readyB({ id: ID_C, status: 'stale', redacted: true, statement: { ...statement(null) }, result: null, question: null, error: 'Internal reason.', model: 'muse-spark-1.3' });
+    state.proposals = [readyB({ id: ID_A, status: 'stale', statement: statement('Older base.') }), readyB({ status: 'applied', appliedVersion: 2, statement: statement('Applied one.') }), redacted];
+    const view = mount({ editor: { version: 2, offset: [0, 0, 0], yaw: 0.3, clean: true } });
+    await settle();
+    for (const words of ['Older base', 'Applied one', 'no longer shown']) {
+      const button = pick(view, words);
+      if (button.textContent !== 'Reviewing') button.dispatch('click');
+      assert.equal(view.button('Preview on the scene'), undefined, words);
+    }
+    const line = row(view, 'no longer shown').textContent;
+    assert.match(line, /This saved proposal is no longer shown, because the scene it was made for can no longer be used\./);
+    assert.doesNotMatch(view.container.textContent, /null|Internal reason|Saved response from/);
+    assert.match(row(view, 'Applied one').textContent, /Applied as version 2/);
+    view.handle.dispose();
+  });
+
+  it('keeps the chosen ID across reads, clears it when it is gone without choosing another, and never shows redacted words again', async () => {
+    state.proposals = [clarifyA(), readyB()];
+    const view = mount();
+    await settle();
+    pick(view, 'toward the door').dispatch('click');
+    view.button('Preview on the scene').dispatch('click');
+    await view.handle.refresh();
+    assert.equal(pick(view, 'toward the door').textContent, 'Reviewing', 'kept by ID');
+
+    state.proposals = [clarifyA(), readyB({ status: 'stale', redacted: true, statement: statement(null), result: null })];
+    await view.handle.refresh();
+    assert.deepEqual(view.calls.filter(([name]) => name === 'showTransform').at(-1), ['showTransform', null], 'the preview ends');
+    assert.match(view.container.textContent, /This saved proposal is no longer shown/);
+    state.proposals = [clarifyA(), readyB()];
+    await view.handle.refresh();
+    assert.doesNotMatch(view.container.textContent, /toward the door/, 'a later read cannot bring the words back');
+
+    state.proposals = [clarifyA()];
+    await view.handle.refresh();
+    assert.match(view.container.textContent, /The proposal you were reviewing is no longer listed/);
+    assert.doesNotMatch(view.container.textContent, /Which window\?/, 'nothing else is chosen in its place');
+    await view.handle.refresh();
+    assert.doesNotMatch(view.container.textContent, /Which window\?/, 'not later either');
+    view.handle.dispose();
+  });
+
+  it('keeps a choice made while an older list read was still on its way', async () => {
+    state.proposals = [clarifyA(), readyB()];
+    const view = mount();
+    await settle();
+    const held = [];
+    state.listGet = () => new Promise((resolve) => held.push(resolve));
+    view.handle.refresh();
+    pick(view, 'toward the door').dispatch('click');
+    held[0](json(200, [clarifyA(), readyB()]));
+    await settle();
+    assert.equal(pick(view, 'toward the door').textContent, 'Reviewing');
+    view.handle.dispose();
+  });
+
+  it('keeps planning in progress reachable and blocks other proposals and new plans until it ends', async () => {
+    state.proposals = [readyB()];
+    const view = mount();
+    await settle();
+    // Planning started elsewhere appears in a later list.
+    state.proposals = [proposal({ status: 'processing', result: null, updatedAt: '2026-10-31T11:00:00.000Z', createdAt: '2026-10-31T11:00:00.000Z' }), readyB()];
+    await view.handle.refresh();
+    assert.equal(pick(view, 'toward the door').textContent, 'Reviewing');
+    assert.match(view.container.textContent, /A memory is being planned\. Until it finishes or is canceled, only that planning can be reviewed\./);
+    view.write('Another memory.');
+    view.agree();
+    assert.equal(view.button('Plan a change').disabled, true, 'no second planning');
+    const live = pick(view, 'faced the window');
+    assert.equal(live.disabled, false, 'the planning is reachable');
+    state.proposalGet = () => json(200, proposal({ status: 'processing', result: null, updatedAt: '2026-10-31T11:00:01.000Z' }));
+    live.dispatch('click');
+    await settle();
+    assert.match(view.container.textContent, /Meta is reading your memory/);
+    assert.ok(view.button('Cancel planning'));
+    assert.equal(pick(view, 'toward the door').disabled, true, 'historical proposals wait');
+    view.handle.dispose();
+  });
+
+  it('blocks switching after an unknown apply and repeats the same request', async () => {
+    state.proposals = [clarifyA(), readyB()];
+    const view = mount();
+    await settle();
+    pick(view, 'toward the door').dispatch('click');
+    view.button('Preview on the scene').dispatch('click');
+    view.button('Apply and save this proposal').dispatch('click');
+    assert.equal(pick(view, 'It faced a window').disabled, true, 'not while the action runs');
+    posts[0].respond(lost());
+    await settle();
+    assert.match(view.container.textContent, /Rehere could not confirm an earlier request/);
+    assert.equal(pick(view, 'It faced a window').disabled, true);
+    view.bridge.editorState.clean = true;
+    view.handle.sync();
+    view.button('Preview on the scene').dispatch('click');
+    view.button('Apply and save this proposal').dispatch('click');
+    assert.equal(posts[1].body.requestId, posts[0].body.requestId, 'the same request');
+    assert.equal(posts[1].url, `${JOB_URL}/proposals/${ID_B}/apply`);
+    view.handle.dispose();
+  });
+
+  it('repeats an unconfirmed plan exactly even after the text changes, until the server answers', async () => {
+    const view = mount();
+    await settle();
+    view.write('Turn it toward the door.');
+    view.agree();
+    view.button('Plan a change').dispatch('click');
+    posts[0].respond(lost());
+    await settle();
+    view.write('Actually toward the window.');
+    assert.match(view.container.textContent, /repeats the earlier unconfirmed request exactly/);
+    view.button('Plan a change').dispatch('click');
+    assert.deepEqual(posts[1].body, posts[0].body, 'the same request, not the newer text');
+    posts[1].respond(json(403, { error: 'Planning is not set up on this server.' }));
+    await settle();
+    view.button('Plan a change').dispatch('click');
+    assert.notEqual(posts[2].body.requestId, posts[0].body.requestId);
+    assert.equal(posts[2].body.text, 'Actually toward the window.', 'the raw newer text, once settled');
+    view.handle.dispose();
+  });
+
+  it('ends a preview when the reviewed record comes back redacted, even with status ready, and an older read cannot bring it back', async () => {
+    for (const hidden of [
+      { redacted: true, statement: statement(null), result: null },
+      { statement: { id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', kind: 'human_memory' } },
+    ]) {
+      state.proposals = [readyB({ result: faceAnchor(ID_B, 'door') })];
+      const view = mount();
+      await settle();
+      view.button('Preview on the scene').dispatch('click');
+      const front = view.find((node) => node.tag === 'label' && /I checked the scene/.test(node.textContent))[0].children[0];
+      front.checked = true;
+      front.dispatch('change');
+      const held = [];
+      state.listGet = () => new Promise((resolve) => held.push(resolve));
+      const older = view.handle.refresh();
+      state.listGet = null;
+      state.proposals = [readyB({ status: 'ready', ...hidden, updatedAt: '2026-10-30T09:00:05.000Z' })];
+      await view.handle.refresh();
+      assert.deepEqual(view.calls.filter(([name]) => name === 'showTransform').at(-1), ['showTransform', null], 'the guide is removed');
+      assert.deepEqual(view.calls.filter(([name]) => name === 'setLocked').at(-1), ['setLocked', false], 'the editor is unlocked');
+      assert.equal(view.button('Preview on the scene'), undefined);
+      assert.equal(view.button('Apply and save this proposal'), undefined);
+      assert.match(view.container.textContent, /This saved proposal is no longer shown/);
+      // The read started earlier answers last with the words.
+      held[0](json(200, [readyB({ result: faceAnchor(ID_B, 'door'), updatedAt: '2026-10-30T09:00:09.000Z' })]));
+      await older;
+      await settle();
+      assert.doesNotMatch(view.container.textContent, /toward the door|Reason given|Preview on the scene/);
+      state.proposals = [readyB({ result: faceAnchor(ID_B, 'door'), updatedAt: '2026-10-30T09:00:09.000Z' })];
+      await view.handle.refresh();
+      assert.doesNotMatch(view.container.textContent, /toward the door|Reason given/, 'a newer read cannot bring it back either');
+      assert.equal(view.button('Preview on the scene'), undefined);
+      view.handle.dispose();
+    }
+  });
+
+  it('first shows planning still in progress, even when a newer response is listed, so it is never hidden', async () => {
+    state.proposals = [readyB({ id: ID_C, createdAt: '2026-10-31T12:00:00.000Z', statement: statement('A newer saved response.') }), proposal({ status: 'processing', result: null })];
+    state.proposalGet = () => json(200, proposal({ status: 'processing', result: null }));
+    const view = mount();
+    await settle();
+    assert.equal(pick(view, 'faced the window').textContent, 'Reviewing');
+    assert.ok(view.button('Cancel planning'), 'its cancel is reachable');
+    assert.equal(pick(view, 'A newer saved response').disabled, true);
+    view.handle.dispose();
+  });
+
+  it('takes nothing from an apply answered after its proposal was redacted or removed', async () => {
+    for (const later of [() => [clarifyA(), readyB({ status: 'stale', redacted: true, statement: statement(null), result: null })], () => [clarifyA()]]) {
+      posts = [];
+      state.proposals = [clarifyA(), readyB()];
+      const view = mount();
+      await settle();
+      pick(view, 'toward the door').dispatch('click');
+      view.button('Preview on the scene').dispatch('click');
+      view.button('Apply and save this proposal').dispatch('click');
+      state.proposals = later();
+      await view.handle.refresh();
+      posts[0].respond(json(200, { edit: { version: 2, offset: [0, 0, 0], yaw: Math.PI / 4 }, proposal: readyB({ status: 'applied', appliedVersion: 2, updatedAt: '2026-10-30T09:00:09.000Z' }) }));
+      await settle();
+      assert.ok(!view.calls.some(([name]) => name === 'saved'), 'the edit is not taken into the editor here');
+      assert.ok(view.calls.some(([name]) => name === 'conflict'), 'the saved version must be loaded');
+      assert.match(view.message(), /saved this change as version 2, but its proposal is no longer shown here\. Load the saved version/);
+      assert.doesNotMatch(view.container.textContent, /toward the door|Reason given|Applied as version 2/);
+      view.handle.dispose();
+    }
+  });
+
+  it('drops a poll answer made obsolete by a fresh list that shows the planning finished', async () => {
+    state.proposals = [proposal({ status: 'processing', result: null, updatedAt: '2026-10-31T00:00:01.000Z' })];
+    const polls = [];
+    state.proposalGet = () => new Promise((resolve) => polls.push(resolve));
+    const view = mount();
+    await settle();
+    assert.equal(polls.length, 1, 'a poll is on its way');
+    state.proposals = [proposal({ updatedAt: '2026-10-31T00:00:05.000Z' })];
+    await view.handle.refresh();
+    assert.ok(view.button('Preview on the scene'));
+    polls[0](json(200, proposal({ status: 'processing', result: null, updatedAt: '2026-10-31T00:00:01.000Z' })));
+    await settle();
+    assert.match(view.container.textContent, /A change is proposed\. Nothing has changed yet\./);
+    assert.ok(view.button('Preview on the scene'), 'the ready proposal stays reviewable');
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+    assert.equal(polls.length, 1, 'no further polling of a finished proposal');
+    view.handle.dispose();
+  });
+
+  it('keeps a proposal that left the list out of the panel even if a later read lists it again', async () => {
+    state.proposals = [clarifyA(), readyB()];
+    const view = mount();
+    await settle();
+    pick(view, 'toward the door').dispatch('click');
+    state.proposals = [clarifyA()];
+    await view.handle.refresh();
+    state.proposals = [clarifyA(), readyB({ updatedAt: '2026-10-30T09:00:09.000Z' })];
+    await view.handle.refresh();
+    assert.doesNotMatch(view.container.textContent, /toward the door|Reason given/);
+    assert.equal(row(view, 'toward the door'), undefined, 'not offered again');
+    assert.equal(view.button('Preview on the scene'), undefined);
+    assert.match(view.container.textContent, /Saved proposals \(1\)/);
+    view.handle.dispose();
+  });
+
+  it('drops an older poll answer but keeps polling while the planning shown is still in progress', async () => {
+    state.proposals = [proposal({ status: 'queued', result: null, updatedAt: '2026-10-31T00:00:01.000Z' })];
+    const polls = [];
+    state.proposalGet = () => new Promise((resolve) => polls.push(resolve));
+    const view = mount();
+    await settle();
+    assert.equal(polls.length, 1);
+    // A fresh list already shows it processing (newer); the held poll then answers queued (older).
+    state.proposals = [proposal({ status: 'processing', result: null, updatedAt: '2026-10-31T00:00:02.000Z' })];
+    await view.handle.refresh();
+    polls[0](json(200, proposal({ status: 'queued', result: null, updatedAt: '2026-10-31T00:00:01.000Z' })));
+    await settle();
+    assert.match(view.container.textContent, /Meta is reading your memory/, 'the older answer changes nothing');
+    state.proposalGet = () => json(200, proposal({ updatedAt: '2026-10-31T00:00:09.000Z' }));
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+    await settle();
+    assert.match(view.container.textContent, /A change is proposed\. Nothing has changed yet\./, 'polling continued without a manual refresh');
+    assert.ok(view.button('Preview on the scene'));
+    view.handle.dispose();
+  });
+
+  it('ignores an older poll answer even when the fresh list left polling running', async () => {
+    // Both are still planning, so the list does not stop the poll; only the age check drops the answer.
+    state.proposals = [proposal({ status: 'queued', result: null, updatedAt: '2026-10-31T00:00:01.000Z' })];
+    const polls = [];
+    state.proposalGet = () => new Promise((resolve) => polls.push(resolve));
+    const view = mount();
+    await settle();
+    state.proposals = [proposal({ status: 'processing', result: null, updatedAt: '2026-10-31T00:00:02.000Z' })];
+    await view.handle.refresh();
+    polls[0](json(200, proposal({ status: 'queued', result: null, updatedAt: '2026-10-31T00:00:01.000Z' })));
+    await settle();
+    assert.doesNotMatch(view.container.textContent, /Waiting to send your memory/);
+    view.handle.dispose();
+  });
+
+  it('drops an obsolete poll answer for records without timestamps once a fresh list shows the planning finished', async () => {
+    state.proposals = [proposal({ status: 'processing', result: null, updatedAt: undefined })];
+    const polls = [];
+    state.proposalGet = () => new Promise((resolve) => polls.push(resolve));
+    const view = mount();
+    await settle();
+    state.proposals = [proposal({ updatedAt: undefined })];
+    await view.handle.refresh();
+    polls[0](json(200, proposal({ status: 'processing', result: null, updatedAt: undefined })));
+    await settle();
+    assert.ok(view.button('Preview on the scene'), 'the finished state stays');
+    view.handle.dispose();
+  });
+
+  it('takes nothing from an apply receipt whose proposal arrives redacted, with no read in between', async () => {
+    state.proposals = [readyB()];
+    const view = mount();
+    await settle();
+    view.button('Preview on the scene').dispatch('click');
+    view.button('Apply and save this proposal').dispatch('click');
+    // A replayed receipt after the source stopped: the edit plus the redacted proposal.
+    posts[0].respond(json(200, { edit: { version: 2, offset: [0, 0, 0], yaw: Math.PI / 4 }, proposal: readyB({ status: 'stale', redacted: true, statement: statement(null), result: null, question: null }) }));
+    await settle();
+    assert.ok(!view.calls.some(([name]) => name === 'saved'), 'the edit is not taken into the editor here');
+    assert.ok(view.calls.some(([name]) => name === 'conflict'));
+    assert.match(view.message(), /saved this change as version 2, but its proposal is no longer shown here/);
+    assert.doesNotMatch(view.container.textContent, /toward the door|Reason given/);
+    view.handle.dispose();
+  });
+
+  it('scrubs a redacted apply receipt from the review and the list at once, before any later read answers', async () => {
+    state.proposals = [readyB()];
+    const view = mount();
+    await settle();
+    view.button('Preview on the scene').dispatch('click');
+    view.button('Apply and save this proposal').dispatch('click');
+    // The read that follows the action is held, so only the receipt itself can scrub.
+    const held = [];
+    state.listGet = () => new Promise((resolve) => held.push(resolve));
+    posts[0].respond(json(200, { edit: { version: 2, offset: [0, 0, 0], yaw: Math.PI / 4 }, proposal: readyB({ status: 'stale', redacted: true, statement: statement(null), result: null, question: null }) }));
+    await settle();
+    assert.equal(held.length, 1, 'the follow-up read has not answered');
+    const textNow = view.container.textContent;
+    assert.doesNotMatch(textNow, /toward the door|Reason given|After this change/, 'no words while the read is pending');
+    assert.match(row(view, 'no longer shown').textContent, /This saved proposal is no longer shown/);
+    assert.match(textNow, /This saved proposal is no longer shown, because the scene it was made for can no longer be used\./);
+    assert.equal(view.button('Preview on the scene'), undefined);
+    assert.ok(!view.calls.some(([name]) => name === 'saved'));
+    // A stale answer to that read cannot bring the words back either.
+    held[0](json(200, [readyB()]));
+    await settle();
+    assert.doesNotMatch(view.container.textContent, /toward the door|Reason given/);
+    view.handle.dispose();
   });
 });
