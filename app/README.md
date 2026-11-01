@@ -39,6 +39,12 @@ are attribution, not verified identity, and selecting a permission does not
 start processing or publish anything. Current grants can be narrowed or stopped
 through [source use controls](SOURCE-USES.md), without rewriting the originals.
 
+The owner can separately review and remove a whole saved place, including its
+local contribution copies. Access stops before file cleanup is confirmed;
+unclear requests and pending cleanup remain explicitly recoverable. Other
+places and account credentials stay separate. See [local place removal](PLACE-DELETION.md)
+for confirmation, retry and the copies outside its scope.
+
 Saved photographs with both place-construction and model-processing permission
 can be used to build a partial scene. Select a foreground box, review the
 inferred depth and mask, explore the visible surfaces, and preview a foreground

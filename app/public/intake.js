@@ -118,9 +118,11 @@ export function isOpenState(body) {
     body.parts.every((part) => typeof part?.partId === 'string' && (part.kind === 'photo' || part.kind === 'voice') && Number.isInteger(part.size) && typeof part.sha256 === 'string' && part.hints !== null && typeof part.hints === 'object' && PART_STATES.has(part.status))
   );
 }
+// deleted: the intake's place was deleted; the record keeps no content and no
+// place ID, and the upload can never continue.
 export function isTerminalState(body) {
   if (typeof body?.id !== 'string' || !Number.isInteger(body.revision)) return false;
-  return (body.status === 'committed' && typeof body.draftId === 'string' && body.draftId !== '') || body.status === 'discarded';
+  return (body.status === 'committed' && typeof body.draftId === 'string' && body.draftId !== '') || body.status === 'discarded' || body.status === 'deleted';
 }
 
 // Key order never decides equality, and an absent value equals null.
@@ -221,6 +223,7 @@ const isOurs = (state, intended, base) => state.revision === base + 1 && canonic
 // One unfinished save. Outcomes of save():
 //   { kind: 'saved', draftId }       the server confirmed a final saved memory
 //   { kind: 'discarded' }            the intake was discarded (elsewhere)
+//   { kind: 'deleted' }              its place was deleted; nothing more is sent
 //   { kind: 'unknown', stage }       no clear answer: retry repeats the same request
 //   { kind: 'incomplete', state }    some files have not reached the server
 //   { kind: 'conflict', state }      the intake changed elsewhere; nothing was overwritten
@@ -243,10 +246,12 @@ export function createIntakeSession({ api, ids, newId = () => crypto.randomUUID(
   // that left a part unsent; kept only in memory, only while it is missing.
   const notices = new Map();
 
+  // A terminal receipt counts only for this session's own intake.
+  const ownTerminal = (body) => isTerminalState(body) && body.id === intakeId;
   const terminal = (result) => {
-    if (!isTerminalState(result)) return null;
+    if (!ownTerminal(result)) return null;
     ids.remove(intakeId);
-    return result.status === 'committed' ? { kind: 'saved', draftId: result.draftId } : { kind: 'discarded' };
+    return result.status === 'committed' ? { kind: 'saved', draftId: result.draftId } : { kind: result.status };
   };
   const showParts = (next) => {
     for (const part of next.parts) {
@@ -267,7 +272,8 @@ export function createIntakeSession({ api, ids, newId = () => crypto.randomUUID(
   // A well-formed read of the intake, or none.
   const readState = async () => {
     const result = await api.read(intakeId);
-    return isOpenState(result.body) || isTerminalState(result.body) ? { result, body: result.ok ? result.body : null } : { result, body: null };
+    // A terminal receipt for another intake is not an answer about this one.
+    return isOpenState(result.body) || ownTerminal(result.body) ? { result, body: result.ok ? result.body : null } : { result, body: null };
   };
   // Progress of the intended plan. A terminal receipt settles it; an open state
   // with any other revision or content is a conflict and replaces nothing.
@@ -287,7 +293,7 @@ export function createIntakeSession({ api, ids, newId = () => crypto.randomUUID(
   async function send(stage, request, body) {
     pending = { stage, body };
     const result = await request(body);
-    const wellFormed = stage === 'commit' ? isTerminalState(result.body) : isOpenState(result.body) || isTerminalState(result.body);
+    const wellFormed = stage === 'commit' ? ownTerminal(result.body) : isOpenState(result.body) || ownTerminal(result.body);
     if (unclear(result) || (result.ok && !wellFormed)) return { unknown: true };
     pending = null;
     return { result };
@@ -427,6 +433,11 @@ export function createIntakeSession({ api, ids, newId = () => crypto.randomUUID(
       if (done) return done;
       // A success without a readable receipt is not taken as discarded.
       if (result.ok) return { kind: 'unknown', stage: 'discard' };
+      // A refusal may mean the intake already ended, for example with its
+      // deleted place: the intake itself says which.
+      const { body } = await readState();
+      const ended = terminal(body);
+      if (ended) return ended;
       return { kind: 'refused', message: result.body?.error ?? 'The unfinished save could not be discarded.' };
     },
   };

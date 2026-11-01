@@ -119,12 +119,29 @@ export class AccessStore {
   #now;
   #state = null;
   #queue = Promise.resolve();
+  #places = null;
 
   constructor({ dataDir, now = Date.now }) {
     if (typeof dataDir !== 'string' || !dataDir) throw new TypeError('dataDir is required');
     this.dataDir = path.resolve(dataDir);
     this.#file = path.join(this.dataDir, 'access.json');
     this.#now = now;
+  }
+
+  // The app server attaches its place-deletion barrier store and shared
+  // commit section; the CLI and direct store use run without one.
+  usePlaceCommits(placeCommits) {
+    this.#places = placeCommits;
+  }
+
+  // An invitation change for one place: inside this store's mutex, then the
+  // shared commit section, with a fresh barrier check right before the write.
+  async #publishInvitation(draftId, next, refusal) {
+    if (!this.#places) return this.#commit(next);
+    return this.#places.commit(async () => {
+      if (refusal && (await this.#places.deleted(draftId))) throw refusal();
+      await this.#commit(next);
+    });
   }
 
   // Every public operation runs alone and sees the latest committed state.
@@ -342,6 +359,8 @@ export class AccessStore {
       const existing = state.invitations.find(item => item.requestId === requestId);
       if (existing) {
         if (existing.draftId === draftId && existing.expiresInHours === hours && sameVerifier(existing.tokenVerifier, digest)) {
+          // An exact replay never answers for a deleted place.
+          if (this.#places && (await this.#places.deleted(draftId))) throw new RequestError(404, 'This memory could not be found.');
           return this.#publicInvitation(existing, now);
         }
         throw fail(409);
@@ -352,7 +371,7 @@ export class AccessStore {
         createdAt: new Date(now).toISOString(), expiresAt: new Date(now + hours * HOUR).toISOString(),
         status: 'active', redeemedBy: null,
       };
-      await this.#commit({ ...state, invitations: [...state.invitations, invitation] });
+      await this.#publishInvitation(draftId, { ...state, invitations: [...state.invitations, invitation] }, () => new RequestError(404, 'This memory could not be found.'));
       return this.#publicInvitation(invitation, now);
     });
   }
@@ -368,8 +387,20 @@ export class AccessStore {
       // Revoking closes an unused invitation only; it never removes an enrolled contributor.
       if (this.#invitationStatus(invitation, now) !== 'active') return this.#publicInvitation(invitation, now);
       const revoked = { ...invitation, status: 'revoked' };
-      await this.#commit({ ...state, invitations: state.invitations.map(item => (item === invitation ? revoked : item)) });
+      // Revoking stays possible for a deleted place.
+      await this.#publishInvitation(invitation.draftId, { ...state, invitations: state.invitations.map(item => (item === invitation ? revoked : item)) }, null);
       return this.#publicInvitation(revoked, now);
+    });
+  }
+
+  // Revokes every unused invitation to one place, for its deletion. Enrolled
+  // contributors, credentials and other places are untouched. Idempotent.
+  revokePlace(draftId) {
+    return this.#exclusive(async () => {
+      const state = await this.#load();
+      if (!state.invitations.some(item => item.draftId === draftId && item.status === 'active')) return;
+      const invitations = state.invitations.map(item => (item.draftId === draftId && item.status === 'active' ? { ...item, status: 'revoked' } : item));
+      await this.#publishInvitation(draftId, { ...state, invitations }, null);
     });
   }
 
@@ -392,6 +423,8 @@ export class AccessStore {
       if (!invitation) throw fail(403);
       const now = this.#now();
       if (invitation.status === 'redeemed') {
+        // An exact replay never answers for a deleted place; credentials stay.
+        if (this.#places && (await this.#places.deleted(invitation.draftId))) throw fail(403);
         const principal = state.principals.find(item => item.id === invitation.redeemedBy);
         if (principal && this.#matchesEnrollment(principal, enrollment)) return publicPrincipal(principal);
         throw fail(409);
@@ -401,11 +434,11 @@ export class AccessStore {
         || this.#keyInUse(state, verifier(enrollment.accessKey)) || this.#keyInUse(state, verifier(enrollment.recoveryKey))) throw fail(409);
       const principal = this.#newPrincipal('contributor', enrollment, [invitation.draftId]);
       const redeemed = { ...invitation, status: 'redeemed', redeemedBy: principal.id };
-      await this.#commit({
+      await this.#publishInvitation(invitation.draftId, {
         ...state,
         principals: [...state.principals, principal],
         invitations: state.invitations.map(item => (item === invitation ? redeemed : item)),
-      });
+      }, () => fail(403));
       return publicPrincipal(principal);
     });
   }

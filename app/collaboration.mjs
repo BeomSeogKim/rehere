@@ -757,7 +757,8 @@ export class CollaborationStore {
     if (this.reconstructions.activeContributionMedia) throw fail(...busy);
     const controller = new AbortController();
     const promise = this.#prepareMedia(draftId, jobId, principal, request, media, requestDigest, controller.signal);
-    const slot = { controller, done: promise.catch(() => {}) };
+    // The place and scene let a place deletion cancel and wait for this work.
+    const slot = { draftId, jobId, controller, done: promise.catch(() => {}) };
     this.reconstructions.activeContributionMedia = slot;
     const key = JSON.stringify([principal.id, draftId, jobId, request.requestId]);
     this.inflight.set(key, { digest: requestDigest, promise });
@@ -895,8 +896,9 @@ export class CollaborationStore {
         try {
           await writing;
         } catch (error) {
-          // No manifest record refers to these files, so they are removed.
-          await rm(final, { recursive: true, force: true }).catch(() => {});
+          // No manifest record refers to these files, so they are removed,
+          // unless the place was deleted: its own cleanup removes them.
+          if (!(await this.reconstructions.placeDeleted(draftId))) await rm(final, { recursive: true, force: true }).catch(() => {});
           throw error;
         }
         // The attestation covers only verified records, so the published
@@ -905,7 +907,8 @@ export class CollaborationStore {
         return projectContribution(stored, stored.collaboration.contributions.find((item) => item.id === id), principal);
       });
     } finally {
-      if (!published) await rm(staging, { recursive: true, force: true }).catch(() => {});
+      // A deleted place's residue is left to the deletion's exact cleanup.
+      if (!published && !(await this.reconstructions.placeDeleted(draftId))) await rm(staging, { recursive: true, force: true }).catch(() => {});
     }
   }
 

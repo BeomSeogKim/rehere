@@ -190,6 +190,17 @@ export class DraftStore {
   constructor(dataDir) {
     this.draftsDir = path.join(dataDir, 'drafts');
     this.tempDir = path.join(dataDir, 'incoming');
+    this.placeDeletions = null;
+  }
+
+  // The app server attaches its place-deletion barrier store; without one
+  // (direct store use) no place is ever treated as deleted.
+  usePlaceDeletions(placeDeletions) {
+    this.placeDeletions = placeDeletions;
+  }
+
+  async #deleted(id) {
+    return Boolean(this.placeDeletions) && (await this.placeDeletions.deleted(id));
   }
 
   // Files are written to a private folder and renamed into place last, so a
@@ -245,8 +256,15 @@ export class DraftStore {
       }
       await writeFile(path.join(staging, 'draft.json'), JSON.stringify(draft, null, 2));
       await mkdir(this.draftsDir, { recursive: true });
-      if (signal?.aborted) throw new RequestError(503, 'The app is shutting down. Nothing was saved.');
-      await rename(staging, path.join(this.draftsDir, id));
+      // The final rename is the publication. With a deletion barrier store it
+      // runs in the shared commit section, after a fresh barrier check, so a
+      // deleted place's ID can never be published again.
+      const publish = async () => {
+        if (signal?.aborted) throw new RequestError(503, 'The app is shutting down. Nothing was saved.');
+        if (await this.#deleted(id)) throw new RequestError(409, 'This place was deleted. Nothing was saved.');
+        await rename(staging, path.join(this.draftsDir, id));
+      };
+      await (this.placeDeletions ? this.placeDeletions.commit(publish) : publish());
     } catch (error) {
       await rm(staging, { recursive: true, force: true }).catch(() => {});
       throw error;
@@ -256,6 +274,7 @@ export class DraftStore {
 
   async get(id) {
     if (!ID_PATTERN.test(id)) return null;
+    if (await this.#deleted(id)) return null;
     try {
       return JSON.parse(await readFile(path.join(this.draftsDir, id, 'draft.json'), 'utf8'));
     } catch (error) {
@@ -303,7 +322,7 @@ export class DraftStore {
   // The owner metadata of one place, read fresh. Unreadable metadata is
   // reported as unavailable, never as unnamed, and never hides the draft.
   async place(id) {
-    if (!ID_PATTERN.test(id)) return { ...UNAVAILABLE_NAME };
+    if (!ID_PATTERN.test(id) || (await this.#deleted(id))) return { ...UNAVAILABLE_NAME };
     try {
       const state = await this.#placeState(id);
       return state ? placeView(state) : { ...UNNAMED };

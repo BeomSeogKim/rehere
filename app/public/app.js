@@ -16,6 +16,7 @@ import {
   sha256Hex,
 } from './intake.js';
 import { latestOnly } from './latest.js';
+import { deletionText, forgetAttempt, mountPendingDeletions, mountPlaceRemoval, readDeletion } from './place-removal.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import {
   buildMetadata,
@@ -35,6 +36,9 @@ const PHOTO_TYPES = new Set(['image/jpeg', 'image/png']);
 // Finishing a recording normally takes well under a second; this bounds a stuck recorder.
 const FINALIZE_TIMEOUT_MS = 10_000;
 const KEPT = 'Nothing was saved, and your photos, writing and recording are still here.';
+// An intake whose place was deleted. Its files may have reached the server and
+// the place's cleanup may still be running, so this says neither.
+const PLACE_GONE = 'That place is no longer available in this workspace. This upload cannot be resumed.';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -71,6 +75,8 @@ const els = {
   viewerVoiceSource: $('viewer-voice-source'),
   viewerSpace: $('viewer-space'),
   viewerMaterials: $('viewer-materials'),
+  viewerPlaceRemoval: $('viewer-place-removal'),
+  placeDeletions: $('place-deletions'),
   savedEmpty: $('saved-empty'),
   savedList: $('saved-list'),
   intakeResume: $('intake-resume'),
@@ -131,7 +137,11 @@ const recorder = createRecorder({
   MediaRecorder: window.MediaRecorder,
 });
 
+// Counts every change of the form message, so a late answer can tell whether
+// anything newer was said since it was asked.
+let messageSerial = 0;
 function setMessage(content, kind = 'error') {
+  messageSerial += 1;
   els.message.replaceChildren(...(content ? [content] : []));
   els.message.className = `form-message${content ? ` is-${kind}` : ''}`;
 }
@@ -408,6 +418,11 @@ function settleIntake(outcome) {
       setMessage(savedNotice(outcome.draftId), 'success');
       loadSaved();
       break;
+    case 'deleted':
+      intake = null;
+      lostVoice = null;
+      setMessage(`${PLACE_GONE} Your form is unchanged.`);
+      break;
     case 'discarded':
       intake = null;
       setMessage('This unfinished save was discarded elsewhere. The form is unchanged; saving again starts a new one.');
@@ -510,10 +525,23 @@ function renderIntake() {
 // Removes the server's copy of an unfinished save. The form keeps its content.
 async function discardIntake(session) {
   const generation = sessionGeneration;
+  const asked = messageSerial;
   const outcome = await session.discard();
   if (!stillOwner(generation)) return;
   if (outcome.kind === 'saved') {
     if (session === intake) settleIntake(outcome);
+    return;
+  }
+  if (outcome.kind === 'deleted') {
+    // Only the form's own upload ends here; an offered one says so only if
+    // nothing newer, such as another save's answer, was said meanwhile.
+    if (session === intake) {
+      intake = null;
+      lostVoice = null;
+      setMessage(`${PLACE_GONE} Your form is unchanged.`);
+    } else if (messageSerial === asked) setMessage(`${PLACE_GONE} Your form is unchanged.`);
+    renderIntake();
+    offerResume();
     return;
   }
   if (outcome.kind !== 'discarded') {
@@ -531,6 +559,7 @@ async function discardIntake(session) {
 
 async function loadSaved() {
   const generation = sessionGeneration;
+  pendingDeletions?.load();
   const { current, value: drafts } = await listRequests.run(async () => {
     try {
       const response = await fetch('/api/drafts');
@@ -610,6 +639,7 @@ let materialsFor = null;
 async function showDraft(id, notice = '', sceneId = null) {
   // Another memory never shows this one's name, not even while loading.
   if (placeView?.draftId !== id) clearPlace();
+  if (placeRemovalFor !== id) disposePlaceRemoval();
   // A rename answered while this read was out is newer than what it returns.
   const epoch = placeView?.epoch ?? null;
   disposeSourceViews();
@@ -633,7 +663,12 @@ async function showDraft(id, notice = '', sceneId = null) {
   });
   if (!current) return;
   if (!draft) {
-    els.viewerMessage.textContent = 'This memory could not be opened.';
+    // A place deleted here answers like a missing one; its owner sees why.
+    const generation = sessionGeneration;
+    const state = await readDeletion(id);
+    if (!stillOwner(generation) || routeDraft !== id) return;
+    if (state?.deleted) forgetAttempt(browserStorage, ownerId, id);
+    els.viewerMessage.textContent = state?.deleted ? deletionText(state.deleted) : 'This memory could not be opened.';
     return;
   }
   // A memory without photos opens on its materials; otherwise the scene comes
@@ -647,6 +682,9 @@ async function showDraft(id, notice = '', sceneId = null) {
   if (placeView?.draftId !== draft.id) placeView = { draftId: draft.id, place: placeOf(draft), editing: false, value: '', attempt: null, busy: false, message: '', epoch: 0 };
   else if (!placeView.busy && placeView.epoch === epoch) placeView.place = placeOf(draft);
   renderPlace();
+  // Kept across re-reads of the same place, so a review or an unconfirmed
+  // request stays as it is.
+  if (placeRemovalFor !== draft.id) mountRemoval(draft.id);
   els.viewerDate.textContent = `Saved ${formatDate(draft.createdAt)}`;
   els.viewerMessage.textContent = notice;
   // Drafts saved before source details have no sources; each item then shows
@@ -882,6 +920,62 @@ async function cancelRename() {
   loadSaved();
 }
 
+// ------------------------------------------------------------ place removal
+
+// The removal panel of the open place, and the list of removals whose local
+// cleanup is still finishing.
+let placeRemoval = null;
+let placeRemovalFor = null;
+let pendingDeletions = null;
+
+function disposePlaceRemoval() {
+  placeRemoval?.dispose();
+  placeRemoval = null;
+  placeRemovalFor = null;
+}
+
+function mountRemoval(draftId) {
+  const generation = sessionGeneration;
+  // The address actually shown, not only the last handled one: a newer address
+  // typed before its hashchange event wins over a late answer.
+  const here = () => stillOwner(generation) && routeDraft === draftId && MEMORY_ROUTE.exec(location.hash)?.[1] === draftId;
+  placeRemovalFor = draftId;
+  placeRemoval = mountPlaceRemoval(els.viewerPlaceRemoval, {
+    draftId,
+    ownerId,
+    storage: browserStorage,
+    // On the final press: the scene, its unsaved state, audio and any rename
+    // close before the answer, and are not brought back for a removed place.
+    onDeleting() {
+      if (!here()) return;
+      // A read of this place still out must not show it again.
+      viewRequests.invalidate();
+      closeSpace();
+      stopViewerVoice();
+      disposeSourceViews();
+      clearPlace();
+    },
+    onAccepted(record) {
+      if (!stillOwner(generation)) return;
+      const shown = here();
+      disposePlaceRemoval();
+      if (shown) {
+        clearViewer();
+        // route() also drops any read of this place still out.
+        history.replaceState(null, '', location.pathname);
+        route();
+      }
+      setMessage(deletionText(record), 'success');
+      loadSaved();
+    },
+    // A definite refusal for a place that is still here: read it again, with
+    // a new review needed before any deletion.
+    onStillPresent(notice) {
+      if (here()) showDraft(draftId, notice, null);
+    },
+  });
+}
+
 // The 3D module loads only for a memory with photos; if it cannot load, the
 // rest of the memory stays readable.
 async function openSpace(draft, source, sceneId = null) {
@@ -942,6 +1036,7 @@ function route() {
     stopViewerVoice();
     disposeSourceViews();
     clearPlace();
+    disposePlaceRemoval();
   }
   els.compose.hidden = memoryLink;
   els.viewer.hidden = !memoryLink;
@@ -978,6 +1073,7 @@ window.addEventListener('hashchange', route);
 
 function clearViewer() {
   clearPlace();
+  disposePlaceRemoval();
   disposeSourceViews();
   els.viewerDate.textContent = '';
   els.viewerMessage.textContent = '';
@@ -995,6 +1091,8 @@ function startOwner(principal) {
   ownerId = principal?.id ?? null;
   intakeAbort = new AbortController();
   els.ownerApp.hidden = false;
+  pendingDeletions?.dispose();
+  pendingDeletions = mountPendingDeletions(els.placeDeletions, { onComplete: (record) => setMessage(deletionText(record), 'success') });
   route();
   loadSaved();
   offerResume();
@@ -1024,6 +1122,11 @@ async function offerResume() {
       const result = await api.read(intakeId);
       if (!stillOwner(generation)) return;
       if (result.status === 404 || (isTerminalState(result.body) && result.body.status === 'discarded')) ids.remove(intakeId);
+      else if (isTerminalState(result.body) && result.body.status === 'deleted' && result.body.id === intakeId) {
+        ids.remove(intakeId);
+        // Said only when nothing else is shown, so other messages stay.
+        if (!els.message.textContent) setMessage('An upload started in this browser belonged to a place that is no longer available in this workspace. It cannot be resumed.');
+      }
       else if (isTerminalState(result.body) && result.body.status === 'committed') {
         ids.remove(intakeId);
         setMessage(savedNotice(result.body.draftId), 'success');
@@ -1099,6 +1202,7 @@ async function resumeIntake(id) {
     if (!stillOwner(generation)) return;
     if (!read.ok || !isOpenState(read.body)) {
       if (isTerminalState(read.body) && read.body.status === 'committed') setMessage(savedNotice(read.body.draftId), 'success');
+      else if (isTerminalState(read.body) && read.body.status === 'deleted' && read.body.id === id) setMessage(`${PLACE_GONE} Nothing in the form was changed.`);
       else if (read.ok || read.status === 404) setMessage('That unfinished save is no longer available.');
       else setMessage('Rehere could not read that unfinished save. Nothing in the form was changed; try again.');
       offerResume();
@@ -1215,6 +1319,8 @@ function stopOwner() {
   renderActions();
   setMessage('');
   clearViewer();
+  pendingDeletions?.dispose();
+  pendingDeletions = null;
   els.savedList.replaceChildren();
   els.savedEmpty.hidden = false;
   els.savedEmpty.textContent = 'Nothing has been saved yet.';

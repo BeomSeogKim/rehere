@@ -307,13 +307,14 @@ export class StoryStore {
         try {
           await r.update(manifest, { stories: { ...stories, items: [...stories.items, story] } });
         } catch (error) {
-          await rm(file, { force: true }).catch(() => {});
+          // A deleted place's copy is left to the deletion's exact cleanup.
+          if (!(await r.placeDeleted(draftId))) await rm(file, { force: true }).catch(() => {});
           throw error;
         }
         return this.#project(manifest, story);
       });
     } finally {
-      await rm(staged, { force: true }).catch(() => {});
+      if (!(await r.placeDeleted(draftId).catch(() => true))) await rm(staged, { force: true }).catch(() => {});
       r.activeStory = null;
       settle();
     }

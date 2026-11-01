@@ -17,6 +17,7 @@ import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
 import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner } from './reconstructions.mjs';
 import { OBJECT_IDS } from './arrangements.mjs';
+import { PlaceDeletionService, PlaceDeletions } from './place-deletions.mjs';
 
 const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 const DEFAULT_DATA_DIR = fileURLToPath(new URL('./data/', import.meta.url));
@@ -55,6 +56,7 @@ const STATIC_FILES = new Map([
   ['/arrangement.js', ['arrangement.js', 'text/javascript; charset=utf-8']],
   ['/visible-surfaces.js', ['visible-surfaces.js', 'text/javascript; charset=utf-8']],
   ['/region-links.js', ['region-links.js', 'text/javascript; charset=utf-8']],
+  ['/place-removal.js', ['place-removal.js', 'text/javascript; charset=utf-8']],
 ]);
 
 // The account-free visitor listener serves only the visit page and the exact
@@ -115,6 +117,8 @@ const SECURITY_HEADERS = {
 const ASSET_PATH = /^\/api\/drafts\/([^/]+)\/assets\/([^/]+)$/;
 const DRAFT_PATH = /^\/api\/drafts\/([^/]+)$/;
 const PLACE_NAME_PATH = /^\/api\/drafts\/([^/]+)\/place-name$/;
+const PLACE_DELETION_PATH = /^\/api\/drafts\/([^/]+)\/deletion$/;
+const PLACE_DELETE_PATH = /^\/api\/drafts\/([^/]+)\/delete$/;
 const SOURCE_SIZE_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/image-size$/;
 const SOURCE_POLICY_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/policy$/;
 const INTAKE_PATH = /^\/api\/intakes\/([^/]+)$/;
@@ -391,13 +395,21 @@ export function createAppServer({
   // Validated before anything else is created, so a bad value starts nothing.
   const visitor = visitorOrigin === null ? null : parseVisitorOrigin(visitorOrigin);
   const store = new DraftStore(dataDir);
+  // One barrier store and shared commit section for owner place deletion.
+  const placeDeletions = new PlaceDeletions({ dataDir });
+  store.usePlaceDeletions(placeDeletions);
+  accessStore.usePlaceCommits(placeDeletions);
   const attempts = attemptLimiter();
   const reconstructions = new ReconstructionStore({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage, visibleSurfaceLimits,
+    placeDeletions,
   });
   const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder, prepareRecording: recordingPreparer });
   const stories = new StoryStore({ reconstructions, audioDecoder });
-  const intakes = new IntakeStore({ dataDir, drafts: store, verifier: mediaVerifier });
+  const intakes = new IntakeStore({ dataDir, drafts: store, verifier: mediaVerifier, placeCommits: placeDeletions });
+  const deletions = new PlaceDeletionService({ dataDir, placeDeletions, reconstructions, intakes, accessStore });
+  // Pending deletions resume once at startup; an explicit retry is also possible.
+  const resuming = deletions.resumePending().catch(() => {});
   const shares = new ShareStore({ reconstructions, stories });
 
   // Visitor routes authenticate only with a Bearer visit token; cookies and
@@ -983,6 +995,27 @@ export function createAppServer({
       else sendJson(res, 404, { error: 'This memory could not be found.' });
       return;
     }
+    // Owner place deletion. The state stays readable after deletion; the
+    // place itself reads as absent everywhere else.
+    if (pathname === '/api/place-deletions') {
+      if (!reading) throw new RequestError(405, 'Method not allowed.');
+      sendJson(res, 200, await deletions.pending());
+      return;
+    }
+    const deletionMatch = PLACE_DELETION_PATH.exec(pathname);
+    if (deletionMatch) {
+      if (!reading) throw new RequestError(405, 'Method not allowed.');
+      sendJson(res, 200, await deletions.state(deletionMatch[1]));
+      return;
+    }
+    const deleteMatch = PLACE_DELETE_PATH.exec(pathname);
+    if (deleteMatch) {
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      if (!UUID.test(deleteMatch[1])) throw new RequestError(404, 'This memory could not be found.');
+      const { status, record } = await deletions.delete(deleteMatch[1], await readJsonBody(req));
+      sendJson(res, status, record);
+      return;
+    }
     const placeNameMatch = PLACE_NAME_PATH.exec(pathname);
     if (placeNameMatch) {
       if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
@@ -1098,7 +1131,7 @@ export function createAppServer({
     let visitorClosed = Promise.resolve();
     if (visitorServer?.listening) visitorClosed = new Promise((resolve) => visitorServer.close(() => resolve()));
     else if (visitorBound) visitorClosed = new Promise((resolve) => visitorServer.once('close', resolve));
-    const stopping = Promise.all([reconstructions.close(), intakes.close(), mediaVerifier.close(), visitorClosed]);
+    const stopping = Promise.all([resuming.then(() => deletions.close()), reconstructions.close(), intakes.close(), mediaVerifier.close(), visitorClosed]);
     return closeServer((error) => stopping.then(() => callback?.(error), () => callback?.(error)));
   };
   // Unbound until its owner listens; null when no visitor origin is configured.

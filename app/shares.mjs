@@ -635,6 +635,10 @@ export class ShareStore {
         return this.#receipt(existing);
       }
       if (await this.#findSnapshot(tokenVerifier)) throw fail(409, 'This link key was already used. Prepare a new one.');
+      // Link keys of deleted places stay retired for good. An unreadable
+      // deletion record refuses issuing rather than risk reusing one.
+      const deletions = this.reconstructions.placeDeletions;
+      if (deletions && (await deletions.retired(tokenVerifier).catch(() => true))) throw fail(409, 'This link key was already used. Prepare a new one.');
       const preview = shares.previews.find((item) => item.id === request.previewId);
       if (!preview) throw fail(404, 'This preview could not be found.');
       if (preview.removedFor) throw removedRecord();

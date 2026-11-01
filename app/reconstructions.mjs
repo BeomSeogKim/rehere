@@ -73,8 +73,15 @@ export function pythonRunner({ python = defaultPython() } = {}) {
       child.stderr.on('data', (chunk) => {
         if (stderr.length < STDERR_BYTES) stderr += chunk.toString('utf8');
       });
-      child.on('error', (error) => resolve({ exitCode: null, stderr, spawnError: error.code ?? 'error' }));
-      child.on('close', (exitCode) => resolve({ exitCode, stderr }));
+      // Settles only once the child has actually closed, so a settled runner
+      // can no longer write its output. A process that never started settles
+      // on its spawn error (Node also closes it right after).
+      let spawnError = null;
+      child.on('error', (error) => {
+        spawnError ??= error.code ?? 'error';
+        if (child.pid === undefined) resolve({ exitCode: null, stderr, spawnError });
+      });
+      child.on('close', (exitCode) => resolve(spawnError ? { exitCode: null, stderr, spawnError } : { exitCode, stderr }));
     });
 }
 
@@ -511,8 +518,14 @@ const startsWith = (bytes, signature) => signature.every((value, index) => bytes
 export class ReconstructionStore {
   constructor({
     dataDir, drafts, runner, timeoutMs = RECONSTRUCTION_TIMEOUT_MS, proposalModel = null, prepareImage = pythonModelImage(), visibleSurfaceLimits,
+    placeDeletions = null,
   }) {
     this.drafts = drafts;
+    // Place-deletion barriers; a deleted place reads as absent everywhere.
+    this.placeDeletions = placeDeletions;
+    // Every build runner until it has actually settled, by job:
+    // { draftId, settled }. It can outlive the build that started it.
+    this.runners = new Map();
     this.runner = runner;
     this.timeoutMs = timeoutMs;
     this.proposalModel = proposalModel;
@@ -552,7 +565,16 @@ export class ReconstructionStore {
 
   async recover() {
     this.recovered ??= this.serialize(async () => {
+      // Barriers are checked before any content recovery: a deleted place is
+      // never reopened, swept or rewritten here; its own cleanup handles it.
+      let deletedJobs = null;
+      try {
+        deletedJobs = new Set((this.placeDeletions ? await this.placeDeletions.records() : []).flatMap((record) => record.jobIds));
+      } catch {
+        deletedJobs = null;
+      }
       for (const draftId of await listDirs(this.rootDir)) {
+        if (await this.placeDeleted(draftId)) continue;
         for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
           // Nothing in a job is read or changed unless every folder from the
           // data root down to it is a real directory; an unsafe job is skipped
@@ -583,7 +605,14 @@ export class ReconstructionStore {
           await this.completeDeletions(current).catch(() => {});
         }
       }
-      await rm(this.stagingDir, { recursive: true, force: true });
+      // Staging of deleted places is left to their own exact cleanup; with an
+      // unreadable deletion record nothing is swept at all.
+      if (deletedJobs?.size === 0) await rm(this.stagingDir, { recursive: true, force: true });
+      else if (deletedJobs) {
+        for (const name of await listDirs(this.stagingDir)) {
+          if (!deletedJobs.has(name)) await rm(path.join(this.stagingDir, name), { recursive: true, force: true });
+        }
+      }
     });
     return this.recovered;
   }
@@ -592,6 +621,7 @@ export class ReconstructionStore {
   // bundles, which every sync dependency check then requires.
   async readManifest(draftId, jobId) {
     if (!UUID_PATTERN.test(draftId) || !UUID_PATTERN.test(jobId)) return null;
+    if (await this.placeDeleted(draftId)) return null;
     const manifest = await readJson(path.join(this.jobDir(draftId, jobId), 'manifest.json'));
     return manifest && attestPhotos(manifest, draftId, jobId, this.jobDir(draftId, jobId));
   }
@@ -613,7 +643,7 @@ export class ReconstructionStore {
 
   async list(draftId) {
     await this.recover();
-    if (!UUID_PATTERN.test(draftId)) return [];
+    if (!UUID_PATTERN.test(draftId) || (await this.placeDeleted(draftId))) return [];
     const manifests = [];
     for (const jobId of await listDirs(path.join(this.rootDir, draftId))) {
       const manifest = await this.readManifest(draftId, jobId).catch(() => null);
@@ -624,7 +654,36 @@ export class ReconstructionStore {
 
   async draftIds() {
     await this.recover();
-    return listDirs(this.rootDir);
+    const ids = [];
+    for (const draftId of await listDirs(this.rootDir)) if (!(await this.placeDeleted(draftId))) ids.push(draftId);
+    return ids;
+  }
+
+  // Fails closed: an unreadable barrier also means deleted.
+  async placeDeleted(draftId) {
+    return Boolean(this.placeDeletions) && (await this.placeDeletions.deleted(draftId));
+  }
+
+  // Requests cancellation of this place's running work. Only called once its
+  // deletion barrier is durable; nothing is awaited and no data is recalled.
+  abortPlace(draftId) {
+    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia]) {
+      if (item?.draftId !== draftId) continue;
+      try {
+        item.controller.abort();
+      } catch {
+        // Best effort: the deletion stays pending until the work has settled.
+      }
+    }
+  }
+
+  // Distinct owned operations of this place still running: a build together
+  // with its runner counts once, as do a proposal, a story and a contribution.
+  placeOperations(draftId) {
+    const builds = new Set();
+    if (this.active?.draftId === draftId) builds.add(this.active.id);
+    for (const [jobId, runner] of this.runners) if (runner.draftId === draftId) builds.add(jobId);
+    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia].filter((item) => item?.draftId === draftId).length;
   }
 
   async asset(draftId, jobId, name) {
@@ -769,6 +828,7 @@ export class ReconstructionStore {
   }
 
   async update(manifest, changes) {
+    if (await this.placeDeleted(manifest.draftId)) throw new RequestError(404, 'This scene could not be found.');
     const next = { ...manifest, ...changes, updatedAt: new Date().toISOString() };
     await writeJsonAtomic(path.join(this.jobDir(manifest.draftId, manifest.id), 'manifest.json'), next);
     return next;
@@ -820,6 +880,12 @@ export class ReconstructionStore {
         } catch (error) {
           started = Promise.reject(error);
         }
+        // Tracked until the runner itself settles, not the abort race below.
+        const settled = started.then(() => {}, () => {});
+        this.runners.set(manifest.id, { draftId: manifest.draftId, settled });
+        settled.then(() => {
+          if (this.runners.get(manifest.id)?.settled === settled) this.runners.delete(manifest.id);
+        });
         return { running: started.catch((error) => ({ exitCode: null, stderr: '', spawnError: error?.code })) };
       });
       if (!launch && !controller.signal.aborted) return;
@@ -841,6 +907,8 @@ export class ReconstructionStore {
       }
       manifest = await this.serialize(async () => {
         if (controller.signal.aborted) return stopped();
+        // A deleted place publishes nothing; its staging is removed by the deletion.
+        if (await this.placeDeleted(manifest.draftId)) return manifest;
         if (!(await permitted())) return this.update(manifest, { status: 'failed', error: MESSAGES.restricted });
         const assetsDir = path.join(this.jobDir(manifest.draftId, manifest.id), 'assets');
         await rename(outputDir, assetsDir);
@@ -859,7 +927,9 @@ export class ReconstructionStore {
       await this.serialize(() => this.update(manifest, { status: 'failed', error: MESSAGES.unknown })).catch(() => {});
     } finally {
       clearTimeout(timer);
-      await rm(staging, { recursive: true, force: true }).catch(() => {});
+      // A deleted place's staging (its runner may still be writing) is left
+      // to the deletion's exact cleanup once the runner has settled.
+      if (!(await this.placeDeleted(manifest.draftId))) await rm(staging, { recursive: true, force: true }).catch(() => {});
       this.active = null;
     }
   }

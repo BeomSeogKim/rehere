@@ -46,6 +46,8 @@ let held = null;
 const holds = [];
 // Holds the next read of received bytes until released.
 let heldRead = null;
+// Holds the next discard answer until released.
+let heldDiscard = null;
 let micRequests = 0;
 let grantMic = null;
 
@@ -76,7 +78,9 @@ intakes.set(OLD, {
 bytes.set(`${OLD}/${P1}`, 'aaa');
 bytes.set(`${OLD}/${V}`, 'vvv');
 
-const view = (intake) => (intake.status === 'open' ? structuredClone(intake) : { id: intake.id, status: intake.status, revision: intake.revision, draftId: intake.draftId ?? null });
+const view = (intake) =>
+  intake.status === 'open' ? structuredClone(intake) : { id: intake.id, status: intake.status, revision: intake.revision, ...(intake.status === 'committed' ? { draftId: intake.draftId } : {}) };
+const GONE = 'This place was deleted. Nothing was changed.';
 const plan = (intake, body) => {
   const previous = new Map(intake.parts.map((part) => [part.partId, part]));
   Object.assign(intake, { text: body.text, metadata: structuredClone(body.metadata) });
@@ -106,6 +110,9 @@ async function intakeRoute(path, method, options) {
   const intake = intakes.get(id);
   if (!intake) return json(404, { error: 'Not found.' });
   if (!kind) return json(200, view(intake));
+  if (kind === 'discard' && heldDiscard && !heldDiscard.release) await new Promise((resolve) => (heldDiscard.release = resolve));
+  // A deleted place's intake keeps no content and accepts no change.
+  if (intake.status === 'deleted') return json(409, { error: GONE });
   if (kind === 'plan') {
     if (body.baseRevision !== intake.revision) return json(409, { error: 'Changed.' });
     plan(intake, body);
@@ -157,6 +164,7 @@ async function intakeRoute(path, method, options) {
     return json(200, { partId, status: 'received', detectedType: 'image/jpeg' });
   }
   if (kind === 'commit') {
+    if (takeFault('commit-lost-before')) return lost();
     if (intake.status === 'committed') return json(200, view(intake));
     if (body.baseRevision !== intake.revision || intake.parts.some((part) => part.status !== 'received')) return json(409, { error: 'Not ready.' });
     Object.assign(intake, { status: 'committed', draftId: `draft-${intakes.size}` });
@@ -520,5 +528,89 @@ describe('resumable saving in the app', () => {
     b.release();
     await waitFor(() => /^Saved\./.test(message()), 'B’s save');
     assert.equal(byId('draft-form').inert, false);
+  });
+});
+
+describe('an upload whose place was deleted', () => {
+  const GONE_TEXT = 'That place is no longer available in this workspace. This upload cannot be resumed. Your form is unchanged.';
+  const intakeOf = (text) => [...intakes.values()].filter((intake) => intake.text === text).at(-1);
+  const storedIds = () => [...storage.values()].flatMap((value) => JSON.parse(value).map((entry) => entry.intakeId));
+
+  it('stops a lost commit’s next Save at the deleted record, keeps the form, and starts a new upload only on a later explicit Save', async () => {
+    // The previous tests ended signed in as the second owner, with an earlier
+    // test's upload hold still set.
+    held = null;
+    await addFiles(jpeg('mmm', 'm.jpg'));
+    byId('memory-text').value = 'Kept words';
+    faults.push('commit-lost-before');
+    await save();
+    assert.match(message(), /could not confirm the last step/);
+    const old = intakeOf('Kept words');
+    old.status = 'deleted';
+    requests.length = 0;
+    await save();
+    assert.equal(message(), GONE_TEXT);
+    assert.deepEqual(requests, [`GET /api/intakes/${old.id}`], 'the same Save only reads; nothing is created or sent');
+    assert.equal(byId('memory-text').value, 'Kept words', 'the form is unchanged');
+    assert.equal(byId('photo-list').children.length, 1);
+    assert.deepEqual(rows(), [], 'the ended upload shows no rows');
+    assert.ok(!storedIds().includes(old.id), 'only that pending ID is removed');
+
+    requests.length = 0;
+    await save();
+    const create = requests.filter((request) => request === 'POST /api/intakes');
+    assert.equal(create.length, 1, 'a later explicit Save is a new upload');
+    assert.notEqual(intakeOf('Kept words').id, old.id);
+    assert.match(message(), /^Saved\./);
+  });
+
+  it('settles a refused discard of an upload whose place was deleted, keeping the form', async () => {
+    await addFiles(jpeg('nnn', 'n1.jpg'), jpeg('ooo', 'n2.jpg'));
+    byId('memory-text').value = 'Discard me';
+    faults.push('busy:n2.jpg');
+    await save();
+    assert.match(message(), /^Not saved yet/);
+    const old = intakeOf('Discard me');
+    old.status = 'deleted';
+    button('Discard this unfinished save').dispatch('click');
+    await waitFor(() => message() === GONE_TEXT, 'the deleted answer');
+    assert.equal(byId('memory-text').value, 'Discard me');
+    assert.equal(byId('photo-list').children.length, 2);
+    assert.deepEqual(rows(), []);
+    assert.ok(!storedIds().includes(old.id));
+    assert.equal(button('Discard this unfinished save'), undefined, 'that upload is over');
+  });
+
+  it('does not let a late deleted answer for an offered upload replace a newer save’s answer', async () => {
+    // Only one open upload on the server, offered for resuming after the next list.
+    for (const intake of intakes.values()) if (intake.status === 'open') intake.status = 'discarded';
+    intakes.set('0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0e', {
+      id: '0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0e',
+      status: 'open',
+      revision: 1,
+      createdAt: '2026-11-01T08:00:00.000Z',
+      updatedAt: '2026-11-01T08:00:00.000Z',
+      text: 'Offered',
+      metadata: { photos: [], text: null, voice: null },
+      parts: [],
+    });
+    await addFiles(jpeg('ppp', 'p1.jpg'), jpeg('qqq', 'p2.jpg'));
+    byId('memory-text').value = 'To discard first';
+    faults.push('busy:p2.jpg');
+    await save();
+    button('Discard this unfinished save').dispatch('click');
+    await waitFor(() => /^The unfinished save was discarded/.test(message()) && button('Discard it'), 'the discard and the offer');
+    const offered = intakes.get('0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0e');
+    offered.status = 'deleted';
+    heldDiscard = {};
+    button('Discard it').dispatch('click');
+    await waitFor(() => heldDiscard.release, 'the held discard');
+    byId('memory-text').value = 'Newer words';
+    await save();
+    assert.match(message(), /^Saved\./);
+    heldDiscard.release();
+    heldDiscard = null;
+    await settle();
+    assert.match(message(), /^Saved\./, 'the newer save’s answer stays');
   });
 });

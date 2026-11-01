@@ -27,6 +27,9 @@ const NOT_RECEIVED = 'Some files have not been received yet.';
 // A part refused by its full decode stays refused: its stored bytes are never recovered.
 const DECODE_REFUSALS = new Set(['content', 'pixels', 'duration']);
 const CHANGED_DURING_CHECK = 'Some files changed while they were being checked. Reload the upload and save again.';
+const PLACE_DELETED = 'This place was deleted. Nothing was changed.';
+// Every change to a finished intake is refused; a deleted place says so.
+const notOpen = (record) => new RequestError(409, record.status === 'deleted' ? PLACE_DELETED : 'This upload is already finished.');
 
 const fail = (status, message) => new RequestError(status, message);
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
@@ -116,8 +119,14 @@ export const projectIntake = (record) => (record.status === 'open' ? projectOpen
 export class IntakeStore {
   // `verifier` decodes each file in full (media-verification.mjs); without one
   // no file can be accepted and checks answer as unavailable.
-  constructor({ dataDir, drafts, limits = INTAKE_LIMITS, verifier = null }) {
+  // `placeCommits` is the app's place-deletion barrier store and shared commit
+  // section; every record publication goes through it after a barrier check.
+  constructor({ dataDir, drafts, limits = INTAKE_LIMITS, verifier = null, placeCommits = null }) {
     this.root = path.join(dataDir, 'intakes');
+    this.places = placeCommits;
+    // Part uploads still running (their temporary files are written outside
+    // the mutex), by intake, so a place deletion can wait for them.
+    this.partUploads = new Map();
     this.drafts = drafts;
     this.limits = limits;
     this.verifier = verifier;
@@ -161,6 +170,9 @@ export class IntakeStore {
       if (error.code !== 'ENOENT') throw error;
     }
     for (const id of ids) {
+      // A deleted place's records and parts are left to its exact cleanup.
+      const record = await this.#read(id).catch(() => null);
+      if (record?.status === 'deleted' || (this.places && record && (await this.places.deleted(record.draftId)))) continue;
       for (const dir of [this.#dir(id), path.join(this.#dir(id), 'parts')]) {
         const names = await readdir(dir).catch(() => []);
         for (const name of names) if (name.endsWith('.tmp')) await rm(path.join(dir, name), { force: true });
@@ -186,20 +198,68 @@ export class IntakeStore {
     }
   }
 
-  async #write(record) {
-    const file = path.join(this.#dir(record.id), 'intake.json');
-    const temp = `${file}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-      await rename(temp, file);
-    } catch (error) {
-      await rm(temp, { force: true }).catch(() => {});
-      throw error;
-    }
-    return record;
+  // Callers hold the mutex. With a barrier store the publication runs in its
+  // shared commit section after a fresh barrier check: once a place is
+  // deleted only its content-free `deleted` record may be written, and
+  // `beforePublish` (a part file's final rename) runs inside the same section.
+  async #write(record, { beforePublish = null, allowDeleted = false } = {}) {
+    const publish = async () => {
+      if (this.places && !allowDeleted && (await this.places.deleted(record.draftId))) throw fail(409, PLACE_DELETED);
+      if (beforePublish) await beforePublish();
+      const file = path.join(this.#dir(record.id), 'intake.json');
+      const temp = `${file}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+        await rename(temp, file);
+      } catch (error) {
+        await rm(temp, { force: true }).catch(() => {});
+        throw error;
+      }
+      return record;
+    };
+    return this.places ? this.places.commit(publish) : publish();
   }
 
-  async #cleanup(id) {
+  // Under the mutex. Every record of this place becomes a content-free
+  // `deleted` record; its parts are removed by the deletion's exact cleanup.
+  async consumePlace(draftId) {
+    return this.serialize(async () => {
+      let ids = [];
+      try {
+        ids = (await readdir(this.root)).filter((name) => isUuid(name));
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      for (const id of ids) {
+        const record = await this.#read(id);
+        if (record?.draftId !== draftId || record.status === 'deleted') continue;
+        await this.#write({ id: record.id, status: 'deleted', revision: record.revision, draftId }, { allowDeleted: true });
+      }
+    });
+  }
+
+  // Lock-free reads: true when every stored record of this place is deleted.
+  async placeConsumed(draftId) {
+    try {
+      const ids = (await readdir(this.root).catch((error) => (error.code === 'ENOENT' ? [] : Promise.reject(error)))).filter((name) => isUuid(name));
+      for (const id of ids) {
+        const record = await this.#read(id);
+        if (record?.draftId === draftId && record.status !== 'deleted') return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  placeOperations(intakeIds) {
+    return intakeIds.filter((id) => this.partUploads.has(id)).length;
+  }
+
+  // Once the place has a deletion barrier its residue is left to the
+  // deletion's exact, link-safe cleanup, never this recursive removal.
+  async #cleanup(id, draftId) {
+    if (this.places && (await this.places.deleted(draftId))) return;
     await rm(path.join(this.#dir(id), 'parts'), { recursive: true, force: true }).catch(() => {});
   }
 
@@ -219,8 +279,14 @@ export class IntakeStore {
   async #resolve(id) {
     const record = await this.#read(id);
     if (!record) return null;
+    // A deleted place is checked first: its records are never reopened,
+    // recommitted or swept here, whatever their stored status.
+    if (record.status === 'deleted') return record;
+    if (this.places && (await this.places.deleted(record.draftId))) {
+      return { id: record.id, status: 'deleted', revision: record.revision, draftId: record.draftId };
+    }
     if (record.status !== 'open') {
-      await this.#cleanup(id);
+      await this.#cleanup(id, record.draftId);
       return record;
     }
     // Only a missing folder means "not committed". Any other I/O error is
@@ -249,7 +315,7 @@ export class IntakeStore {
       if (!matches || !(await this.#finalDraftMatches(record, draftDir))) throw fail(409, UNAVAILABLE);
       const committed = this.#terminalRecord(record, 'committed', { receipt: { ...receipt }, commitRequestId: receipt.commitRequestId });
       await this.#write(committed);
-      await this.#cleanup(id);
+      await this.#cleanup(id, record.draftId);
       return committed;
     }
     return this.#reconcileParts(record);
@@ -399,7 +465,7 @@ export class IntakeStore {
         if (previous !== digest) throw fail(409, 'This change was already used with different content.');
         return projectIntake(record);
       }
-      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      if (record.status !== 'open') throw notOpen(record);
       // An older client that omits the name never clears an existing one;
       // only an explicit null does. Exact replays were answered above.
       if (!Object.hasOwn(body, 'placeName') && (record.placeName ?? null) !== null) {
@@ -429,7 +495,7 @@ export class IntakeStore {
   async partCap(id, partId) {
     return this.serialize(async () => {
       const record = await this.#resolved(id);
-      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      if (record.status !== 'open') throw notOpen(record);
       const part = record.parts.find((item) => item.partId === partId);
       if (!part) throw fail(404, 'This file is not part of the upload.');
       return part.kind === 'photo' ? this.limits.photoBytes : this.limits.voiceBytes;
@@ -453,10 +519,22 @@ export class IntakeStore {
   // order is: exact replay of an accepted part, cheap preflight (empty, size,
   // checksum, signature), one full decode in the verification slot, then the
   // identity-guarded publish of the bytes with their private verification.
-  async receivePart(id, partId, bytes) {
+  receivePart(id, partId, bytes) {
+    const work = this.#receivePart(id, partId, bytes);
+    const settled = work.then(() => {}, () => {});
+    this.partUploads.set(id, (this.partUploads.get(id) ?? 0) + 1);
+    settled.then(() => {
+      const left = (this.partUploads.get(id) ?? 1) - 1;
+      if (left > 0) this.partUploads.set(id, left);
+      else this.partUploads.delete(id);
+    });
+    return work;
+  }
+
+  async #receivePart(id, partId, bytes) {
     const found = await this.serialize(async () => {
       const record = await this.#resolved(id);
-      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      if (record.status !== 'open') throw notOpen(record);
       const part = record.parts.find((item) => item.partId === partId);
       if (!part) throw fail(404, 'This file is not part of the upload.');
       if (attested(part)) {
@@ -483,21 +561,25 @@ export class IntakeStore {
       return await this.serialize(async () => {
         this.#running(planned.kind);
         const record = await this.#resolved(id);
-        if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+        if (record.status !== 'open') throw notOpen(record);
         const part = record.parts.find((item) => item.partId === partId);
         if (!part || identity(part) !== identity(planned)) throw fail(409, 'This file was removed or replaced in the upload.');
         if (attested(part)) return { partId, status: 'received', detectedType: part.detectedType };
         const file = this.#partFile(id, partId);
-        await rename(temp, file);
-        // Publication boundary: nothing is awaited between this check and
-        // starting the record write. A close before it leaves no new file.
-        if (this.shutdown.signal.aborted) {
-          if (part.status !== 'received') await rm(file, { force: true }).catch(() => {});
-          throw new MediaVerificationError('aborted', planned.kind);
-        }
         await this.#write(withPart(record, part, {
           status: 'received', error: null, detectedType: checked.detectedType, verification: attestation(part, checked.detectedType, result),
-        }));
+        }), {
+          // The part file is published in the record's own commit section,
+          // after its barrier check. Publication boundary: nothing is awaited
+          // between the close check and starting the record write.
+          beforePublish: async () => {
+            await rename(temp, file);
+            if (this.shutdown.signal.aborted) {
+              if (part.status !== 'received') await rm(file, { force: true }).catch(() => {});
+              throw new MediaVerificationError('aborted', planned.kind);
+            }
+          },
+        });
         return { partId, status: 'received', detectedType: checked.detectedType };
       });
     } finally {
@@ -510,7 +592,7 @@ export class IntakeStore {
   async #refuseUpload(id, planned, checked) {
     return this.serialize(async () => {
       const record = await this.#resolved(id);
-      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      if (record.status !== 'open') throw notOpen(record);
       const part = record.parts.find((item) => item.partId === planned.partId);
       if (!part || identity(part) !== identity(planned)) throw fail(409, 'This file was removed or replaced in the upload.');
       if (part.status === 'received') throw fail(409, 'This file was already received with different content.');
@@ -569,7 +651,7 @@ export class IntakeStore {
     await this.serialize(async () => {
       this.#running(part.kind);
       const record = await this.#resolved(id);
-      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      if (record.status !== 'open') throw notOpen(record);
       const current = record.parts.find((item) => item.partId === part.partId);
       if (!current || identity(current) !== identity(part) || current.status !== 'received') throw refusal();
       if (attested(current)) return;
@@ -586,7 +668,7 @@ export class IntakeStore {
   // and exactly those bytes are served, never the mutable file path.
   async partAsset(id, partId) {
     const asset = async (record) => {
-      if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+      if (record.status !== 'open') throw notOpen(record);
       const part = record.parts.find((item) => item.partId === partId);
       if (!part || part.status !== 'received') throw fail(404, 'This file has not been received.');
       if (!attested(part)) return { pending: { ...part } };
@@ -624,7 +706,7 @@ export class IntakeStore {
       if (record.commitRequestId === body.requestId && record.revision === body.baseRevision) return { result: { status: 200, intake: terminal(record) } };
       throw fail(409, 'This upload was already saved.');
     }
-    if (record.status !== 'open') throw fail(409, 'This upload is already finished.');
+    if (record.status !== 'open') throw notOpen(record);
     if (body.baseRevision !== record.revision) throw fail(409, 'The upload changed elsewhere. Reload it before saving.');
     if (record.ownerId !== owner.id) throw fail(403, 'This action is not allowed.');
     if (!record.parts.every((part) => part.status === 'received')) throw fail(409, NOT_RECEIVED);
@@ -654,7 +736,7 @@ export class IntakeStore {
     }, { id: record.draftId, receipt, signal: this.shutdown.signal });
     const committed = this.#terminalRecord(record, 'committed', { receipt, commitRequestId: body.requestId });
     await this.#write(committed).catch(() => {});
-    await this.#cleanup(id);
+    await this.#cleanup(id, record.draftId);
     return { result: { status: 201, intake: terminal(committed) } };
   }
 
@@ -664,9 +746,10 @@ export class IntakeStore {
       const record = await this.#resolved(id);
       if (record.status === 'committed') throw fail(409, 'This upload was already saved.');
       if (record.status === 'discarded') return terminal(record);
+      if (record.status === 'deleted') throw notOpen(record);
       const discarded = this.#terminalRecord(record, 'discarded', { discardRequestId: body.requestId });
       await this.#write(discarded);
-      await this.#cleanup(id);
+      await this.#cleanup(id, record.draftId);
       return terminal(discarded);
     });
   }

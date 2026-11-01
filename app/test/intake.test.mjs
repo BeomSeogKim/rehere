@@ -4,6 +4,7 @@ import { createSourceDetails } from '../public/source-details.js';
 import {
   canonicalPlaceName,
   createIntakeSession,
+  isTerminalState,
   detailsFromSourceInput,
   identify,
   intakeApi,
@@ -28,7 +29,8 @@ function fakeServer() {
   const view = (intake) =>
     intake.status === 'open'
       ? structuredClone({ id: intake.id, status: 'open', revision: intake.revision, createdAt: 't', updatedAt: 't', text: intake.text, metadata: intake.metadata, parts: intake.parts })
-      : { id: intake.id, status: intake.status, revision: intake.revision, draftId: intake.draftId ?? null };
+      : { id: intake.id, status: intake.status, revision: intake.revision, ...(intake.status === 'committed' ? { draftId: intake.draftId } : {}) };
+  const GONE = 'This place was deleted. Nothing was changed.';
   const ok = (body, status = 200) => ({ status, ok: true, body });
   const no = (status, error = 'refused') => ({ status, ok: false, body: { error } });
   const plan = (intake, body) => {
@@ -48,8 +50,15 @@ function fakeServer() {
       calls.push(['list']);
       return ok([...intakes.values()].filter((intake) => intake.status === 'open').map(view));
     },
+    // The intake's place was deleted: its record keeps no content.
+    deletePlace(id) {
+      const intake = intakes.get(id);
+      intake.status = 'deleted';
+    },
     async read(id) {
       calls.push(['read', id]);
+      const injected = fault('read');
+      if (injected) return injected;
       const intake = intakes.get(id);
       return intake ? ok(view(intake)) : no(404);
     },
@@ -67,6 +76,7 @@ function fakeServer() {
     async plan(id, body) {
       calls.push(['plan', id, structuredClone(body)]);
       const intake = intakes.get(id);
+      if (intake.status === 'deleted') return no(409, GONE);
       if (intake.status !== 'open') return ok(view(intake));
       if (intake.applied?.has(body.requestId)) return ok(view(intake));
       if (body.baseRevision !== intake.revision) return no(409);
@@ -78,6 +88,7 @@ function fakeServer() {
     async part(id, partId, blob) {
       calls.push(['part', partId]);
       const intake = intakes.get(id);
+      if (intake.status === 'deleted') return no(409, GONE);
       const part = intake.parts.find((entry) => entry.partId === partId);
       const injected = fault(`part:${partId}`);
       if (injected) return injected;
@@ -89,6 +100,7 @@ function fakeServer() {
     async commit(id, body) {
       calls.push(['commit', id, structuredClone(body)]);
       const intake = intakes.get(id);
+      if (intake.status === 'deleted') return no(409, GONE);
       if (intake.status === 'committed') return intake.commitRequestId === body.requestId ? ok(view(intake)) : no(409);
       if (body.baseRevision !== intake.revision || intake.parts.some((part) => part.status !== 'received')) return no(409);
       Object.assign(intake, { status: 'committed', draftId: 'draft-1', commitRequestId: body.requestId });
@@ -97,6 +109,7 @@ function fakeServer() {
     async discard(id, body) {
       calls.push(['discard', id, body]);
       const intake = intakes.get(id);
+      if (intake.status === 'deleted') return no(409, GONE);
       if (intake.status === 'committed') return no(409);
       intake.status = 'discarded';
       return ok(view(intake));
@@ -658,5 +671,73 @@ describe('place names in a plan', () => {
     assert.equal((await session(undefined).run(plan(null))).kind, 'saved');
     assert.equal((await session(null).run(plan(null))).kind, 'saved');
     assert.equal((await session(null).run(plan('Mine'))).kind, 'conflict');
+  });
+});
+
+describe('an intake whose place was deleted', () => {
+  const start = async (faultPart = false) => {
+    const server = fakeServer();
+    const storage = memoryStorage();
+    const newId = ids();
+    const session = createIntakeSession({ api: server, ids: pendingIds(storage, 'p-owner'), newId });
+    const photos = [photo('aaa', 'a.jpg'), photo('bbb', 'b.jpg')];
+    const { intended, files } = await prepare(photos, 'x', newId);
+    if (faultPart) server.faults.push({ name: `part:${photos[1].partId}`, result: { status: 503, ok: false, body: { error: 'busy' } } });
+    return { server, storage, session, photos, intended, files };
+  };
+  const after = (server, mark) => server.calls.slice(mark).map((call) => call[0]);
+
+  it('recognises the content-free deleted record, with no place ID', () => {
+    assert.equal(isTerminalState({ id: 'i1', status: 'deleted', revision: 3 }), true);
+    assert.equal(isTerminalState({ id: 'i1', status: 'deleted' }), false);
+  });
+
+  it('settles a lost commit as deleted from the intake itself, and sends nothing more', async () => {
+    const { server, storage, session, intended, files } = await start();
+    server.faults.push({ name: 'commit', result: { status: 0, ok: false, body: null } });
+    assert.deepEqual(await session.save(intended, files), { kind: 'unknown', stage: 'commit' });
+    server.deletePlace(session.intakeId);
+    const mark = server.calls.length;
+    assert.deepEqual(await session.save(intended, files), { kind: 'deleted' });
+    assert.deepEqual(after(server, mark), ['read'], 'no create, plan, part or commit');
+    assert.equal(storage.map.size, 0, 'its pending ID is removed');
+  });
+
+  it('settles a refused part, a refused plan change and a refused discard as deleted', async () => {
+    const uploading = await start(true);
+    assert.equal((await uploading.session.save(uploading.intended, uploading.files)).kind, 'incomplete');
+    uploading.server.deletePlace(uploading.session.intakeId);
+    const before = uploading.server.calls.length;
+    assert.deepEqual(await uploading.session.save(uploading.intended, uploading.files), { kind: 'deleted' });
+    assert.deepEqual(after(uploading.server, before), ['part', 'read'], 'no commit after the refused part');
+
+    const planning = await start(true);
+    assert.equal((await planning.session.save(planning.intended, planning.files)).kind, 'incomplete');
+    planning.server.deletePlace(planning.session.intakeId);
+    const changed = planFrom({ text: 'y', photos: planning.photos, voice: null, textDetails: createSourceDetails() });
+    const mark = planning.server.calls.length;
+    assert.deepEqual(await planning.session.save(changed, planning.files), { kind: 'deleted' });
+    assert.deepEqual(after(planning.server, mark), ['plan', 'read'], 'no part is sent after the refused change');
+
+    const discarding = await start(true);
+    await discarding.session.save(discarding.intended, discarding.files);
+    discarding.server.deletePlace(discarding.session.intakeId);
+    assert.deepEqual(await discarding.session.discard(), { kind: 'deleted' });
+    assert.equal(discarding.storage.map.size, 0);
+  });
+
+  it('treats a deleted record for another intake as unknown, without touching this plan or its parts', async () => {
+    const { server, storage, session, intended, files } = await start();
+    server.faults.push({ name: 'commit', result: { status: 0, ok: false, body: null } });
+    await session.save(intended, files);
+    server.faults.push({ name: 'read', result: { status: 200, ok: true, body: { id: 'someone-else', status: 'deleted', revision: 9 } } });
+    const mark = server.calls.length;
+    assert.deepEqual(await session.save(intended, files), { kind: 'unknown', stage: 'commit' });
+    assert.deepEqual(after(server, mark), ['read'], 'nothing else is attempted');
+    assert.equal(storage.map.size, 1, 'its own pending ID stays');
+    const created = await start();
+    created.server.faults.push({ name: 'create', result: { before: true, result: { status: 201, ok: true, body: { id: 'someone-else', status: 'deleted', revision: 1 } } } });
+    assert.deepEqual(await created.session.save(created.intended, created.files), { kind: 'unknown', stage: 'create' });
+    assert.equal(sent(created.server, 'part').length, 0);
   });
 });
