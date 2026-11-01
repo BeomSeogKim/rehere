@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it, mock } from 'node:test';
 import { FakeElement } from './fake-dom.mjs';
-import { installViewerShim } from './viewer-shim.mjs';
+import { currentCamera, installViewerShim } from './viewer-shim.mjs';
+import { objectSurfaceMeshes } from '../public/photo-scene.js';
 
 // A shared two-object scene: the visitor sees both objects named in text, the
 // rule as text, and can pick one object for its photo evidence and stories.
@@ -87,6 +88,8 @@ const flush = async () => {
 };
 
 let mountVisitor;
+let HEARTBEAT_MS;
+let photographedSideCamera;
 let audios;
 
 before(async () => {
@@ -105,7 +108,8 @@ before(async () => {
     addEventListener: () => {},
     removeEventListener: () => {},
   };
-  ({ mountVisitor } = await import('../public/visits.js'));
+  ({ mountVisitor, HEARTBEAT_MS } = await import('../public/visits.js'));
+  ({ photographedSideCamera } = await import('../public/scene-viewer.js'));
 });
 
 after(() => {
@@ -125,11 +129,14 @@ afterEach(() => {
   mock.timers.reset();
 });
 
-async function open() {
+async function open(data = manifest(), scene = surface) {
+  const calls = [];
   const src = {
-    manifest: () => Promise.resolve(manifest()),
-    check: () => Promise.resolve(true),
-    asset: (viewId, name) => Promise.resolve(name === 'surface.json' ? ok(surface) : texture()),
+    calls,
+    allowed: true,
+    manifest: () => (calls.push('manifest'), Promise.resolve(data)),
+    check: () => (calls.push('check'), Promise.resolve(src.allowed)),
+    asset: (viewId, name) => (calls.push(`asset ${name}`), Promise.resolve(name === 'surface.json' ? ok(scene) : texture())),
     storyAudio: () => {
       const bytes = storyWav();
       return Promise.resolve({ ok: true, status: 200, headers: { get: (name) => (name === 'content-type' ? 'audio/wav' : '60') }, arrayBuffer: async () => bytes.buffer });
@@ -142,7 +149,7 @@ async function open() {
   const find = (predicate) => container.findAll(predicate);
   const button = (text) => find((node) => node.tag === 'button' && node.textContent === text)[0];
   const titles = () => find((node) => node.className === 'space-choice-label').map((node) => node.textContent);
-  return { container, view, states, find, button, titles };
+  return { container, view, states, find, button, titles, src };
 }
 
 describe('visitor view of a two-object scene', () => {
@@ -174,5 +181,137 @@ describe('visitor view of a two-object scene', () => {
     assert.deepEqual(v.titles(), ['About the Counter', 'About the Flour stack']);
     assert.doesNotMatch(v.container.textContent, /Photo evidence for/);
     v.view.dispose();
+  });
+});
+
+describe('photographed side of a chosen object for visitors', () => {
+  const ALT = '22222222-2222-4222-8222-222222222222';
+  const TURNED = (166 * Math.PI) / 180;
+  const CHOOSE = 'See photographed side (choose an object first)';
+  const withAlternative = () => {
+    const data = manifest();
+    data.views.push({
+      ...data.views[0],
+      id: ALT,
+      label: 'Alternative arrangement',
+      edit: { objects: [{ id: 'object-1', offset: [0.3, 0, 0.2], yaw: TURNED }, { id: 'object-2', offset: [0.5, 0, 0], yaw: 0 }], relationship: RULE },
+    });
+    return data;
+  };
+  const pivots = Object.fromEntries(objectSurfaceMeshes(surface).objects.map((object) => [object.id, object.pivot]));
+  const expected = (id, transform) => photographedSideCamera(pivots[id], transform);
+  const near = (actual, wanted) => [...actual.position, ...actual.target].every((value, i) => Math.abs(value - [...wanted.position, ...wanted.target][i]) < 1e-9);
+  const side = (v) => v.find((node) => node.tag === 'button' && (node.textContent === CHOOSE || node.textContent.startsWith('See photographed side of ')))[0];
+  const status = (v) => v.find((node) => node.role === 'status' && /photographed side|camera did not move/.test(node.textContent))[0]?.textContent ?? '';
+  const pressedText = (v) => v.find((node) => node.tag === 'button' && node.attributes['aria-pressed'] === 'true').map((node) => node.textContent);
+
+  it('needs a chosen object and moves only on a press, to the selected view’s current transform with its exact turn', async () => {
+    const data = withAlternative();
+    const before = structuredClone(data);
+    const v = await open(data);
+    assert.deepEqual(currentCamera(), CAMERA, 'the published camera first');
+    assert.equal(side(v).textContent, CHOOSE);
+    assert.equal(side(v).disabled, true);
+    assert.equal(side(v).hidden, false);
+    v.button('A: Counter').dispatch('click');
+    v.button('Alternative arrangement').dispatch('click');
+    assert.deepEqual(currentCamera(), CAMERA, 'choosing an object or a view never moves the camera');
+    assert.equal(side(v).textContent, 'See photographed side of A: Counter');
+    const calls = v.src.calls.length;
+    side(v).dispatch('click');
+    const turned = expected('object-1', { offset: [0.3, 0, 0.2], yaw: TURNED });
+    assert.ok(turned && near(currentCamera(), turned), 'the Alternative arrangement transform, 166 degrees');
+    assert.ok(!near(currentCamera(), expected('object-1', { offset: [0.3, 0, 0.2], yaw: Math.round(TURNED * 100) / 100 })), 'the exact stored turn, not a rounded one');
+    assert.match(status(v), /^Camera moved to inspect the photographed side of A: Counter, as arranged in “Alternative arrangement” when you pressed the button\. Sides the photo did not capture stay empty\. This is not the photo’s original viewpoint, and it does not show history or physical accuracy\.$/);
+    assert.deepEqual(v.src.calls.slice(calls), [], 'nothing is requested');
+    assert.deepEqual(data, before, 'nothing is edited');
+    assert.deepEqual(pressedText(v), ['Alternative arrangement', 'A: Counter'], 'view and object stay selected; exploring is not turned on');
+    assert.equal(audios.length, 0, 'nothing plays');
+
+    const moved = currentCamera();
+    v.button('Saved scene').dispatch('click');
+    assert.deepEqual(currentCamera(), moved, 'switching keeps the same camera and does not repeat the move');
+    assert.equal(status(v), '', 'the old status is cleared');
+    side(v).dispatch('click');
+    assert.ok(near(currentCamera(), expected('object-1', { offset: [0, 0, 0], yaw: 0 })), 'now the Saved scene transform');
+    assert.match(status(v), /as arranged in “Saved scene”/);
+    v.button('B: Flour stack').dispatch('click');
+    assert.equal(status(v), '');
+    assert.ok(near(currentCamera(), expected('object-1', { offset: [0, 0, 0], yaw: 0 })), 'picking another object does not move');
+    side(v).dispatch('click');
+    assert.ok(near(currentCamera(), expected('object-2', { offset: [0.5, 0, 0], yaw: 0 })));
+    v.button('Back to the starting view').dispatch('click');
+    assert.deepEqual(currentCamera(), CAMERA);
+    assert.equal(status(v), '', 'the published camera replaces the inspected one');
+    side(v).dispatch('click');
+    v.button('All objects').dispatch('click');
+    assert.equal(side(v).textContent, CHOOSE);
+    assert.equal(side(v).disabled, true);
+    assert.equal(status(v), '');
+    v.view.dispose();
+  });
+
+  it('is unavailable while comparing with the photograph and returns without moving', async () => {
+    const v = await open(withAlternative());
+    v.button('A: Counter').dispatch('click');
+    side(v).dispatch('click');
+    const inspected = currentCamera();
+    v.button('Compare with the photograph').dispatch('click');
+    assert.equal(side(v).disabled, true);
+    assert.equal(status(v), '', 'the earlier status no longer describes the camera');
+    const framed = currentCamera();
+    side(v).dispatch('click');
+    assert.deepEqual(currentCamera(), framed, 'the photo framing is kept');
+    v.button('Leave the comparison').dispatch('click');
+    assert.ok(near(currentCamera(), inspected), 'back to the camera from before comparing');
+    assert.equal(side(v).disabled, false);
+    assert.equal(status(v), '');
+    v.view.dispose();
+  });
+
+  it('keeps the camera and says so when the viewer refuses the move', async () => {
+    const far = { ...surface, depth: Array(GRID * GRID).fill(9), assumptions: { ...surface.assumptions, far: 9 } };
+    const v = await open(manifest(), far);
+    assert.equal(v.states.at(-1), '3d');
+    v.button('A: Counter').dispatch('click');
+    const before = currentCamera();
+    side(v).dispatch('click');
+    assert.deepEqual(currentCamera(), before);
+    assert.equal(status(v), 'The photographed side of A: Counter is outside this scene’s camera limits, so the camera did not move.');
+    v.view.dispose();
+  });
+
+  it('is not offered in the 2D fallback or for a one-object visit', async () => {
+    globalThis.viewerFail = 'webgl';
+    const flat = await open(withAlternative());
+    assert.equal(flat.states.at(-1), '2d');
+    assert.equal(side(flat).hidden, true);
+    flat.button('A: Counter').dispatch('click');
+    assert.equal(side(flat).hidden, true);
+    flat.view.dispose();
+    globalThis.viewerFail = null;
+    const legacy = manifest();
+    delete legacy.objects;
+    const one = await open(legacy);
+    assert.equal(side(one), undefined);
+    one.view.dispose();
+  });
+
+  it('leaves nothing of the control or its status after revocation or disposal', async () => {
+    const v = await open(withAlternative());
+    v.button('A: Counter').dispatch('click');
+    side(v).dispatch('click');
+    v.src.allowed = false;
+    mock.timers.tick(HEARTBEAT_MS);
+    await flush();
+    assert.equal(v.states.at(-1), 'unavailable');
+    assert.equal(side(v), undefined);
+    assert.doesNotMatch(v.container.textContent, /photographed side|Counter/);
+    v.view.dispose();
+    const w = await open(withAlternative());
+    w.button('A: Counter').dispatch('click');
+    side(w).dispatch('click');
+    w.view.dispose();
+    assert.equal(w.container.children.length, 0);
   });
 });

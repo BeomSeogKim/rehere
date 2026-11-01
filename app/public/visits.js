@@ -86,6 +86,13 @@ function eraText(era, labelOf) {
 
 // Shown beside the scene for every view, so it stays in sight while scrolling.
 const SCENE_NOTE = 'Shape and depth: a model estimate from this one photo, not a measurement. Areas the photo did not show are left empty.';
+// Two-object 3D views: one deliberate camera move to the chosen object's
+// photographed side, as that object is arranged in the selected saved view.
+const SIDE_CHOOSE = 'See photographed side (choose an object first)';
+const SIDE_MOVED = (name, label) =>
+  `Camera moved to inspect the photographed side of ${name}, as arranged in “${label}” when you pressed the button. Sides the photo did not capture stay empty. This is not the photo’s original viewpoint, and it does not show history or physical accuracy.`;
+const SIDE_REFUSED = (name) => `The photographed side of ${name} is outside this scene’s camera limits, so the camera did not move.`;
+const SIDE_MISSING = (name, label) => `“${label}” has no usable saved placement for ${name}, so the camera did not move.`;
 
 // `summary` (the saved arrangement differences) follows the time assertion,
 // before the photo, provider and recollection text.
@@ -289,6 +296,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     const nameOf = objectNames(objects);
     let objectId = restore && objects?.some((entry) => entry.id === restore.objectId) ? restore.objectId : null;
     const objectButtons = el('div', { className: 'actions', role: 'group' });
+    const sideButton = el('button', { type: 'button', className: 'secondary', textContent: SIDE_CHOOSE, hidden: true, disabled: true });
+    const sideStatus = el('p', { className: 'hint', role: 'status' });
     const evidence = el('div', { className: 'object-evidence' });
     const evidenceSummary = el('summary', { textContent: 'Photo evidence (choose an object)' });
     const evidenceBox = el('details', { className: 'source-details' }, [evidenceSummary, evidence]);
@@ -310,6 +319,27 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         el('p', { className: 'hint', textContent: `Photo evidence for ${nameOf(object.id)}: the box the owner drew. The outline inside it is a model estimate.` }),
         el('div', { className: 'anchor-frame' }, [el('img', { src: textureUrl, alt: `The photo used for “${manifest.title}”, with the box for ${nameOf(object.id)}` }), box]),
       );
+    };
+    // Offered only with a working 3D view of two objects and a chosen object;
+    // disabled while comparing so the photo framing and its return camera stay.
+    const renderSide = () => {
+      sideButton.hidden = !objects || !viewer;
+      sideButton.disabled = !objectId || comparing || !viewer;
+      sideButton.textContent = objectId ? `See photographed side of ${nameOf(objectId)}` : SIDE_CHOOSE;
+    };
+    // Only on a deliberate press: the selected view's current transform for
+    // the selected object. Moves the camera only; a refusal leaves it as it was.
+    const viewSide = () => {
+      if (!viewer || comparing || !objectId) return;
+      const view = views.get(currentId);
+      const name = nameOf(objectId);
+      const placed = placement(view.edit, objectId);
+      if (!placed) {
+        sideStatus.textContent = SIDE_MISSING(name, view.label);
+        return;
+      }
+      const moved = viewer.viewPhotographedSide({ offset: [...placed.offset], yaw: placed.yaw }, objectId);
+      sideStatus.textContent = moved ? SIDE_MOVED(name, view.label) : SIDE_REFUSED(name);
     };
     // While comparing with the photograph, stories stay listed but have no
     // player: nothing plays or downloads until the comparison is left.
@@ -415,6 +445,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     };
     const showView = (id) => {
       currentId = id;
+      sideStatus.textContent = '';
       const view = views.get(id);
       if (view.edit?.objects) viewer?.applyArrangement(view.edit);
       else viewer?.applyEdit(view.edit);
@@ -524,6 +555,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       compareBar.hidden = false;
       compareStatus.textContent = '';
       setPressed(false);
+      sideStatus.textContent = '';
+      renderSide();
       // Stopping comparison never brings audio back on its own.
       renderStories(currentId);
     };
@@ -546,6 +579,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       explore.attach(viewer);
       back.disabled = false;
       saved = null;
+      renderSide();
       renderStories(currentId);
     };
     compareButton.addEventListener('click', enterCompare);
@@ -560,6 +594,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     if (objects) {
       const pickObject = (id) => {
         objectId = id;
+        sideStatus.textContent = '';
+        renderSide();
         renderObjects();
         renderStories(currentId);
       };
@@ -609,7 +645,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         ]),
         el('div', { className: 'scene-inspector' }, [
           buttons,
-          ...(objects ? [objectButtons, evidenceBox] : []),
+          ...(objects ? [objectButtons, sideButton, sideStatus, evidenceBox] : []),
           details,
           photoBox,
           storyBox,
@@ -645,9 +681,14 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     explore.attach(viewer);
     // A camera returns only with its own restored view.
     viewer.setCamera(viewRestored && copyCamera(restore.camera) ? copyCamera(restore.camera) : manifest.camera);
-    back.addEventListener('click', () => viewer?.setCamera(manifest.camera));
+    back.addEventListener('click', () => {
+      sideStatus.textContent = '';
+      viewer?.setCamera(manifest.camera);
+    });
+    sideButton.addEventListener('click', viewSide);
     // Offered only with a working 3D view; the 2D fallback has none.
     compareButton.hidden = false;
+    renderSide();
     message.textContent = 'Switching views keeps the same camera so they can be compared.';
     showView(currentId);
     goLive();

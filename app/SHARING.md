@@ -69,6 +69,14 @@ use the original photo's scene axes, even after exploring with the camera.
 Only shared saved values are compared; differences do not establish when or
 whether the place changed or which account is more accurate.
 
+In a two-object 3D view, choose an object and press **See photographed side**
+to inspect the surface captured in the photo, as arranged in the selected
+shared view. This explicit camera move does not reveal unobserved surfaces
+or reproduce the photo's original projection. Switching views still keeps
+the camera where it is; **Back to the starting view** restores the shared
+camera. Inspection is disabled during comparison with the photograph and
+unavailable in the 2D fallback.
+
 Choose **Compare with the photograph** to switch between **Photo** and
 **This reconstruction** from the photo's original viewpoint. Both fit the
 same image shape without stretching or cropping. The photo is the permitted,
