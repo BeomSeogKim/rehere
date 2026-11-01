@@ -153,6 +153,32 @@ async function open(data = manifest(), scene = surface) {
 }
 
 describe('visitor view of a two-object scene', () => {
+  it('distinguishes owner-corrected outlines from the retained depth estimate', async () => {
+    const data = manifest();
+    data.outline = { kind: 'owner-corrected' };
+    const v = await open(data, { ...surface, outline: { kind: 'owner-corrected' } });
+    assert.equal(v.states.at(-1), '3d');
+    assert.match(v.container.textContent, /Outlines: include a correction the owner made on this photo\. Depth: the existing model estimate/);
+    assert.match(v.container.textContent, /does not fix depth errors or add unseen surfaces/);
+    v.button('B: Flour stack').dispatch('click');
+    assert.match(v.container.textContent, /box encloses its current outline\. This scene includes an owner-made outline correction/);
+    assert.doesNotMatch(v.container.textContent, /box the owner drew/);
+    v.view.dispose();
+  });
+
+  it('keeps model-only and unknown outline provenance on the existing description', async () => {
+    for (const outline of [undefined, { kind: 'unrecognised' }]) {
+      const data = manifest();
+      if (outline) data.outline = outline;
+      const v = await open(data);
+      assert.match(v.container.textContent, /Shape and depth: a model estimate/);
+      assert.doesNotMatch(v.container.textContent, /corrected by the owner/);
+      v.button('B: Flour stack').dispatch('click');
+      assert.match(v.container.textContent, /box the owner drew\. The outline inside it is a model estimate/);
+      v.view.dispose();
+    }
+  });
+
   it('names both objects and the rule in text', async () => {
     const v = await open();
     assert.equal(v.states.at(-1), '3d');

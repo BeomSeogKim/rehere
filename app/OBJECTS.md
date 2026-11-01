@@ -26,8 +26,51 @@ A finished build is a model proposal. The mask overlay tints each object and
 marks unassigned pixels in white; the page names each object in text, so
 colour is not the only cue. Inspect both outlines, then confirm that each is
 the object you named. Until then the scene can be viewed but not edited,
-planned, reviewed, given stories or shared. A wrong outline needs a new build
-with different boxes; it is never corrected automatically.
+planned, reviewed, given stories or shared. A wrong outline can be corrected
+by hand before confirmation, or replaced by a new build with different boxes;
+it is never corrected automatically.
+
+## Correct an outline
+
+Before confirming a two-object scene, choose **They do not match** to repair
+one object's outline on the photo copy used for the scene. The overlay and
+cutout show the actual depth-grid cells, so a brush stroke has that precision,
+not the original photo's resolution. Add can take background or unassigned
+cells; Remove returns the chosen object's cells to photographed background.
+Removing a cell added from an unassigned area restores it to unassigned.
+Neither operation can change the other object's cells. Undo or reset before
+choosing the other object. Arrow keys move the cell cursor and Space paints.
+
+Refresh the 3D preview and inspect its original and side views. The preview
+reuses the existing depth and photo texture. It cannot fix depth errors,
+recover hidden surfaces or fill a gap behind a moved object. An outline that
+looks right from the photo can still have jagged or stretched geometry from
+another viewpoint. Inspect the result before deciding to keep it.
+
+**Save as new scene** creates a separate, unconfirmed scene at the photo's
+original positions. Both objects start with zero move and turn, without a
+relationship rule. The previous scene, its saved arrangements, stories and
+links stay unchanged; they are not copied to the new scene. Review both new
+outlines before the usual confirmation. An unclear save response pauses
+painting and can repeat the exact request without making another copy.
+
+This is deterministic image processing with Pillow in the configured
+`PHOTO_PYTHON` environment; it runs no depth or segmentation model and needs
+current place use, without model-processing permission. The source photo,
+previous assets, texture and depth preview remain unchanged. A new mask,
+overlay, surface and summary receive their own hashes. Existing object
+coverage, usable-triangle and depth checks still apply and can reject a
+correction. No failed correction replaces the previous scene.
+
+To include the real producer integration tests in the Node suite, run
+`PHOTO_PYTHON=/path/to/pillow-python npm test` from `app/`. Without an
+explicit interpreter that imports Pillow, that suite is omitted; a passing
+default run does not verify the producer.
+
+Corrected scenes and newly issued visitor snapshots say that their outlines
+include an owner-made correction, while depth remains a model estimate.
+That label does not establish history or imply that every object's outline
+was manually changed. Existing snapshots keep their original data and labels.
 
 ## Link regions from other photos
 
@@ -158,6 +201,7 @@ authority, source-use and contribution checks.
 |---|---|
 | `POST` (build) | `requestId`, `sourceId`, `objects: [{label, box}, {label, box}]` |
 | `POST /<job>/objects/confirm` | `requestId`, `objectIds: ["object-1", "object-2"]` |
+| `POST /<job>/outline-corrections` | `requestId`, `sourceSurfaceSha256`, `targetId`, `regions`, `confirmed: true` |
 | `POST /<job>/edit` | `requestId`, `baseVersion`, `targetId`, `offset`, `yaw` |
 | `POST /<job>/relationship` | `requestId`, `baseVersion`, `relationship` (rule or `null`), `confirmed: true` |
 | `POST /<job>/undo` | `requestId`, `baseVersion`, `targetVersion`, `ruleChangeConfirmed` |
@@ -175,6 +219,13 @@ two objects and a region per grid cell (unassigned, background, object 1 or
 object 2), alongside the existing depth grid and camera assumptions.
 Visitor views receive only the geometry, regions, object names and source
 boxes needed to draw and identify the objects.
+
+An outline correction accepts at most 2 MiB of JSON and binds the complete
+region map to the parent surface hash and one target object. A new ready
+scene returns 201; an exact replay returns the same scene with 200. Reusing
+the request ID with different input returns 409. Corrected owner manifests,
+surfaces and public packets add `outline: {kind: "owner-corrected"}`; legacy
+scenes omit it. Private parent identifiers and replay digests stay private.
 
 This covers exactly two objects in one photograph and one left/right rule.
 More objects, other rules, physical collision, reconstruction from multiple

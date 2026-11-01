@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { attestPhotos, contributionsDir } from './contribution-photos.mjs';
 import { cleanupContributionFiles, removeManifestTemps, safeJobDirectory } from './contribution-deletion-files.mjs';
 import {
@@ -30,6 +31,17 @@ export const RECONSTRUCTION_TIMEOUT_MS = 180_000;
 const SPATIAL_DIR = fileURLToPath(new URL('./spatial/', import.meta.url));
 const MIB = 1024 * 1024;
 const STDERR_BYTES = 8192;
+const OUTLINE_TIMEOUT_MS = 30_000;
+const OUTLINE_MESSAGES = Object.freeze({
+  input: 'The outline correction could not be read.',
+  changed: 'This outline request was already used with different values.',
+  surface: 'The saved scene files could not be verified. Nothing was changed.',
+  regions: 'Change only the selected object. Keep the other object and unassigned areas unchanged.',
+  rejected: 'The corrected outlines do not meet the scene coverage, overlap or visible-surface limits. No scene was saved.',
+  setup: 'Outline correction needs the local Pillow environment described in app/spatial/README.md. No scene was saved.',
+  stopped: 'Outline correction stopped before saving a scene. Retry the same request to check its result.',
+  failed: 'The corrected scene could not be saved. Retry the same request to check its result.',
+});
 
 // The worker's fixed output set. Nothing else in a job folder is ever served.
 export const OUTPUTS = Object.freeze({
@@ -88,6 +100,18 @@ export function pythonRunner({ python = defaultPython() } = {}) {
       });
       child.on('close', (exitCode) => resolve(spawnError ? { exitCode: null, stderr, spawnError } : { exitCode, stderr }));
     });
+}
+
+// Only Pillow and the standard library are loaded by this separate producer.
+export function pythonOutlineRunner({ python = defaultPython() } = {}) {
+  return ({ inputDir, requestPath, outputDir, signal }) => new Promise((resolve) => {
+    const child = spawn(python, [path.join(SPATIAL_DIR, 'correct_outline.py'), '--input', inputDir, '--request', requestPath, '--output', outputDir], {
+      cwd: SPATIAL_DIR, env: workerEnv(), shell: false, stdio: 'ignore', signal, killSignal: 'SIGKILL',
+    });
+    let spawnError = null;
+    child.on('error', (error) => { spawnError ??= error.code ?? 'error'; });
+    child.on('close', (exitCode) => resolve({ exitCode, spawnError }));
+  });
 }
 
 // Browser messages are fixed per exit category; worker stderr can hold local
@@ -182,6 +206,47 @@ export function parseBuildRequest(body) {
   return twoObjects ? { requestId, sourceId, objects: parseObjects(body.objects) } : { requestId, sourceId, box: parseBox(body.box) };
 }
 
+export function parseOutlineRequest(body) {
+  if (!exactKeys(body, ['requestId', 'sourceSurfaceSha256', 'targetId', 'regions', 'confirmed'])
+    || typeof body.requestId !== 'string' || !UUID_PATTERN.test(body.requestId)
+    || typeof body.sourceSurfaceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(body.sourceSurfaceSha256)
+    || !OBJECT_IDS.includes(body.targetId) || body.confirmed !== true || !Array.isArray(body.regions)
+    || body.regions.length > 262_144 || !body.regions.every((r) => Number.isInteger(r) && [-1, 0, 1, 2].includes(r))) {
+    throw new RequestError(400, OUTLINE_MESSAGES.input);
+  }
+  return { requestId: body.requestId, sourceSurfaceSha256: body.sourceSurfaceSha256, targetId: body.targetId, regions: [...body.regions] };
+}
+
+function correctedObjects(surface, request) {
+  const target = OBJECT_IDS.indexOf(request.targetId) + 1;
+  if (surface.regions.length !== request.regions.length) throw new RequestError(400, OUTLINE_MESSAGES.input);
+  let changed = false;
+  let minX = surface.width, minY = surface.height, maxX = -1, maxY = -1;
+  request.regions.forEach((after, i) => {
+    const before = surface.regions[i];
+    const valid = before === -1 ? after === -1 || after === target
+      : before === 0 || before === target ? after === 0 || after === target : after === before;
+    if (!valid) throw new RequestError(400, OUTLINE_MESSAGES.regions);
+    if (before !== after) changed = true;
+    if (after === target) {
+      minX = Math.min(minX, i % surface.width); maxX = Math.max(maxX, i % surface.width);
+      minY = Math.min(minY, Math.floor(i / surface.width)); maxY = Math.max(maxY, Math.floor(i / surface.width));
+    }
+  });
+  if (!changed) throw new RequestError(400, 'Change the selected outline before saving a new scene.');
+  if (maxX < 0) throw new RequestError(409, OUTLINE_MESSAGES.rejected);
+  const [width, height] = surface.source.image_size;
+  const extent = [
+    Math.min(width - 1, Math.floor(minX * width / (surface.width - 1))),
+    Math.min(height - 1, Math.floor(minY * height / (surface.height - 1))),
+    Math.min(width, Math.ceil(maxX * width / (surface.width - 1)) + 1),
+    Math.min(height, Math.ceil(maxY * height / (surface.height - 1)) + 1),
+  ];
+  return surface.objects.map(({ id, label, box_xyxy: box }) => ({ id, label, box_xyxy: id === request.targetId
+    ? [Math.min(box[0], extent[0]), Math.min(box[1], extent[1]), Math.max(box[2], extent[2]), Math.max(box[3], extent[3])]
+    : [...box] }));
+}
+
 const transformValid = (offset, yaw) => Array.isArray(offset) && offset.length === 3 && offset.every((value) => finite(value) && value >= -2 && value <= 2)
   && finite(yaw) && yaw >= -Math.PI && yaw <= Math.PI;
 
@@ -244,7 +309,7 @@ const SOURCE_REDACTED_PROPOSAL = 'This proposal used a photo that is no longer a
 // the manifest contract plus whether the photo's current uses or withdrawn or
 // ungranted contributions block use. `source` is the photo's current uses.
 export function publicManifest(manifest, source = { place: true, model: true }) {
-  const { edits, proposals, collaboration, shares, stories, ...rest } = manifest;
+  const { edits, proposals, collaboration, shares, stories, outlineCorrection, ...rest } = manifest;
   const ready = manifest.status === 'ready';
   const sourceBlocked = ready && !source.place;
   const contributionBlocked = usageBlocked(manifest);
@@ -524,7 +589,7 @@ const startsWith = (bytes, signature) => signature.every((value, index) => bytes
 export class ReconstructionStore {
   constructor({
     dataDir, drafts, runner, timeoutMs = RECONSTRUCTION_TIMEOUT_MS, proposalModel = null, prepareImage = pythonModelImage(), visibleSurfaceLimits,
-    placeDeletions = null,
+    placeDeletions = null, outlineRunner = pythonOutlineRunner(), outlineTimeoutMs = OUTLINE_TIMEOUT_MS,
   }) {
     this.drafts = drafts;
     // Place-deletion barriers; a deleted place reads as absent everywhere.
@@ -533,6 +598,9 @@ export class ReconstructionStore {
     // { draftId, settled }. It can outlive the build that started it.
     this.runners = new Map();
     this.runner = runner;
+    this.outlineRunner = outlineRunner;
+    this.outlineTimeoutMs = outlineTimeoutMs;
+    this.activeOutline = null;
     this.timeoutMs = timeoutMs;
     this.proposalModel = proposalModel;
     this.prepareImage = prepareImage;
@@ -673,7 +741,7 @@ export class ReconstructionStore {
   // Requests cancellation of this place's running work. Only called once its
   // deletion barrier is durable; nothing is awaited and no data is recalled.
   abortPlace(draftId) {
-    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia]) {
+    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline]) {
       if (item?.draftId !== draftId) continue;
       try {
         item.controller.abort();
@@ -683,13 +751,13 @@ export class ReconstructionStore {
     }
   }
 
-  // Distinct owned operations of this place still running: a build together
-  // with its runner counts once, as do a proposal, a story and a contribution.
+  // A build and its runner count once; proposals, stories, contributions and
+  // outline corrections each remain active until their own cleanup settles.
   placeOperations(draftId) {
     const builds = new Set();
     if (this.active?.draftId === draftId) builds.add(this.active.id);
     for (const [jobId, runner] of this.runners) if (runner.draftId === draftId) builds.add(jobId);
-    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia].filter((item) => item?.draftId === draftId).length;
+    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline].filter((item) => item?.draftId === draftId).length;
   }
 
   async asset(draftId, jobId, name) {
@@ -763,11 +831,12 @@ export class ReconstructionStore {
         const sameSelection = request.objects
           ? sameValues(existing.objects?.map(({ id, label, box }) => ({ id, label, box })), request.objects)
           : !existing.objects && sameValues(existing.box, request.box);
-        if (existing.draftId !== draftId || existing.sourceId !== request.sourceId || !sameSelection) {
+        if (existing.outlineCorrection || existing.draftId !== draftId || existing.sourceId !== request.sourceId || !sameSelection) {
           throw new RequestError(409, 'This build request was already used for a different photo or box.');
         }
         return { manifest: existing, start: false };
       }
+      if (this.activeOutline?.requestId === request.requestId) throw new RequestError(409, OUTLINE_MESSAGES.changed);
       const { source, imagePath, size } = await this.verifiedOriginal(draftId, request.sourceId);
       for (const [, , x2, y2] of request.objects ? request.objects.map((item) => item.box) : [request.box]) {
         if (x2 > size.width || y2 > size.height) {
@@ -984,6 +1053,141 @@ export class ReconstructionStore {
       role: 'derived',
     }));
     return { derivedAssets, pivots };
+  }
+
+  async #outlineParent(draftId, jobId, surfaceSha256) {
+    const manifest = await this.editableScene(draftId, jobId);
+    if (manifest.status !== 'ready' || !isTwoObject(manifest)) throw new RequestError(409, 'Only a finished two-object scene can have its outline corrected.');
+    assertSceneUsable(manifest, 'place');
+    const { source, size } = await this.verifiedOriginal(draftId, manifest.sourceId, 'place');
+    if (source.sha256 !== manifest.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
+    const assets = path.join(this.jobDir(draftId, jobId), 'assets');
+    if (!(await safeJobDirectory(assets, this.rootDir))) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+    if (manifest.derivedAssets?.length !== Object.keys(OUTPUTS).length) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+    const files = {};
+    for (const name of Object.keys(OUTPUTS)) {
+      const entry = manifest.derivedAssets.find((item) => item.name === name);
+      if (!entry || !Number.isInteger(entry.size) || entry.size <= 0 || entry.size > OUTPUTS[name].maxBytes) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+      const file = path.join(assets, name);
+      const info = await lstat(file).catch(() => null);
+      if (!info?.isFile() || info.size !== entry.size) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+      const bytes = await readUpTo(file, entry.size, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+      files[name] = bytes;
+    }
+    if (sha256(files['surface.json']) !== surfaceSha256) throw new RequestError(409, 'The scene outline changed. Reopen it before correcting it.');
+    const verified = await this.verifyOutputs(assets, manifest, size);
+    if (!verified || !sameValues(verified.pivots, objectPivots(manifest))) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+    return { manifest, size, files, surface: JSON.parse(files['surface.json'].toString('utf8')) };
+  }
+
+  async correctOutline(draftId, parentJobId, body) {
+    const request = parseOutlineRequest(body);
+    if (!UUID_PATTERN.test(draftId) || !UUID_PATTERN.test(parentJobId)) throw new RequestError(404, 'This scene could not be found.');
+    await this.recover();
+    const digest = sha256(JSON.stringify([draftId, parentJobId, request.sourceSurfaceSha256, request.targetId, request.regions]));
+    const accepted = await this.serialize(async () => {
+      const existing = await this.findRequest(request.requestId);
+      if (existing) {
+        if (existing.outlineCorrection?.requestDigest !== digest) throw new RequestError(409, OUTLINE_MESSAGES.changed);
+        return { status: 200, manifest: existing };
+      }
+      if (this.activeOutline) {
+        if (this.activeOutline.requestId === request.requestId) {
+          if (this.activeOutline.digest !== digest) throw new RequestError(409, OUTLINE_MESSAGES.changed);
+          return { status: 200, operation: this.activeOutline };
+        }
+        throw new RequestError(409, 'Another outline correction is being saved. Try again when it finishes.');
+      }
+      const parent = await this.#outlineParent(draftId, parentJobId, request.sourceSurfaceSha256);
+      const objects = correctedObjects(parent.surface, request);
+      if (this.closed) throw new RequestError(503, OUTLINE_MESSAGES.stopped);
+      const operation = {
+        id: randomUUID(), draftId, sourceId: parent.manifest.sourceId, requestId: request.requestId, digest,
+        controller: new AbortController(), done: null,
+      };
+      this.activeOutline = operation;
+      operation.done = this.#runOutline(operation, parentJobId, request, parent, objects);
+      return { status: 201, operation };
+    });
+    const manifest = accepted.manifest ?? await accepted.operation.done;
+    // A concurrent exact replay may have waited while the child was edited.
+    const current = await this.readManifest(draftId, manifest.id);
+    if (!current) throw new RequestError(404, 'This scene could not be found.');
+    return { status: accepted.status, manifest: publicManifest(current, await this.sourceUses(draftId, current.sourceId)) };
+  }
+
+  async #runOutline(operation, parentJobId, request, parent, objects) {
+    const { id, draftId, controller } = operation;
+    const staging = path.join(this.stagingDir, id);
+    const inputDir = path.join(staging, 'input');
+    const childDir = path.join(staging, 'child');
+    const outputDir = path.join(childDir, 'assets');
+    const requestPath = path.join(staging, 'request.json');
+    const stopped = () => {
+      if (controller.signal.aborted || this.closed) throw new RequestError(503, OUTLINE_MESSAGES.stopped);
+    };
+    const timer = setTimeout(() => controller.abort(), this.outlineTimeoutMs);
+    try {
+      await mkdir(inputDir, { recursive: true });
+      await mkdir(childDir);
+      for (const [name, bytes] of Object.entries(parent.files)) await writeFile(path.join(inputDir, name), bytes, { flag: 'wx', mode: 0o600 });
+      await writeFile(requestPath, JSON.stringify({ regions: request.regions, targetId: request.targetId, objects }), { flag: 'wx', mode: 0o600 });
+      const launch = await this.serialize(async () => {
+        stopped();
+        await this.permittedPhoto(draftId, parent.manifest.sourceId, 'place');
+        if (await this.placeDeleted(draftId)) throw new RequestError(404, 'This scene could not be found.');
+        stopped();
+        return { running: Promise.resolve(this.outlineRunner({ inputDir, requestPath, outputDir, signal: controller.signal })) };
+      });
+      const result = await launch.running;
+      stopped();
+      if (result?.spawnError === 'ENOENT' || result?.spawnError === 'EACCES' || result?.exitCode === 3) throw new RequestError(503, OUTLINE_MESSAGES.setup);
+      if (result?.exitCode === 4) throw new RequestError(409, OUTLINE_MESSAGES.rejected);
+      if (result?.exitCode !== 0) throw new RequestError(503, OUTLINE_MESSAGES.failed);
+      const now = new Date().toISOString();
+      const manifest = {
+        id, draftId, sourceId: parent.manifest.sourceId, sourceSha256: parent.manifest.sourceSha256,
+        requestId: request.requestId, status: 'ready', createdAt: now, updatedAt: now, error: null,
+        outline: { kind: 'owner-corrected' },
+        outlineCorrection: { parentJobId, sourceSurfaceSha256: request.sourceSurfaceSha256, targetId: request.targetId, requestDigest: operation.digest },
+        objects: objects.map(({ id: objectId, label, box_xyxy: box }) => ({ id: objectId, label, box: [...box], pivot: null })),
+        objectsConfirmed: null, edit: { version: 1, objects: OBJECT_IDS.map((objectId) => ({ id: objectId, offset: [0, 0, 0], yaw: 0 })), relationship: null },
+        edits: [], derivedAssets: [],
+      };
+      const verified = await this.verifyOutputs(outputDir, manifest, parent.size);
+      if (!verified) throw new RequestError(409, OUTLINE_MESSAGES.rejected);
+      const actual = JSON.parse(await readFile(path.join(outputDir, 'surface.json'), 'utf8'));
+      const expected = {
+        schema_version: 2, source: { ...parent.surface.source, selected_objects: objects }, objects,
+        width: parent.surface.width, height: parent.surface.height, depth: parent.surface.depth,
+        regions: request.regions, assumptions: parent.surface.assumptions, outline: { kind: 'owner-corrected' },
+      };
+      if (!isDeepStrictEqual(actual, expected) || ['texture.jpg', 'depth-preview.png'].some((name) =>
+        verified.derivedAssets.find((entry) => entry.name === name).sha256 !== sha256(parent.files[name]))) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+      manifest.derivedAssets = verified.derivedAssets;
+      manifest.objects = manifest.objects.map((object) => ({ ...object, pivot: verified.pivots.find((entry) => entry.id === object.id).pivot }));
+      await writeJsonAtomic(path.join(childDir, 'manifest.json'), manifest);
+      const publish = async () => {
+        stopped();
+        // Recheck original, all parent hashes and current grants inside publication authority.
+        await this.#outlineParent(draftId, parentJobId, request.sourceSurfaceSha256);
+        await mkdir(path.join(this.rootDir, draftId), { recursive: true });
+        stopped();
+        // Atomic commit: readers see either no child, or its complete ready directory.
+        await rename(childDir, this.jobDir(draftId, id));
+        return manifest;
+      };
+      return await this.serialize(() => this.placeDeletions ? this.placeDeletions.commit(publish) : publish());
+    } catch (error) {
+      if (error instanceof RequestError) throw error;
+      console.error(`outline correction failed: ${error?.code ?? error?.name ?? 'error'}`);
+      throw new RequestError(503, OUTLINE_MESSAGES.failed);
+    } finally {
+      clearTimeout(timer);
+      await rm(staging, { recursive: true, force: true }).catch(() => {});
+      if (this.activeOutline === operation) this.activeOutline = null;
+    }
   }
 
   async edit(draftId, jobId, body) {
@@ -1812,6 +2016,7 @@ export class ReconstructionStore {
         && (photo || (item.frozen.stories ?? []).some((pinned) => storyIds.includes(pinned.storyId)))).length;
     }
     if (this.activeStory?.draftId === draftId && this.activeStory.sourceIds.includes(sourceId)) impacts.processing += 1;
+    if (this.activeOutline?.draftId === draftId && this.activeOutline.sourceId === sourceId) impacts.processing += 1;
     return impacts;
   }
 
@@ -1833,9 +2038,9 @@ export class ReconstructionStore {
       let status = 'not-running';
       // Also on an exact replay: running work that the saved policy no longer
       // allows is asked to stop again, and the answer reflects that attempt.
-      // Model work needs the model use; a story decode is local and needs only
-      // the place use, so a model- or share-only reduction leaves it running.
-      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, 'place']];
+      // Story decoding and outline correction need only place use, so a
+      // model- or share-only reduction leaves that local work running.
+      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, 'place'], [this.activeOutline, 'place']];
       const running = work.filter(([item, purpose]) => item?.draftId === draftId
         && (item.sourceIds ?? [item.sourceId]).includes(sourceId) && !allows(policy, purpose)).map(([item]) => item);
       if (running.length > 0) {
@@ -1853,16 +2058,16 @@ export class ReconstructionStore {
     });
   }
 
-  // Stops the active worker; its job is recorded as interrupted, never ready.
-  // Waits for queued manifest work, so a proposal accepted during shutdown is
-  // recorded as interrupted rather than started.
+  // Abort unfinished work and wait for queued writes and owned cleanup.
+  // A correction committed before shutdown keeps its complete ready child.
   async close() {
     this.closed = true;
     this.active?.controller.abort();
     this.activeProposal?.controller.abort();
     this.activeStory?.controller.abort();
     this.activeContributionMedia?.controller.abort();
+    this.activeOutline?.controller.abort();
     await this.serialize(() => {});
-    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done]);
+    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done, this.activeOutline?.done.catch(() => {})]);
   }
 }

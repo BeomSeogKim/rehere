@@ -159,6 +159,7 @@ export function visitorSurface(surface) {
       max_triangle_depth_span: assumptions.max_triangle_depth_span,
     },
     source: { image_size: [...source.image_size] },
+    ...(surface.outline?.kind === 'owner-corrected' && { outline: { kind: 'owner-corrected' } }),
   };
 }
 
@@ -453,6 +454,7 @@ export class ShareStore {
       ...(contributorRecordings.length > 0 && { contributorRecordings }),
       // The owner's names and source boxes for the two objects, as visible evidence.
       ...(isTwoObject(manifest) && { objects: manifest.objects.map(({ id, label, box }) => ({ id, label, box: [...box] })) }),
+      ...(manifest.outline?.kind === 'owner-corrected' && { outline: { kind: 'owner-corrected' } }),
     };
     const assets = {};
     for (const name of Object.keys(SHARED_ASSETS)) {

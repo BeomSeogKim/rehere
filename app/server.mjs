@@ -15,7 +15,7 @@ import { StoryStore } from './stories.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
-import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner } from './reconstructions.mjs';
+import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner, pythonOutlineRunner } from './reconstructions.mjs';
 import { OBJECT_IDS } from './arrangements.mjs';
 import { PlaceDeletionService, PlaceDeletions } from './place-deletions.mjs';
 
@@ -40,6 +40,7 @@ const STATIC_FILES = new Map([
   ['/latest.js', ['latest.js', 'text/javascript; charset=utf-8']],
   ['/source-details.js', ['source-details.js', 'text/javascript; charset=utf-8']],
   ['/space.js', ['space.js', 'text/javascript; charset=utf-8']],
+  ['/outline-editor.js', ['outline-editor.js', 'text/javascript; charset=utf-8']],
   ['/photo-scene.js', ['photo-scene.js', 'text/javascript; charset=utf-8']],
   ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
   ['/access-ui.js', ['access-ui.js', 'text/javascript; charset=utf-8']],
@@ -128,6 +129,7 @@ const INTAKE_PART_PATH = /^\/api\/intakes\/([^/]+)\/parts\/([^/]+)$/;
 const JOBS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions$/;
 const JOB_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)$/;
 const JOB_EDIT_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/edit$/;
+const OUTLINE_CORRECTIONS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/outline-corrections$/;
 const JOB_ASSET_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/assets\/([^/]+)$/;
 const PROPOSALS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals$/;
 const PROPOSAL_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals\/([^/]+)$/;
@@ -384,6 +386,8 @@ export function createAppServer({
   limits = LIMITS,
   reconstructionRunner = pythonRunner(),
   reconstructionTimeoutMs,
+  outlineRunner = pythonOutlineRunner(),
+  outlineTimeoutMs,
   proposalModel = null,
   prepareModelImage = pythonModelImage(),
   accessStore = new AccessStore({ dataDir }),
@@ -404,7 +408,7 @@ export function createAppServer({
   const attempts = attemptLimiter();
   const reconstructions = new ReconstructionStore({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage, visibleSurfaceLimits,
-    placeDeletions,
+    placeDeletions, outlineRunner, outlineTimeoutMs,
   });
   const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder, prepareRecording: recordingPreparer });
   const stories = new StoryStore({ reconstructions, audioDecoder });
@@ -792,6 +796,14 @@ export function createAppServer({
       throw new RequestError(405, 'Method not allowed.');
     }
 
+    const outlineMatch = OUTLINE_CORRECTIONS_PATH.exec(pathname);
+    if (outlineMatch) {
+      await requireOwner();
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      const { status, manifest } = await reconstructions.correctOutline(outlineMatch[1], outlineMatch[2], await readJsonBody(req, 2 * 1024 * 1024));
+      sendJson(res, status, manifest);
+      return;
+    }
     const sizeMatch = SOURCE_SIZE_PATH.exec(pathname);
     if (sizeMatch && reading) {
       sendJson(res, 200, await reconstructions.imageSize(sizeMatch[1], sizeMatch[2]));

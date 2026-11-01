@@ -17,6 +17,7 @@ import { mountShares } from './shares.js';
 import { mountStories } from './stories.js';
 import { mountRegionLinks } from './region-links.js';
 import { mountMemoryLink } from './memory-link.js';
+import { mountOutlineEditor } from './outline-editor.js';
 
 const POLL_MS = 2000;
 const SOURCE_BLOCKED_TEXT = 'Its photo is no longer allowed to be used for reconstructing this place, or its use was stopped. Every saved version depends on that photo, so none can be restored. The original photo is kept, not deleted.';
@@ -124,7 +125,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   let disposed = false;
   let pollTimer = null;
   let pollingJob = null;
+  let jobsGeneration = 0;
   let viewer = null;
+  let outlineEditor = null;
   let memoryEdit = null;
   let collaborationPanel = null;
   let sharesPanel = null;
@@ -196,6 +199,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
   function closePanel() {
     panelGeneration += 1;
+    outlineEditor?.dispose();
+    outlineEditor = null;
     memoryEdit?.dispose();
     memoryEdit = null;
     collaborationPanel?.dispose();
@@ -239,8 +244,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   }
 
   async function loadJobs({ resumePolling = true } = {}) {
+    const generation = ++jobsGeneration;
     const result = await request(base);
-    if (disposed) return;
+    if (disposed || generation !== jobsGeneration) return;
     if (!result.ok || !Array.isArray(result.body)) {
       status.textContent = 'Saved partial scenes could not be loaded. Reload the page to try again.';
       return;
@@ -1088,7 +1094,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
 
     const explore = createExploreToggle();
-    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })];
+    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, ...photoCredit(job), ...(job.outline?.kind === 'owner-corrected' ? [el('p', { className: 'hint', textContent: 'Outlines include an owner-made correction; depth remains the existing model estimate.' })] : []), el('p', { className: 'hint', textContent: SCENE_NOTE })];
 
     if (!job.objectsConfirmed) {
       // No object can be chosen before the outlines are confirmed.
@@ -1115,16 +1121,37 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         openScene(jobId);
       });
       mismatch.addEventListener('click', () => {
-        message.textContent = 'This build stays as it is and cannot be edited, planned, shared or given stories. Build again with different boxes to get new outlines.';
+        closePanel();
+        onScene(jobId);
+        outlineEditor = mountOutlineEditor(panel, {
+          job, surface, textureUrl: assetUrl(jobId, 'texture.jpg'), jobUrl, post: postJson,
+          onSaved: (child, { late = false } = {}) => {
+            if (disposed) return;
+            if (late) {
+              loadJobs({ resumePolling: false });
+              return;
+            }
+            status.textContent = 'A new scene was saved at the original positions. Check its corrected outlines before confirming both objects. The previous scene is kept.';
+            loadJobs({ resumePolling: false });
+            openScene(child.id);
+          },
+          onCancel: ({ unknown }) => {
+            if (unknown) {
+              status.textContent = 'The new scene’s save outcome is still unknown. Check the saved scene list before starting another correction.';
+              loadJobs({ resumePolling: false });
+            }
+            openScene(jobId);
+          },
+        });
       });
       panel.append(
         sceneWorkspace(stage, [
           el('section', { className: 'memory-edit object-confirm' }, [
             el('h4', { textContent: 'Check the two outlines' }),
-            el('p', { className: 'hint', textContent: 'The model proposed these outlines inside your boxes. Nothing can be edited, planned, shared or given a story until you confirm they match the objects you named.' }),
-            el('div', { className: 'anchor-frame' }, [el('img', { src: assetUrl(jobId, 'mask-overlay.jpg'), alt: `Photo ${number} with the two proposed outlines tinted` }), ...objects.map(boxOver)]),
+            el('p', { className: 'hint', textContent: `${job.outline?.kind === 'owner-corrected' ? 'This scene includes an owner-made outline correction. Check both outlines against the named objects.' : 'The model proposed these outlines inside your boxes.'} Nothing can be moved, planned, shared or given a story until you confirm they match the objects you named.` }),
+            el('div', { className: 'anchor-frame' }, [el('img', { src: assetUrl(jobId, 'mask-overlay.jpg'), alt: `Photo ${number} with the two ${job.outline?.kind === 'owner-corrected' ? 'saved' : 'proposed'} outlines tinted` }), ...objects.map(boxOver)]),
             el('ul', { className: 'hint' }, [
-              ...objects.map((object) => el('li', { textContent: `${nameOf(object.id)}: the tinted area inside box ${letterOf(object.id)}.` })),
+              ...objects.map((object) => el('li', { textContent: `${nameOf(object.id)}: the ${letterOf(object.id) === 'A' ? 'blue' : 'orange'} tinted area.` })),
               el('li', { textContent: 'Background: the rest of the photo, not tinted.' }),
               el('li', { textContent: 'White: the two outlines overlapped there; those pixels are left empty in the scene.' }),
             ]),

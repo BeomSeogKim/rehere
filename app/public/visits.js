@@ -86,6 +86,7 @@ function eraText(era, labelOf) {
 
 // Shown beside the scene for every view, so it stays in sight while scrolling.
 const SCENE_NOTE = 'Shape and depth: a model estimate from this one photo, not a measurement. Areas the photo did not show are left empty.';
+const CORRECTED_SCENE_NOTE = 'Outlines: include a correction the owner made on this photo. Depth: the existing model estimate, not a measurement. This does not fix depth errors or add unseen surfaces. Areas the photo did not show are left empty.';
 // Two-object 3D views: one deliberate camera move to the chosen object's
 // photographed side, as that object is arranged in the selected saved view.
 const SIDE_CHOOSE = 'See photographed side (choose an object first)';
@@ -294,6 +295,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   }
 
   async function render(manifest, surface, textureUrl, mine) {
+    const correctedOutline = manifest.outline?.kind === 'owner-corrected';
     const views = new Map(manifest.views.map((view) => [view.id, view]));
     const labelOf = (id) => views.get(id)?.label ?? 'another view';
     // Earlier context applies only to the same saved copy; each ID is used
@@ -333,7 +335,9 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       const box = el('div', { className: `box-overlay box-overlay-${objects.indexOf(object) === 0 ? 'a' : 'b'}` }, [el('span', { className: 'box-badge', textContent: nameOf(object.id) })]);
       Object.assign(box.style, { left: `${(x1 / width) * 100}%`, top: `${(y1 / height) * 100}%`, width: `${((x2 - x1) / width) * 100}%`, height: `${((y2 - y1) / height) * 100}%` });
       evidence.replaceChildren(
-        el('p', { className: 'hint', textContent: `Photo evidence for ${nameOf(object.id)}: the box the owner drew. The outline inside it is a model estimate.` }),
+        el('p', { className: 'hint', textContent: correctedOutline
+          ? `Photo evidence for ${nameOf(object.id)}: this box encloses its current outline. This scene includes an owner-made outline correction; the depth remains a model estimate. Neither establishes history.`
+          : `Photo evidence for ${nameOf(object.id)}: the box the owner drew. The outline inside it is a model estimate.` }),
         el('div', { className: 'anchor-frame' }, [el('img', { src: textureUrl, alt: `The photo used for “${manifest.title}”, with the box for ${nameOf(object.id)}` }), box]),
       );
     };
@@ -658,7 +662,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           stageFrame,
           message,
           credit,
-          el('p', { className: 'hint', textContent: SCENE_NOTE }),
+          el('p', { className: 'hint', textContent: correctedOutline ? CORRECTED_SCENE_NOTE : SCENE_NOTE }),
         ]),
         el('div', { className: 'scene-inspector' }, [
           buttons,

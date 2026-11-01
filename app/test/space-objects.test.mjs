@@ -79,7 +79,11 @@ let mountSpace;
 let mounted;
 
 before(async () => {
-  globalThis.document = { createElement: (tag) => new FakeElement(tag) };
+  globalThis.document = { createElement: (tag) => {
+    const node = new FakeElement(tag);
+    if (tag === 'canvas') node.getContext = () => ({ clearRect() {}, fillRect() {}, drawImage() {} });
+    return node;
+  } };
   globalThis.fetch = (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     requests.push({ url, method: options.method ?? 'GET', body });
@@ -110,11 +114,11 @@ afterEach(() => {
   for (const space of mounted.splice(0)) space.dispose();
 });
 
-async function mount() {
+async function mount({ sceneId = null } = {}) {
   const container = new FakeElement('section');
   const draft = { id: DRAFT, photos: [{ name: 'photo-1.jpg', sourceId: PHOTO }], sources: [] };
   const granted = { kind: 'photo', origin: { kind: 'public', reference: '' }, permissions: { place: true, model: true, share: true } };
-  const space = mountSpace(container, { draft, sourceFor: () => granted });
+  const space = mountSpace(container, { draft, sourceFor: () => granted, sceneId });
   mounted.push(space);
   await settle();
   const find = (predicate) => container.findAll(predicate);
@@ -579,5 +583,138 @@ describe('two-object manual editor precision', () => {
     ui.button('Apply and save').dispatch('click');
     await settle();
     assert.deepEqual(ui.sent(), [{ targetId: 'object-2', offset: [-0.31415926, 0.000004321, 0.2], yaw: -2.3456789012 }], 'the other object and every untouched axis stay exact');
+  });
+});
+
+
+describe('unconfirmed outline correction integration', () => {
+  it('keeps bounded correction provenance visible beside the confirmed owner scene', async () => {
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, job({ outline: { kind: 'owner-corrected' } })));
+    const ui = await mount();
+    await openScene(ui);
+    const stage = ui.find((node) => node.className === 'scene-stage')[0];
+    assert.match(stage.textContent, /Outlines include an owner-made correction; depth remains the existing model estimate/);
+    assert.equal(ui.button('They do not match'), undefined, 'confirmed scenes keep the bounded entry scope');
+  });
+
+  it('opens a new unconfirmed child after saving a bounded correction and keeps the parent separate', async () => {
+    const parent = job({ objectsConfirmed: false, derivedAssets: [{ name: 'surface.json', sha256: 'a'.repeat(64) }] });
+    const childId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const child = job({ id: childId, objectsConfirmed: false, outline: { kind: 'owner-corrected' } });
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, parent));
+    routes[`GET ${BASE}/${childId}`] = () => Promise.resolve(json(200, child));
+    routes[`GET ${BASE}/${childId}/assets/surface.json`] = () => Promise.resolve(json(200, surface));
+    routes[`POST ${JOB_URL}/outline-corrections`] = () => Promise.resolve(json(201, child));
+    const ui = await mount();
+    await openScene(ui);
+    ui.button('They do not match').dispatch('click');
+    assert.match(ui.text(), /Correct one object outline/);
+    const image = ui.find((node) => node.tag === 'img')[0];
+    image.dispatch('load');
+    const frame = ui.find((node) => node.className === 'outline-photo')[0];
+    ui.button('Add to object').dispatch('click');
+    frame.dispatch('keydown', { key: ' ' });
+    ui.button('Refresh 3D preview').dispatch('click');
+    await settle();
+    ui.button('Inspect corrected original view').dispatch('click');
+    ui.button('Inspect corrected side view').dispatch('click');
+    const confirm = ui.find((node) => node.tag === 'input' && node.type === 'checkbox')[0];
+    confirm.checked = true;
+    confirm.dispatch('change');
+    ui.button('Save as new scene').dispatch('click');
+    await settle();
+    assert.equal(ui.posts('/outline-corrections').length, 1);
+    assert.equal(ui.posts('/outline-corrections')[0].body.targetId, 'object-1');
+    assert.match(ui.text(), new RegExp(`Scene ${childId.slice(0, 8)}`));
+    assert.ok(ui.button('The outlines match A and B'), 'the child still needs ordinary object confirmation');
+    assert.match(ui.text(), /includes an owner-made outline correction/);
+    assert.doesNotMatch(ui.text(), /model proposed these outlines inside your boxes/);
+    assert.equal(ui.posts('/objects/confirm').length, 0);
+    assert.match(ui.text(), /The previous scene is kept/);
+  });
+
+  it('refreshes the list for a late accepted save without reopening its child', async () => {
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, job({ objectsConfirmed: false, derivedAssets: [{ name: 'surface.json', sha256: 'a'.repeat(64) }] })));
+    let finish;
+    routes[`POST ${JOB_URL}/outline-corrections`] = () => new Promise((resolve) => { finish = resolve; });
+    const ui = await mount();
+    await openScene(ui);
+    ui.button('They do not match').dispatch('click');
+    ui.find((node) => node.tag === 'img')[0].dispatch('load');
+    ui.button('Add to object').dispatch('click');
+    ui.find((node) => node.className === 'outline-photo')[0].dispatch('keydown', { key: ' ' });
+    ui.button('Refresh 3D preview').dispatch('click');
+    await settle();
+    ui.button('Inspect corrected original view').dispatch('click');
+    ui.button('Inspect corrected side view').dispatch('click');
+    const confirm = ui.find((node) => node.tag === 'input' && node.type === 'checkbox')[0];
+    confirm.checked = true;
+    confirm.dispatch('change');
+    ui.button('Save as new scene').dispatch('click');
+    ui.button('Open scene').dispatch('click');
+    await settle();
+    const reads = requests.filter((entry) => entry.url === BASE).length;
+    const childId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    finish(json(201, job({ id: childId, objectsConfirmed: false })));
+    await settle();
+    assert.equal(requests.filter((entry) => entry.url === BASE).length, reads + 1);
+    assert.equal(requests.some((entry) => entry.url === `${BASE}/${childId}`), false, 'no late navigation');
+    assert.ok(ui.button('The outlines match A and B'));
+  });
+
+  for (const staleOutcome of ['active scene list', 'list failure']) {
+    it(`keeps the corrected child in the fresh list after an older initial ${staleOutcome} resolves`, async () => {
+      const parent = job({ objectsConfirmed: false, derivedAssets: [{ name: 'surface.json', sha256: 'a'.repeat(64) }] });
+      const childId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+      const child = job({ id: childId, objectsConfirmed: false });
+      const staleId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+      let finishInitial;
+      let listReads = 0;
+      routes[`GET ${BASE}`] = () => ++listReads === 1
+        ? new Promise((resolve) => { finishInitial = resolve; })
+        : Promise.resolve(json(200, [parent, child]));
+      routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, parent));
+      routes[`GET ${BASE}/${childId}`] = () => Promise.resolve(json(200, child));
+      routes[`GET ${BASE}/${childId}/assets/surface.json`] = () => Promise.resolve(json(200, surface));
+      routes[`POST ${JOB_URL}/outline-corrections`] = () => Promise.resolve(json(201, child));
+      const ui = await mount({ sceneId: JOB });
+      ui.button('They do not match').dispatch('click');
+      ui.find((node) => node.tag === 'img')[0].dispatch('load');
+      ui.button('Add to object').dispatch('click');
+      ui.find((node) => node.className === 'outline-photo')[0].dispatch('keydown', { key: ' ' });
+      ui.button('Refresh 3D preview').dispatch('click');
+      await settle();
+      ui.button('Inspect corrected original view').dispatch('click');
+      ui.button('Inspect corrected side view').dispatch('click');
+      const confirm = ui.find((node) => node.tag === 'input' && node.type === 'checkbox')[0];
+      confirm.checked = true;
+      confirm.dispatch('change');
+      ui.button('Save as new scene').dispatch('click');
+      await settle();
+      const list = ui.find((node) => node.className === 'space-builds')[0];
+      assert.match(list.textContent, new RegExp(`Scene ${childId.slice(0, 8)}`));
+      finishInitial(staleOutcome === 'list failure' ? json(500, null) : json(200, [job({ id: staleId, status: 'queued' })]));
+      await settle();
+      assert.match(list.textContent, new RegExp(`Scene ${childId.slice(0, 8)}`), 'the older result cannot replace the fresh list');
+      assert.doesNotMatch(ui.text(), /Saved partial scenes could not be loaded/);
+      assert.equal(requests.some((entry) => entry.url === `${BASE}/${staleId}`), false, 'a stale active scene cannot start polling');
+    });
+  }
+
+  it('disposes the correction panel when another scene is opened', async () => {
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, job({ objectsConfirmed: false, derivedAssets: [{ name: 'surface.json', sha256: 'a'.repeat(64) }] })));
+    const ui = await mount();
+    await openScene(ui);
+    ui.button('They do not match').dispatch('click');
+    const image = ui.find((node) => node.tag === 'img')[0];
+    image.dispatch('load');
+    ui.button('Add to object').dispatch('click');
+    ui.find((node) => node.className === 'outline-photo')[0].dispatch('keydown', { key: ' ' });
+    ui.button('Refresh 3D preview').dispatch('click');
+    ui.button('Open scene').dispatch('click');
+    await settle();
+    assert.doesNotMatch(ui.text(), /Correct one object outline/);
+    assert.ok(ui.button('The outlines match A and B'));
+    assert.ok(globalThis.viewerLog.includes('renderer.dispose'));
   });
 });

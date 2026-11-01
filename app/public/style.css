@@ -405,3 +405,10 @@ button[aria-pressed="true"] { background: var(--accent); color: var(--accent-tex
 .visit-compare-frame { position: relative; }
 .visit-compare-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #161b20; border-radius: var(--radius); }
 .visit-compare-frame.is-photo canvas { visibility: hidden; }
+
+.outline-photo { position: relative; width: fit-content; max-width: 100%; touch-action: none; cursor: crosshair; }
+.outline-photo:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.outline-photo img { display: block; max-width: 100%; height: auto; user-select: none; }
+.outline-photo > canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; pointer-events: none; }
+.outline-cursor { position: absolute; border: 1px solid white; outline: 1px solid #111; pointer-events: none; box-sizing: border-box; }
+.outline-cutout { display: block; width: 100%; max-width: 420px; height: auto; image-rendering: pixelated; background: #161b20; border-radius: 8px; margin-bottom: 12px; }
