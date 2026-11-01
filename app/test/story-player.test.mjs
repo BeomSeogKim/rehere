@@ -191,6 +191,88 @@ describe('story player', () => {
     p.dispose();
   });
 
+  for (const state of ['starting', 'playing', 'paused', 'finished']) {
+    it(`clears a ${state} recording after a media error and retries only on a new Play`, async () => {
+      let fetched = 0;
+      let playing = 0;
+      const p = createStoryPlayer({
+        story: story(),
+        fetchAudio: async () => {
+          fetched += 1;
+          return response(wav());
+        },
+        onPlaying: () => { playing += 1; },
+      });
+      const button = (name) => p.element.findAll((node) => node.tag === 'button' && node.textContent === name)[0];
+      const status = () => p.element.findAll((node) => node.role === 'status')[0].textContent;
+      button('Play').dispatch('click');
+      await flush();
+      const first = audios[0];
+      if (state !== 'starting') {
+        first.plays[0].resolve();
+        await flush();
+        first.currentTime = 1.2;
+        first.dispatch('timeupdate');
+        if (state === 'paused') button('Pause').dispatch('click');
+        if (state === 'finished') first.dispatch('ended');
+      }
+      first.dispatch('error');
+      assert.equal(status(), 'The recording could not be played. Press Play to try again.');
+      assert.equal(button('Play').disabled, false);
+      assert.equal(button('Pause').disabled, true);
+      assert.equal(button('Stop').disabled, true);
+      assert.equal(first.attributes.src, undefined);
+      assert.ok(first.calls.includes('pause') && first.calls.includes('load'));
+      assert.deepEqual(revoked, ['blob:test/0']);
+      assert.equal(p.element.findAll((node) => node.attributes?.['aria-current'] === 'true').length, 0);
+      assert.equal(p.element.findAll((node) => node.tag === 'li').length, 2, 'the listening captions remain readable');
+      assert.equal(fetched, 1, 'an error never retries or fetches automatically');
+      const expectedPlaying = state === 'starting' ? 0 : 1;
+      first.plays[0].resolve();
+      first.dispatch('ended');
+      await flush();
+      assert.equal(playing, expectedPlaying, 'a late play answer never reports a failed recording as started');
+      assert.equal(status(), 'The recording could not be played. Press Play to try again.');
+      button('Play').dispatch('click');
+      await flush();
+      assert.equal(fetched, 2, 'explicit retry fetches again through current authorization');
+      const second = audios[1];
+      second.plays[0].resolve();
+      await flush();
+      first.dispatch('error');
+      first.dispatch('ended');
+      first.dispatch('timeupdate');
+      assert.equal(status(), 'Playing.', 'old media events cannot stop the replacement');
+      assert.equal(playing, expectedPlaying + 1);
+      assert.deepEqual(revoked, ['blob:test/0']);
+      p.dispose();
+      second.dispatch('error');
+      assert.deepEqual(revoked, ['blob:test/0', 'blob:test/1']);
+    });
+  }
+
+  it('reports a rejected play request and lets a new Play fetch again', async () => {
+    let fetched = 0;
+    const p = player(async () => {
+      fetched += 1;
+      return response(wav());
+    });
+    p.button('Play').dispatch('click');
+    await flush();
+    audios[0].plays[0].reject(new Error('Playback failed'));
+    await flush();
+    assert.equal(p.status(), 'The recording could not be played. Press Play to try again.');
+    assert.equal(p.button('Play').disabled, false);
+    assert.deepEqual(revoked, ['blob:test/0']);
+    p.button('Play').dispatch('click');
+    await flush();
+    assert.equal(fetched, 2);
+    audios[1].plays[0].resolve();
+    await flush();
+    assert.equal(p.status(), 'Playing.');
+    p.dispose();
+  });
+
   for (const [state, settleIt] of [
     ['paused', (p) => p.button('Pause').dispatch('click')],
     ['finished', () => audios[0].dispatch('ended')],

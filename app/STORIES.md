@@ -61,6 +61,10 @@ out or losing permission stops playback and clears pending audio. Resuming a
 stopped view requires fresh authorization and another explicit Play action.
 Selecting a story does not force a camera movement.
 
+If the browser reports a playback error, the player clears its local audio
+and current-caption marker and offers Play again. That explicit retry fetches
+the recording with current access checks; it never retries automatically.
+
 ## Share selected stories
 
 Select stories explicitly in the saved visitor preview. Each must belong to a

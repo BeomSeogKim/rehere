@@ -172,7 +172,7 @@ export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story'), 
     try {
       await media.play();
     } catch {
-      if (mine === generation && audio === media) teardown('The recording could not be played.');
+      if (mine === generation && audio === media) teardown('The recording could not be played. Press Play to try again.');
       return;
     }
     if (mine !== generation || audio !== media || disposed) {
@@ -219,6 +219,9 @@ export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story'), 
     audio = media;
     media.preload = 'auto';
     const current = () => mine === generation && audio === media && !disposed;
+    media.addEventListener('error', () => {
+      if (current()) teardown('The recording could not be played. Press Play to try again.');
+    });
     media.addEventListener('timeupdate', () => {
       if (!current()) return;
       const ms = media.currentTime * 1000;
