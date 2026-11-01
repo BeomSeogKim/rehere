@@ -75,6 +75,12 @@ page over the scene. Switching saved arrangements keeps the camera; selecting
 an object shows its evidence and related stories without moving the camera.
 Opening evidence or resizing the layout preserves the view and player state.
 
+Use Tab and Shift+Tab to move between controls, and Space to activate a
+focused button. Keyboard navigation follows the browser's settings; on macOS
+Safari, Option+Tab can reach buttons skipped by Tab. Choosing **Explore in
+3D** focuses the canvas for arrow-key movement. Tab moves out of the canvas
+to continue through the page controls.
+
 For two-object snapshots, the details compare each selected arrangement with
 the published starting view, named explicitly. They identify changed positions,
 turns and rules and what stays the same before the numeric detail. Directions

@@ -361,7 +361,7 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
 }
 .relation-strip { margin: 12px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); }
 .relation-strip p { margin: 4px 0; }
-[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
 
 /* Object labels and provider names can be long single words: let them wrap
    inside the scene rather than widen it. Badges over boxes are cut short;
