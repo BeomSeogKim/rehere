@@ -1869,6 +1869,15 @@ export function mountCollaboration(container, bridge) {
     const conflict = select(Object.entries(CONFLICTS), 'unknown');
     const axes = ['Left / right', 'Down / up', 'Away / toward', 'Turn (degrees)'];
     const savedValues = (state) => [...state.offset, Math.round((state.yaw * 180) / Math.PI)].map(String);
+    // The fields show the saved position, the turn rounded to whole degrees.
+    // A field the owner has not typed in keeps its exact saved value, so the
+    // candidate never rounds what was left alone. Everything is bound to the
+    // saved version this review was opened on.
+    const formVersion = editor.version;
+    const sceneMoved = () => bridge.editor().version !== formVersion;
+    const exact = (state) => ({ offset: [...state.offset], yaw: state.yaw });
+    let baseline = bridge.targets ? null : exact(editor);
+    let edited = [false, false, false, false];
     const values = bridge.targets ? ['', '', '', ''] : savedValues(editor);
     const inputs = axes.map((name, i) => {
       const input = el('input', { type: 'number', step: i === 3 ? 1 : 0.01, min: i === 3 ? -180 : -OFFSET_LIMIT, max: i === 3 ? 180 : OFFSET_LIMIT, value: values[i] });
@@ -1876,18 +1885,23 @@ export function mountCollaboration(container, bridge) {
       return input;
     });
     // Two-object scenes: the fields belong to one object at a time. Each
-    // object's typed values are kept separately, and an object seen for the
-    // first time starts from its own saved position, never another's.
+    // object's typed values, edited fields and exact saved values are kept
+    // separately, and an object seen for the first time starts from its own
+    // saved position in this review's version, never another's.
     const targetDrafts = new Map();
     let fieldsTarget = null;
     const bindTarget = () => {
       if (!bridge.targets) return;
       const target = bridge.targets.selected();
       if (target === fieldsTarget) return;
-      if (fieldsTarget) targetDrafts.set(fieldsTarget, inputs.map((input) => input.value));
+      if (fieldsTarget) targetDrafts.set(fieldsTarget, { values: inputs.map((input) => input.value), edited, baseline });
       fieldsTarget = target;
-      const next = !target ? ['', '', '', ''] : targetDrafts.get(target) ?? savedValues(bridge.editor(target));
-      inputs.forEach((input, i) => (input.value = next[i]));
+      const saved = target ? bridge.editor(target) : null;
+      const fresh = saved && saved.version === formVersion ? { values: savedValues(saved), edited: [false, false, false, false], baseline: exact(saved) } : null;
+      const next = (target && targetDrafts.get(target)) ?? fresh ?? { values: ['', '', '', ''], edited: [false, false, false, false], baseline: null };
+      edited = [...next.edited];
+      baseline = next.baseline;
+      inputs.forEach((input, i) => (input.value = next.values[i]));
     };
     const candidateBox = el('fieldset', { className: 'space-edit', hidden: true }, [
       el('legend', { textContent: 'Candidate position, set by hand' }),
@@ -1901,7 +1915,11 @@ export function mountCollaboration(container, bridge) {
     const targetNote = el('p', { className: 'hint' });
     const candidate = () => {
       const numbers = inputs.map((input) => (input.value.trim() === '' ? NaN : Number(input.value)));
-      const transform = { offset: numbers.slice(0, 3), yaw: (numbers[3] * Math.PI) / 180 };
+      const typed = (i) => edited[i] || !baseline;
+      const transform = {
+        offset: [0, 1, 2].map((i) => (typed(i) ? numbers[i] : baseline.offset[i])),
+        yaw: typed(3) ? (numbers[3] * Math.PI) / 180 : baseline.yaw,
+      };
       return bridge.targets ? { targetId: fieldsTarget, ...transform } : transform;
     };
     const noTarget = () => Boolean(bridge.targets) && (!bridge.targets.selected() || fieldsTarget !== bridge.targets.selected());
@@ -1914,8 +1932,12 @@ export function mountCollaboration(container, bridge) {
       candidateBox.hidden = !geometry();
       preview.hidden = !geometry();
       let reasonText = '';
+      // A candidate belongs to the saved version this review opened on; after
+      // another save it is neither shown nor saved, and nothing is rebased.
+      if (geometry() && sceneMoved() && showing?.kind === 'candidate') stopShowing();
       if (geometry()) {
-        if (entry.permissions && entry.permissions.place !== true) reasonText = 'This recollection does not allow use to reconstruct the place, so it cannot change the scene. You can hold or decline it.';
+        if (sceneMoved()) reasonText = `The saved scene changed to version ${editorNow.version} after this review was opened on version ${formVersion}. Reload the page and reopen this review to start from the current saved scene; the values here are kept until then.`;
+        else if (entry.permissions && entry.permissions.place !== true) reasonText = 'This recollection does not allow use to reconstruct the place, so it cannot change the scene. You can hold or decline it.';
         else if (voiceProblemText()) reasonText = voiceProblemText();
         else if (photoProblemText()) reasonText = photoProblemText();
         else if (state.blocked) reasonText = 'The current scene depends on a withdrawn recollection. Restore an unaffected saved version first.';
@@ -1928,7 +1950,7 @@ export function mountCollaboration(container, bridge) {
       }
       note.textContent = reasonText;
       targetNote.textContent = bridge.targets && !noTarget() ? `The candidate moves ${bridge.targets.nameOf(bridge.targets.selected())}; the other object stays as saved.` : '';
-      preview.disabled = busy || noTarget() || Boolean(entry.permissions && entry.permissions.place !== true) || Boolean(photoProblemText()) || Boolean(voiceProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
+      preview.disabled = busy || sceneMoved() || noTarget() || Boolean(entry.permissions && entry.permissions.place !== true) || Boolean(photoProblemText()) || Boolean(voiceProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
       save.disabled = busy || (geometry() && Boolean(reasonText));
     };
 
@@ -1941,13 +1963,16 @@ export function mountCollaboration(container, bridge) {
       if (photoAck.checked !== true && showing?.kind === 'candidate') stopShowing();
       refreshControls();
     });
-    for (const input of inputs) {
+    inputs.forEach((input, i) => {
       input.addEventListener('input', () => {
-        if (showing?.kind === 'candidate' && !transformProblem(candidate())) show('candidate', entry.id, candidate());
+        // Typing makes this field explicit, even when it ends up as shown.
+        edited[i] = true;
+        if (showing?.kind === 'candidate' && !sceneMoved() && !transformProblem(candidate())) show('candidate', entry.id, candidate());
         refreshControls();
       });
-    }
+    });
     preview.addEventListener('click', () => {
+      if (sceneMoved()) return;
       show('candidate', entry.id, candidate());
       refreshControls();
     });
@@ -1957,12 +1982,14 @@ export function mountCollaboration(container, bridge) {
         reason: reason.value,
         conflict: conflict.value,
         transform: geometry() ? candidate() : null,
-        baseVersion: bridge.editor().version,
+        // A candidate is bound to the version it was set against.
+        baseVersion: geometry() ? formVersion : bridge.editor().version,
         baseRevision: entry.revision,
         // Recorded only for a change informed by the photo.
         ...(photo && geometry() ? { photoReviewed: true } : {}),
         ...(voice && geometry() ? { voiceReviewed: true } : {}),
       };
+      if (geometry() && sceneMoved()) return;
       if (photo && geometry() && photoProblemText()) return;
       if (voice && geometry() && voiceProblemText()) return;
       if (reason.value.length > REASON_LIMIT) {

@@ -225,3 +225,75 @@ describe('partial scene build panel', () => {
     view.space.dispose();
   });
 });
+
+describe('manual editor precision', () => {
+  // Saved geometry the fields cannot show exactly: a non-integer negative turn
+  // and tiny or high-precision offsets.
+  const SAVED = { version: 1, offset: [0.123456789, -0.000001234, 0.987654321], yaw: -1.2345678901 };
+  async function openEditor() {
+    const ui = mount();
+    jobs.push({ ...manifest('ready'), edit: { ...SAVED, offset: [...SAVED.offset] }, usageBlocked: false, blockedReason: null });
+    for (let i = 0; i < 5; i += 1) await settle();
+    ui.button('Open scene')[0].dispatch('click');
+    for (let i = 0; i < 10; i += 1) await settle();
+    const axis = (label) => ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === label)[0];
+    const edits = () => posts.filter((post) => post.url.endsWith('/edit'));
+    const save = () => ui.button('Apply and save')[0];
+    const set = (label, value) => {
+      axis(label).value = value;
+      axis(label).dispatch('input');
+    };
+    return { ...ui, axis, edits, save, set };
+  }
+  const bodyOf = (post) => ({ offset: post.body.offset, yaw: post.body.yaw });
+
+  for (const label of ['Left / right', 'Left / right slider']) {
+    it(`an X-only edit by ${label.endsWith('slider') ? 'slider' : 'number field'} keeps every other axis exactly`, async () => {
+      const ui = await openEditor();
+      assert.equal(ui.axis('Turn (degrees)').value, '-71', 'the field shows a rounded turn');
+      ui.set(label, '0.5');
+      ui.save().dispatch('click');
+      await settle();
+      assert.equal(ui.edits().length, 1);
+      assert.deepEqual(bodyOf(ui.edits()[0]), { offset: [0.5, -0.000001234, 0.987654321], yaw: -1.2345678901 });
+    });
+  }
+
+  it('a turn-only edit keeps the offsets exactly, and an explicit whole-degree turn is used as typed', async () => {
+    const ui = await openEditor();
+    ui.set('Turn (degrees)', '30');
+    ui.save().dispatch('click');
+    await settle();
+    assert.deepEqual(bodyOf(ui.edits()[0]), { offset: [0.123456789, -0.000001234, 0.987654321], yaw: (30 * Math.PI) / 180 });
+
+    const again = await openEditor();
+    again.set('Turn (degrees)', '-71');
+    again.save().dispatch('click');
+    await settle();
+    assert.deepEqual(bodyOf(again.edits()[0]), { offset: [0.123456789, -0.000001234, 0.987654321], yaw: (-71 * Math.PI) / 180 }, 'typing the shown -71 sets exactly -71 degrees');
+  });
+
+  it('an invalid other field blocks saving until fixed and is never replaced; revert restores the exact saved geometry', async () => {
+    const ui = await openEditor();
+    ui.set('Down / up', '9');
+    ui.set('Left / right', '0.4');
+    assert.equal(ui.axis('Down / up').value, '9', 'the invalid text stays as typed');
+    assert.equal(ui.save().disabled, true);
+    ui.save().dispatch('click');
+    await settle();
+    assert.equal(ui.edits().length, 0, 'nothing is sent behind an invalid field');
+    ui.set('Down / up', '0.1');
+    ui.save().dispatch('click');
+    await settle();
+    assert.deepEqual(bodyOf(ui.edits()[0]), { offset: [0.4, 0.1, 0.987654321], yaw: -1.2345678901 });
+
+    const reverted = await openEditor();
+    reverted.set('Left / right', '0.7');
+    reverted.button('Revert to saved')[0].dispatch('click');
+    assert.equal(reverted.save().disabled, true, 'nothing left to save after revert');
+    reverted.set('Away / toward', '0.2');
+    reverted.save().dispatch('click');
+    await settle();
+    assert.deepEqual(bodyOf(reverted.edits()[0]), { offset: [0.123456789, -0.000001234, 0.2], yaw: -1.2345678901 }, 'the reverted X is the exact saved value');
+  });
+});

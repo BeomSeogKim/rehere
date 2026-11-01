@@ -297,7 +297,7 @@ describe('recollection candidates per object', () => {
     const [sent] = ui.posts(`/contributions/${CID}/review`);
     assert.equal(sent.body.transform.targetId, 'object-2');
     assert.deepEqual(sent.body.transform.offset, [0.6, 0.2, 0]);
-    assert.ok(Math.abs(sent.body.transform.yaw - (23 * Math.PI) / 180) < 1e-9);
+    assert.equal(sent.body.transform.yaw, savedB.yaw);
   });
 
   it('keeps each object’s typed values apart when switching, and sends the chosen object’s own', async () => {

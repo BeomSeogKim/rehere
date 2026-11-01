@@ -525,9 +525,15 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       memoryEdit?.sync();
       collaborationPanel?.sync();
     };
-    const readControls = (source) => {
-      const values = controls.map((control) => (control[source].value.trim() === '' ? NaN : Number(control[source].value)));
-      return { offset: values.slice(0, 3), yaw: (values[3] * Math.PI) / 180 };
+    // One edited axis applied to the exact current geometry. Fields show
+    // rounded angles and sliders snap to their steps, so untouched axes are
+    // never read back from them; an explicitly entered angle is used as typed.
+    const withAxis = (geometry, i, raw) => {
+      const edit = { offset: [...geometry.offset], yaw: geometry.yaw };
+      const value = Number(raw);
+      if (i < 3) edit.offset[i] = value;
+      else edit.yaw = (value * Math.PI) / 180;
+      return edit;
     };
     // Leaving a field shows its parsed value; a draft that is not a valid
     // value stays as typed, with its message, and keeps blocking saves.
@@ -542,8 +548,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       typing = null;
       showEdit();
     };
-    // Save only what the fields show: never a cached preview behind an invalid field.
-    const visibleProblem = () => firstInvalid() ?? editProblem(readControls('number'));
+    // Never save behind an invalid field; otherwise the exact previewed candidate.
+    const visibleProblem = () => firstInvalid() ?? editProblem(session.preview);
     for (const control of controls) {
       for (const source of ['range', 'number']) {
         control[source].addEventListener('input', () => {
@@ -556,18 +562,13 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
             if (own) invalid.set(node, own);
             else invalid.delete(node);
           }
-          // Valid fields keep updating the preview; an invalid field's axis
-          // keeps its previewed value until the field itself is fixed.
-          const edit = readControls(source);
-          const kept = session.preview;
-          controls.forEach((other, i) => {
-            if (!invalid.has(other.number)) return;
-            if (i < 3) edit.offset[i] = kept.offset[i];
-            else edit.yaw = kept.yaw;
-          });
-          const editIssue = editProblem(edit);
+          // Only a valid edited field changes the preview, and only its own
+          // axis; every other axis keeps its exact previewed value, and an
+          // invalid field keeps its axis until the field itself is fixed.
+          const edit = invalid.has(node) ? null : withAxis(session.preview, controls.indexOf(control), node.value);
+          const editIssue = edit && editProblem(edit);
           editMessage.textContent = firstInvalid() ?? editIssue ?? '';
-          if (!editIssue) session.setPreview(edit);
+          if (edit && !editIssue) session.setPreview(edit);
           showEdit();
         });
         control[source].addEventListener('blur', () => leaveField(control[source]));
@@ -1277,9 +1278,14 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       showEdit();
     }
 
-    const readControls = (source) => {
-      const values = controls.map((control) => (control[source].value.trim() === '' ? NaN : Number(control[source].value)));
-      return { offset: values.slice(0, 3), yaw: (values[3] * Math.PI) / 180 };
+    // One edited axis applied to the chosen object's exact current geometry;
+    // untouched axes are never read back from rounded fields or snapped sliders.
+    const withAxis = (geometry, i, raw) => {
+      const edit = { offset: [...geometry.offset], yaw: geometry.yaw };
+      const value = Number(raw);
+      if (i < 3) edit.offset[i] = value;
+      else edit.yaw = (value * Math.PI) / 180;
+      return edit;
     };
     // Leaving a field shows its parsed value; a draft that is not a valid
     // value stays as typed, with its message, and keeps blocking saves.
@@ -1295,8 +1301,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       typing = null;
       showEdit();
     };
-    // Save only what the fields show: never a cached preview behind an invalid field.
-    const visibleProblem = () => firstInvalid() ?? editProblem(readControls('number'));
+    // Never save behind an invalid field; otherwise the chosen object's exact previewed candidate.
+    const visibleProblem = () => firstInvalid() ?? (selected ? editProblem(objectState(session.preview, selected)) : null);
     for (const control of controls) {
       for (const source of ['range', 'number']) {
         control[source].addEventListener('input', () => {
@@ -1310,18 +1316,13 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
             if (own) invalid.set(node, own);
             else invalid.delete(node);
           }
-          // Valid fields keep updating the preview; an invalid field's axis
-          // keeps its previewed value until the field itself is fixed.
-          const edit = readControls(source);
-          const kept = objectState(session.preview, selected);
-          controls.forEach((other, i) => {
-            if (!invalid.has(other.number)) return;
-            if (i < 3) edit.offset[i] = kept.offset[i];
-            else edit.yaw = kept.yaw;
-          });
-          const editIssue = editProblem(edit);
+          // Only a valid edited field changes the preview, and only its own
+          // axis; every other axis keeps its exact previewed value, and an
+          // invalid field keeps its axis until the field itself is fixed.
+          const edit = invalid.has(node) ? null : withAxis(objectState(session.preview, selected), controls.indexOf(control), node.value);
+          const editIssue = edit && editProblem(edit);
           editMessage.textContent = firstInvalid() ?? editIssue ?? '';
-          if (!editIssue) session.setPreview(selected, edit);
+          if (edit && !editIssue) session.setPreview(selected, edit);
           showEdit();
         });
         control[source].addEventListener('blur', () => leaveField(control[source]));

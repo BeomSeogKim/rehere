@@ -609,3 +609,139 @@ describe('blocked scene', () => {
     assert.equal(restored, 1);
   });
 });
+
+describe('exact untouched candidate values', () => {
+  const YAW = 2.9041932442260783; // about 166.4 degrees, shown as 166
+  const REVIEW_URL = `${JOB_URL}/contributions/${CID}/review`;
+  const field = (ui, name) => ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === `Candidate ${name}`)[0];
+  const AXES = ['Left / right', 'Down / up', 'Away / toward', 'Turn (degrees)'];
+  const type = (ui, name, value) => {
+    field(ui, name).value = String(value);
+    field(ui, name).dispatch('input');
+  };
+
+  // targets: { A: state, B: state } for a two-object scene, or null for one object.
+  async function open({ state = { version: 1, offset: [0.12345678901, -1e-7, 0.5], yaw: YAW, clean: true }, targets = null } = {}) {
+    routes[`GET ${JOB_URL}/collaboration`] = () => Promise.resolve(json(200, { revision: 1, contributions: [contribution()], variants: [variant()], blocked: false, currentVersion: 1 }));
+    routes[`POST ${REVIEW_URL}`] = () => Promise.resolve(json(200, { contribution: contribution({ status: 'alternative', revision: 2 }), variant: variant({ id: VID2 }) }));
+    const calls = [];
+    let selected = null;
+    const b = {
+      jobUrl: JOB_URL,
+      state,
+      objects: targets,
+      editor: (id) => ({ ...(targets && (id ?? selected) ? b.objects[id ?? selected] : b.state), clean: true }),
+      showTransform: (transform) => {
+        calls.push(['show', transform]);
+        return Boolean(transform);
+      },
+      setLocked: () => {},
+      saved: () => {},
+      unconfirmed: () => {},
+      conflict: () => {},
+      blocked: () => {},
+      ...(targets && {
+        targets: { selected: () => selected, nameOf: (id) => `Object ${id}`, describe: () => '', ruleText: () => '' },
+      }),
+    };
+    const root = new FakeElement('section');
+    const view = mountCollaboration(root, b);
+    await settle();
+    const ui = finder(root);
+    ui.button('Review').dispatch('click');
+    const decision = ui.find((node) => node.tag === 'select')[0];
+    decision.value = 'alternative';
+    decision.dispatch('change');
+    const choose = (id) => {
+      selected = id;
+      view.sync();
+    };
+    const lastShown = () => calls.filter(([name]) => name === 'show').at(-1)?.[1];
+    const save = async () => {
+      ui.button('Save decision').dispatch('click');
+      await settle();
+      return posts(REVIEW_URL).at(-1)?.body;
+    };
+    return { b, ui, view, root, choose, lastShown, save, calls };
+  }
+
+  it('keeps the exact saved turn and offsets when only one position field changes', async () => {
+    for (const yaw of [YAW, -YAW]) {
+      requests.length = 0;
+      const { ui, lastShown, save } = await open({ state: { version: 1, offset: [0.12345678901, -1e-7, 0.5], yaw, clean: true } });
+      assert.equal(field(ui, 'Turn (degrees)').value, String(Math.sign(yaw) * 166), 'shown rounded');
+      type(ui, 'Left / right', 0.3);
+      ui.button('Preview candidate on the scene').dispatch('click');
+      const expected = { offset: [0.3, -1e-7, 0.5], yaw };
+      assert.deepEqual(lastShown(), expected, 'the preview keeps the exact untouched values');
+      const sent = await save();
+      assert.deepEqual(sent.transform, expected);
+      assert.equal(sent.baseVersion, 1);
+    }
+  });
+
+  it('uses typed values only for edited fields, including a turn typed as the shown whole number', async () => {
+    const { ui, save } = await open();
+    type(ui, 'Turn (degrees)', 166);
+    ui.button('Preview candidate on the scene').dispatch('click');
+    const sent = await save();
+    assert.deepEqual(sent.transform, { offset: [0.12345678901, -1e-7, 0.5], yaw: (166 * Math.PI) / 180 }, 'only the turn changed, to exactly 166 degrees');
+  });
+
+  it('still refuses a field the owner left blank or out of range', async () => {
+    const { ui, root } = await open();
+    type(ui, 'Away / toward', '');
+    assert.match(root.textContent, /Each position value must be a number\./);
+    assert.equal(ui.button('Preview candidate on the scene').disabled, true);
+    type(ui, 'Away / toward', 9);
+    assert.match(root.textContent, /must be between -2 and 2/);
+    assert.equal(ui.button('Save decision').disabled, true);
+  });
+
+  it('keeps each object’s typed fields and exact untouched values apart on a two-object scene', async () => {
+    const objects = {
+      'object-1': { version: 1, offset: [0.1, 0, -0.2000000001], yaw: YAW },
+      'object-2': { version: 1, offset: [0.6, 0.2, 0], yaw: -0.4123 },
+    };
+    const { ui, choose, lastShown, save } = await open({ targets: objects });
+    choose('object-1');
+    type(ui, 'Left / right', 0.5);
+    choose('object-2');
+    assert.deepEqual(AXES.map((name) => field(ui, name).value), ['0.6', '0.2', '0', '-24']);
+    choose('object-1');
+    assert.equal(field(ui, 'Left / right').value, '0.5', 'its own typed value comes back');
+    ui.button('Preview candidate on the scene').dispatch('click');
+    assert.deepEqual(lastShown(), { targetId: 'object-1', offset: [0.5, 0, -0.2000000001], yaw: YAW });
+    choose('object-2');
+    ui.button('Preview candidate on the scene').dispatch('click');
+    assert.deepEqual(lastShown(), { targetId: 'object-2', offset: [0.6, 0.2, 0], yaw: -0.4123 }, 'never the other object’s values');
+    const sent = await save();
+    assert.deepEqual(sent.transform, { targetId: 'object-2', offset: [0.6, 0.2, 0], yaw: -0.4123 });
+  });
+
+  it('stops a candidate when the saved scene moves on, never saves it, and a fresh review starts from the new version', async () => {
+    const { b, ui, view, root, lastShown } = await open();
+    type(ui, 'Left / right', 0.3);
+    ui.button('Preview candidate on the scene').dispatch('click');
+    assert.ok(lastShown());
+    b.state = { version: 2, offset: [0.9, 0, 0], yaw: 1.2345, clean: true };
+    view.sync();
+    assert.equal(lastShown(), null, 'the candidate is no longer drawn');
+    assert.match(root.textContent, /The saved scene changed to version 2 after this review was opened on version 1\. Reload the page and reopen this review/);
+    assert.equal(field(ui, 'Left / right').value, '0.3', 'the typed value stays');
+    assert.equal(ui.button('Preview candidate on the scene').disabled, true);
+    assert.equal(ui.button('Save decision').disabled, true);
+    ui.button('Save decision').disabled = false;
+    ui.button('Save decision').dispatch('click');
+    await settle();
+    assert.equal(posts(REVIEW_URL).length, 0, 'the old candidate is never posted');
+    view.dispose();
+
+    const fresh = await open({ state: { version: 2, offset: [0.9, 0, 0], yaw: 1.2345, clean: true } });
+    type(fresh.ui, 'Down / up', 0.1);
+    fresh.ui.button('Preview candidate on the scene').dispatch('click');
+    const sent = await fresh.save();
+    assert.deepEqual(sent.transform, { offset: [0.9, 0.1, 0], yaw: 1.2345 });
+    assert.equal(sent.baseVersion, 2);
+  });
+});
