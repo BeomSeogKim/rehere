@@ -149,6 +149,71 @@ invented year. A same-time relationship does not establish a chronology or
 merge two alternatives. Changes append assertions rather than rewriting a
 contributor's original time claim.
 
+## Revise a saved reconstruction
+
+Show a saved reconstruction, then choose **Make a revised alternative**.
+Choose an object, adjust its position or turn, choose the new alternative's
+time explicitly, and preview before saving. The new **Owner revision** starts
+from that selected parent's complete arrangement, even if the main scene has
+changed since. The other object, relationship rule, coordinate frame and
+relative scale stay exactly as the parent saved them. This path does not
+change scale or generate geometry.
+
+Saving creates an immutable child alternative. It leaves the parent, current
+main version, original material, contribution wording and earlier stories or
+visitor snapshots unchanged. A child can be compared, revised again, or
+explicitly selected for a new story or visitor snapshot. Its owner-facing
+lineage identifies the parent and changed object; it is not a rewritten
+contributor statement. Visitor evidence keeps the original recollection's
+recorded object, while the arrangement's origin identifies a manual owner
+change.
+
+Start with time unknown, or explicitly confirm the parent's current known
+time statement again. The latter creates a new owner assertion, retaining
+any relative-time reference rather than inventing a year or moving that
+reference to the child. If the parent's time changes after preview, review
+it again before saving. A missing or unavailable relative reference cannot
+be silently dropped to make confirmation succeed.
+
+The preview context and save both verify the original photos, derived files,
+current place use and every inherited contribution dependency. Model
+permission is unnecessary for this deterministic operation. The parent's
+relationship and actual named-surface checks still apply. An unchanged
+arrangement is refused, including equivalent turn endpoints. Each scene can
+keep at most 200 owner revisions; an exact retry still resolves its earlier
+child at that limit.
+
+An unconfirmed response keeps the exact prepared request for retry, rather
+than starting another child. A confirmed save remains saved if the following
+list refresh or scene display fails. A newer view or edit choice is not
+replaced by a delayed save completion.
+
+All routes below extend `/api/drafts/<id>/reconstructions/<job>`:
+
+| Request | Purpose |
+|---|---|
+| `GET /variants/<parent>/revision-context` | Owner-only verified parent arrangement, current time assertion and its revision |
+| `POST /variants/<parent>/revisions` | Save `requestId`, `baseEraRevision`, `transform`, `timeMode` and `confirmed: true` |
+
+`timeMode` is `unknown` or `reconfirm-parent`. A single foreground uses
+`transform: {offset, yaw}`; two objects from one photo add `targetId`;
+a composition uses `{targetId, pose: {position, quaternion}}` and retains the
+parent's exact scale. There is no main `baseVersion`: the selected parent is
+the authority. A new child returns the raw variant with 201; an exact replay
+returns the same child with 200. Reusing a request ID with a different parent
+or body is refused. Current source and dependency checks also gate replay.
+Only new revision variants add owner metadata
+`revision: {parentVariantId, targetId, timeMode}`; older variants keep their
+existing shape. Private lineage is not added to visitor packets.
+
+The existing current-main asset restriction still applies: when the main
+version depends on withdrawn material, the shared scene assets are blocked
+even for an independently usable alternative. Restore an unaffected saved
+version before rendering it. Relative-time reference usability is checked
+when confirming the relation and selecting it for sharing; later withdrawal
+of that referenced alternative does not currently invalidate the child's
+local time assertion or a local story context automatically.
+
 ## Grants and withdrawal
 
 Every spatial change inherits its supporting contribution IDs. Place permission

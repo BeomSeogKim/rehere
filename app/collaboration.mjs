@@ -18,7 +18,7 @@ const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Text limits count UTF-16 code units, as browsers report string length.
-export const COLLABORATION_LIMITS = Object.freeze({ text: 10_000, captionText: 20_000, periodClaim: 300, reason: 1000, eraLabel: 300, eraStatement: 2000, contributions: 200 });
+export const COLLABORATION_LIMITS = Object.freeze({ text: 10_000, captionText: 20_000, periodClaim: 300, reason: 1000, eraLabel: 300, eraStatement: 2000, contributions: 200, revisions: 200 });
 const OFFSET_LIMIT = 2;
 const DECISIONS = Object.freeze({ reviewing: 'reviewing', adopt: 'adopted', alternative: 'alternative', hold: 'held', reject: 'rejected' });
 const CONFLICTS = new Set(['unknown', 'viewpoint', 'time', 'memory', 'recognition']);
@@ -36,6 +36,7 @@ const NOT_FOUND = 'This scene could not be found.';
 const CONTRIBUTION_NOT_FOUND = 'This contribution could not be found.';
 const NOT_ALLOWED = 'This action is not allowed.';
 const REUSED = 'This request was already used with different values.';
+const VARIANT_NOT_FOUND = 'This version of the scene could not be found.';
 
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -412,6 +413,59 @@ const digest = (request) => {
   return sha256(JSON.stringify(values));
 };
 
+const TIME_MODES = new Set(['unknown', 'reconfirm-parent']);
+// Saved arrangements an owner revision may start from; any other kind is refused.
+const REVISABLE_KINDS = new Set(['baseline', 'candidate', 'revision']);
+
+// An owner revision of one saved arrangement: the same transform shapes as a
+// recollection review, so a composition request carries no scale.
+function parseRevision(body, twoObjects, composition) {
+  const valid = exactKeys(body, ['requestId', 'baseEraRevision', 'transform', 'timeMode', 'confirmed']) && isId(body.requestId)
+    && Number.isInteger(body.baseEraRevision) && body.baseEraRevision >= 0 && TIME_MODES.has(body.timeMode);
+  if (!valid) throw fail(400, UNREADABLE);
+  if (body.confirmed !== true) throw fail(400, 'Confirm that this revision is your own change before saving it.');
+  const transform = parseTransform(body.transform, twoObjects, composition);
+  if (!transform) throw fail(400, 'The revised position and turn could not be read.');
+  return { requestId: body.requestId, baseEraRevision: body.baseEraRevision, transform, timeMode: body.timeMode, confirmed: true };
+}
+
+const REVISION_UNREADABLE = 'This saved arrangement could not be read, so it cannot be revised.';
+const transformValid = (item) => Array.isArray(item?.offset) && item.offset.length === 3 && item.offset.every((value) => finite(value) && Math.abs(value) <= OFFSET_LIMIT)
+  && finite(item.yaw) && Math.abs(item.yaw) <= Math.PI;
+
+// The parent's whole saved arrangement, only when it is exactly the scene's
+// own representation; nothing is repaired or defaulted.
+function parentArrangement(manifest, variant) {
+  const edit = variant?.edit;
+  if (!isTwoObject(manifest)) {
+    if (!transformValid(edit) || Object.hasOwn(edit, 'objects')) throw fail(409, REVISION_UNREADABLE);
+    return { offset: [...edit.offset], yaw: edit.yaw };
+  }
+  const composition = isComposition(manifest);
+  const shaped = Array.isArray(edit?.objects) && edit.objects.length === OBJECT_IDS.length && edit.objects.every((item, index) => item?.id === OBJECT_IDS[index])
+    && composition === (edit.frame === 'owner-composition');
+  if (!shaped) throw fail(409, REVISION_UNREADABLE);
+  for (const item of edit.objects) {
+    if (!composition && !transformValid(item)) throw fail(409, REVISION_UNREADABLE);
+    if (composition) {
+      try { canonicalPose(item); } catch { throw fail(409, REVISION_UNREADABLE); }
+    }
+  }
+  return arrangementOf(edit);
+}
+
+// Arrangements compared by meaning, for this check only: a composition
+// quaternion and its negation are the same orientation, and so are the yaw
+// endpoints -PI and PI. Stored values are never rewritten.
+const sameYaw = (item) => ({ ...item, yaw: item.yaw === -Math.PI ? Math.PI : item.yaw });
+const sameArrangement = (a, b) => {
+  const canonical = (fields) => {
+    if (isComposition(fields)) return { ...fields, objects: fields.objects.map((item) => ({ id: item.id, ...canonicalPose(item) })) };
+    return Array.isArray(fields.objects) ? { ...fields, objects: fields.objects.map(sameYaw) } : sameYaw(fields);
+  };
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+};
+
 
 const UNKNOWN_ERA = Object.freeze({
   kind: 'unknown', label: '', start: null, end: null, statement: '', relation: null, relativeToVariantId: null, confirmed: false, assertedBy: null, assertedAt: null,
@@ -589,6 +643,10 @@ function projectVariant(manifest, variant, sourceBlocked) {
     eraRevision: variant.eraRevision,
     blocked,
     targetId: variantTarget(manifest, variant),
+    // Only owner revisions carry their opaque lineage; it names no words or sources.
+    ...(variant.kind === 'revision' && {
+      revision: { parentVariantId: variant.revision.parentVariantId, targetId: variant.revision.targetId, timeMode: variant.revision.timeMode },
+    }),
   };
 }
 
@@ -1414,6 +1472,114 @@ export class CollaborationStore {
       }, { requestId, action: 'era', principalId: principal.id, target: variantId, digest: digest(request) });
       const stored = await write();
       return projectVariant(stored, next.variants.find((item) => item.id === variantId), false);
+    });
+  }
+
+  // Callers hold the mutex. Everything a revision derives from must be usable
+  // now: the finished, confirmed scene, current place use and the exact bytes
+  // of every original photo and derived file, and every contribution the
+  // arrangement inherits. Model permission is never needed.
+  async #revisable(manifest, variant) {
+    if (!REVISABLE_KINDS.has(variant.kind)) throw fail(409, REVISION_UNREADABLE);
+    this.#ready(manifest);
+    assertObjectsConfirmed(manifest);
+    if (await this.#sourceBlocked(manifest)) throw fail(409, SOURCE_STOPPED_MESSAGE);
+    await this.reconstructions.assertSceneFiles(manifest);
+    assertDependencies(manifest, variant.contributionIds);
+  }
+
+  // What an owner revision would start from, checked as a save would be.
+  async revisionContext(draftId, jobId, principal, parentId) {
+    this.#owner(principal, draftId);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const parent = collaborationOf(manifest).variants.find((item) => item.id === parentId);
+      if (!parent) throw fail(404, VARIANT_NOT_FOUND);
+      await this.#revisable(manifest, parent);
+      return {
+        parentVariantId: parent.id, eraRevision: parent.eraRevision, latestEra: projectEra(parent, false),
+        edit: { version: parent.edit.version, ...parentArrangement(manifest, parent) }, contributionIds: [...parent.contributionIds], revisionAllowed: true,
+      };
+    });
+  }
+
+  // Saves the owner's change to one object of a saved arrangement as a new
+  // immutable child. It starts from the parent's whole arrangement, keeps its
+  // contribution dependencies in order and never touches the main version,
+  // the parent or its time assertions. The child's time is unknown, or a new
+  // owner confirmation of the parent's latest assertion; never inherited.
+  async revision(draftId, jobId, principal, parentId, body) {
+    this.#owner(principal, draftId);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const request = parseRevision(body, isTwoObject(manifest), isComposition(manifest));
+      const collaboration = collaborationOf(manifest);
+      const replay = this.#receipt(collaboration, request, 'revision', principal.id, parentId);
+      if (replay) {
+        const child = collaboration.variants.find((item) => item.id === replay.variantId && item.kind === 'revision');
+        if (!child) throw fail(409, REVISION_UNREADABLE);
+        await this.#revisable(manifest, child);
+        return { created: false, variant: projectVariant(manifest, child, false) };
+      }
+      const parent = collaboration.variants.find((item) => item.id === parentId);
+      if (!parent) throw fail(404, VARIANT_NOT_FOUND);
+      await this.#revisable(manifest, parent);
+      if (request.baseEraRevision !== parent.eraRevision) throw fail(409, 'The time for this arrangement changed. Review it again before saving the revision.');
+      if (collaboration.variants.filter((item) => item.kind === 'revision').length >= COLLABORATION_LIMITS.revisions) {
+        throw fail(409, `This scene already holds ${COLLABORATION_LIMITS.revisions} owner revisions, the most it can keep. Nothing was saved.`);
+      }
+      const now = new Date().toISOString();
+      const eraAssertions = [];
+      if (request.timeMode === 'reconfirm-parent') {
+        const latest = parent.eraAssertions.at(-1);
+        if (!latest || latest.kind === 'unknown') throw fail(400, 'The selected arrangement has no confirmed time to confirm again. Keep the time unknown instead.');
+        // A relation is kept exactly or the confirmation is refused; it is never dropped.
+        if (latest.relativeToVariantId !== null) {
+          const other = collaboration.variants.find((item) => item.id === latest.relativeToVariantId);
+          if (!other || dependenciesBlocked(manifest, other.contributionIds)) {
+            throw fail(409, 'The arrangement this time is relative to is not available now, so the time cannot be confirmed again. Keep the time unknown instead.');
+          }
+        }
+        const { kind, label, start, end, statement, relation, relativeToVariantId } = latest;
+        eraAssertions.push({ id: randomUUID(), requestId: request.requestId, kind, label, start, end, statement, relation, relativeToVariantId, confirmed: true, assertedBy: principal.id, assertedAt: now });
+      }
+      const base = parentArrangement(manifest, parent);
+      const targetId = request.transform.targetId ?? null;
+      let fields;
+      if (isTwoObject(manifest)) {
+        // Only the named object changes; a composition keeps the parent's exact scale.
+        const transform = isComposition(manifest) ? { ...copyPose(base.objects.find((item) => item.id === targetId)), ...request.transform.pose } : request.transform;
+        fields = withTarget(base, targetId, transform);
+      } else {
+        fields = { offset: [...request.transform.offset], yaw: request.transform.yaw };
+      }
+      if (sameArrangement(fields, base)) throw fail(409, 'This revision does not change the selected arrangement. Nothing was saved.');
+      if (isTwoObject(manifest)) {
+        // The parent's own rule and the actual named surfaces gate the child.
+        assertRelationship(manifest, fields);
+        await this.reconstructions.assertVisibleArrangement(manifest, fields);
+      }
+      const child = {
+        id: randomUUID(),
+        kind: 'revision',
+        label: 'Owner revision',
+        revision: { parentVariantId: parent.id, parentEraRevision: parent.eraRevision, targetId, timeMode: request.timeMode },
+        parentVersion: parent.parentVersion,
+        edit: { version: null, ...fields },
+        contributionIds: [...parent.contributionIds],
+        createdAt: now,
+        createdBy: principal.id,
+        eraAssertions,
+        eraRevision: eraAssertions.length,
+      };
+      const { write } = this.#save(manifest, { ...collaboration, variants: [...collaboration.variants, child] }, {
+        requestId: request.requestId, action: 'revision', principalId: principal.id, target: parentId, digest: digest(request), variantId: child.id,
+      });
+      if (this.reconstructions.closed) throw fail(503, SHUTTING_DOWN);
+      const stored = await write();
+      return { created: true, variant: projectVariant(stored, child, false) };
     });
   }
 }

@@ -153,6 +153,7 @@ const CAPTION_BODY_BYTES = 128 * 1024;
 const CONTRIBUTION_PHOTO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/photo$/;
 const CONTRIBUTION_BUNDLE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/bundle$/;
 const ERA_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/era$/;
+const REVISION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/(revisions|revision-context)$/;
 const NOT_FOUND = 'This scene could not be found.';
 const SHARES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares$/;
 const PREVIEWS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews$/;
@@ -624,6 +625,24 @@ export function createAppServer({
       if (!reading) throw new RequestError(405, 'Method not allowed.');
       if (![draftId, jobId, contributionId, requestId].every((id) => UUID.test(id))) throw new RequestError(404, 'This caption change could not be found.');
       sendJson(res, 200, await collaboration.captionRequest(draftId, jobId, current, contributionId, requestId));
+      return;
+    }
+    const revisionMatch = REVISION_PATH.exec(pathname);
+    if (revisionMatch) {
+      const [, draftId, jobId, parentId, action] = revisionMatch;
+      // Owner-only, decided before any ID, method or body is examined.
+      const current = await requireScope(draftId);
+      if (current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
+      if (action === 'revision-context' ? !reading : req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      if (![draftId, jobId].every((id) => UUID.test(id))) throw new RequestError(404, NOT_FOUND);
+      if (!UUID.test(parentId)) throw new RequestError(404, 'This version could not be found.');
+      if (action === 'revision-context') {
+        sendJson(res, 200, await collaboration.revisionContext(draftId, jobId, current, parentId));
+        return;
+      }
+      const body = strictBody(await readJsonBody(req), ['requestId', 'baseEraRevision', 'transform', 'timeMode', 'confirmed']);
+      const { created, variant } = await collaboration.revision(draftId, jobId, current, parentId, body);
+      sendJson(res, created ? 201 : 200, variant);
       return;
     }
     const sceneCollaboration = SCENE_COLLABORATION_PATH.exec(pathname);

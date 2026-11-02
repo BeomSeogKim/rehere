@@ -646,6 +646,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     for (const control of controls) {
       for (const source of ['range', 'number']) {
         control[source].addEventListener('input', () => {
+          collaborationPanel?.noteViewIntent();
           const node = control[source];
           typing = node;
           // A slider sets its axis outright; a number field is checked on its own.
@@ -668,6 +669,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       }
     }
     revert.addEventListener('click', () => {
+      collaborationPanel?.noteViewIntent();
       typing = null;
       invalid.clear();
       session.revert();
@@ -675,6 +677,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       showEdit();
     });
     reset.addEventListener('click', () => {
+      collaborationPanel?.noteViewIntent();
       typing = null;
       invalid.clear();
       session.resetObject();
@@ -780,6 +783,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       // Returns the shown facing relation for a face-anchor point, or null when
       // there is no 3D view to show it in.
       showTransform(transform, point = null) {
+        collaborationPanel?.noteViewIntent();
         proposalPreview = transform;
         showEdit();
         return viewer ? viewer.showGuide(transform, point) : null;
@@ -805,8 +809,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     });
     collaborationPanel = mountCollaboration(collaborationSection, {
       jobUrl: `${base}/${jobId}`,
-      // New alternatives or recollections change what can be shared.
-      onChanged: () => sharesPanel?.refreshOptions(),
+      // New alternatives or recollections change story and sharing choices.
+      onChanged: () => { sharesPanel?.refreshOptions(); storiesPanel?.refresh(); },
       editor: editorFor('collaboration'),
       // True only when the 3D view actually drew the transform.
       showTransform(transform) {
@@ -1519,6 +1523,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     for (const control of controls) {
       for (const source of ['range', 'number']) {
         control[source].addEventListener('input', () => {
+          collaborationPanel?.noteViewIntent();
           if (!selected) return;
           if (composition) { facingPreview = false; faceConfirm.checked = false; viewer?.showGuide(null, null); }
           const node = control[source];
@@ -1543,6 +1548,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       }
     }
     toggle.addEventListener('click', () => {
+      collaborationPanel?.noteViewIntent();
       showingSaved = !showingSaved;
       showEdit();
     });
@@ -1553,6 +1559,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       photoSide.status.textContent = viewer.viewPhotographedSide(objectState(shown, id), id) ? SIDE_MOVED(nameOf(id)) : SIDE_OUTSIDE;
     });
     revert.addEventListener('click', () => {
+      collaborationPanel?.noteViewIntent();
       typing = null;
       invalid.clear();
       facingPreview = false; faceConfirm.checked = false;
@@ -1562,6 +1569,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       showEdit();
     });
     reset.addEventListener('click', () => {
+      collaborationPanel?.noteViewIntent();
       if (!selected) return;
       typing = null;
       invalid.clear();
@@ -1803,6 +1811,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         editor: editorFor('memory'),
         targets,
         showTransform(transform, point = null, targetId = null) {
+          collaborationPanel?.noteViewIntent();
           proposalPreview = transform ? asArrangement({ targetId, ...transform }) : null;
           previewTarget = transform ? targetId : null;
           showEdit();
@@ -1816,8 +1825,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       });
       collaborationPanel = mountCollaboration(collaborationSection, {
         jobUrl,
-        // New alternatives or recollections change what can be shared.
-        onChanged: () => sharesPanel?.refreshOptions(),
+        // New alternatives or recollections change story and sharing choices.
+        onChanged: () => { sharesPanel?.refreshOptions(); storiesPanel?.refresh(); },
         editor: editorFor('collaboration'),
         targets,
         showTransform(transform) {
@@ -1829,6 +1838,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         },
         setLocked: lockFor('collaboration'),
         surfaceProblem,
+        revisionProblem(candidate) {
+          const relation = check(candidate, candidate.relationship);
+          if (!relation) return 'The retained relationship could not be checked, so this revision cannot be saved.';
+          if (!relation.ok) return 'This revision would break the parent alternative’s retained relationship rule. The parent and current scene are unchanged.';
+          return surfaces.problem(candidate);
+        },
         blocked() {
           if (disposed || token !== panelGeneration) return;
           openScene(jobId);

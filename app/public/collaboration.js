@@ -8,6 +8,7 @@
 import { copyPose, isComposition, poseProblem } from './composition-scene.js';
 import { poseAxes, poseValues, poseWithAxis } from './composition-editor.js';
 import { formatTransform } from './memory-edit.js';
+import { copyArrangement, objectState, withObject } from './arrangement.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import { register, registerElement, unregister } from './playback.js';
 import { createStoryPlayer, formatMs } from './story-player.js';
@@ -1691,6 +1692,9 @@ export function mountCollaboration(container, bridge) {
   // prepared retry survive refreshes and editor state changes.
   let reviewForm = null;
   const eraForms = new Map();
+  let revisionForm = null;
+  let revisionGeneration = 0;
+  let viewIntent = 0;
 
   const status = el('p', { className: 'hint', role: 'status' });
   const message = el('p', { className: 'form-message', role: 'alert' });
@@ -1728,11 +1732,13 @@ export function mountCollaboration(container, bridge) {
     if (!showing) return;
     showing = null;
     bridge.showTransform(null);
-    bridge.setLocked(busy);
+    bridge.setLocked(busy || Boolean(revisionForm));
     if (state) renderCompare();
   }
 
   function show(kind, id, transform) {
+    if (revisionForm && kind !== 'revision') return false;
+    viewIntent += 1;
     stopShowing();
     const drawn = bridge.showTransform(transform);
     showing = { kind, id, transform, drawn };
@@ -1759,7 +1765,7 @@ export function mountCollaboration(container, bridge) {
             el('p', { className: 'hint', textContent: deletionStateText(entry.deletion) }),
           ]);
         }
-        const pick = el('button', { type: 'button', className: 'secondary', textContent: entry.id === selectedId ? 'Selected' : 'Review', disabled: entry.id === selectedId });
+        const pick = el('button', { type: 'button', className: 'secondary', textContent: entry.id === selectedId ? 'Selected' : 'Review', disabled: entry.id === selectedId || Boolean(revisionForm) || busy });
         pick.addEventListener('click', () => {
           stopShowing();
           selectedId = entry.id;
@@ -2029,8 +2035,8 @@ export function mountCollaboration(container, bridge) {
       }
       note.textContent = reasonText;
       targetNote.textContent = bridge.targets && !noTarget() ? `The candidate moves ${bridge.targets.nameOf(bridge.targets.selected())}; the other object stays as saved.` : '';
-      preview.disabled = busy || sceneMoved() || noTarget() || Boolean(entry.permissions && entry.permissions.place !== true) || Boolean(photoProblemText()) || Boolean(voiceProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
-      save.disabled = busy || (geometry() && Boolean(reasonText));
+      preview.disabled = busy || Boolean(revisionForm) || sceneMoved() || noTarget() || Boolean(entry.permissions && entry.permissions.place !== true) || Boolean(photoProblemText()) || Boolean(voiceProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
+      save.disabled = busy || Boolean(revisionForm) || (geometry() && Boolean(reasonText));
     };
 
     decision.addEventListener('change', () => {
@@ -2128,6 +2134,8 @@ export function mountCollaboration(container, bridge) {
     // temporary is shown.
     const shownNow = !showing
       ? null
+      : showing.kind === 'revision'
+        ? 'an owner revision preview of the selected alternative. It is not saved; the current scene is unchanged.'
       : showing.kind === 'candidate'
         ? 'a review candidate set by hand. It is not saved.'
         : `“${variantLabel(showing.id)}”. The current saved scene is unchanged.`;
@@ -2135,7 +2143,7 @@ export function mountCollaboration(container, bridge) {
       el('span', { textContent: `Current saved scene, version ${editor.version}${showing ? ' (not shown)' : ' (shown)'}` }),
     ]);
     if (shownNow && showing.drawn) current.append(el('span', { className: 'hint', textContent: `Shown on the scene now: ${shownNow}` }));
-    if (showing?.kind === 'variant') current.append(el('button', { type: 'button', className: 'secondary', textContent: 'Back to the current scene', onclick: () => { stopShowing(); render(); } }));
+    if (showing?.kind === 'variant') current.append(el('button', { type: 'button', className: 'secondary', textContent: 'Back to the current scene', onclick: () => { viewIntent += 1; stopShowing(); render(); } }));
     choices.append(current);
     for (const variant of state.variants) {
       const item = el('li', {}, [el('span', { className: 'space-choice-label', textContent: variant.label })]);
@@ -2150,13 +2158,14 @@ export function mountCollaboration(container, bridge) {
       else {
         item.append(el('span', { className: 'hint', textContent: `${describeEra(variant.era, variantLabel)} · ${variant.edit?.objects && bridge.targets ? bridge.targets.describe(variant.edit) : formatTransform(variant.edit)}` }));
         // A recollection-based alternative names the object the owner kept it for.
-        if (bridge.targets && variant.contributionIds?.length) {
+        if (variant.revision) item.append(el('span', { className: 'hint', textContent: `Owner revision of “${variantLabel(variant.revision.parentVariantId)}”${variant.revision.targetId && bridge.targets ? `, revising ${bridge.targets.nameOf(variant.revision.targetId)}` : ''}. Supporting recollections are retained; their words and reviews were not changed.` }));
+        if (!variant.revision && bridge.targets && variant.contributionIds?.length) {
           item.append(el('span', { className: 'hint', textContent: variant.targetId ? `Kept for ${bridge.targets.nameOf(variant.targetId)}.` : 'The object for this arrangement was not recorded.' }));
         }
         const isShown = showing?.kind === 'variant' && showing.id === variant.id;
-        const view = el('button', { type: 'button', className: 'secondary', textContent: isShown ? 'Shown' : 'Show on the scene', disabled: isShown || busy || (!bridge.editor().clean && !showing) });
+        const view = el('button', { type: 'button', className: 'secondary', textContent: isShown ? 'Shown' : 'Show on the scene', disabled: isShown || busy || Boolean(revisionForm) || (!bridge.editor().clean && !showing) });
         view.addEventListener('click', () => {
-          if (!bridge.editor().clean && !showing) return;
+          if (revisionForm || busy || (!bridge.editor().clean && !showing)) return;
           const drawn = show('variant', variant.id, variant.edit);
           message.textContent = drawn ? `Showing “${variant.label}”. The saved scene is unchanged.` : 'The 3D view is not available, so this alternative cannot be shown here.';
           render();
@@ -2164,11 +2173,240 @@ export function mountCollaboration(container, bridge) {
         const cached = eraForms.get(variant.id);
         const form = cached?.eraRevision === variant.eraRevision ? cached.node : eraControl(variant);
         eraForms.set(variant.id, { eraRevision: variant.eraRevision, node: form });
-        item.append(view, form);
+        const revise = el('button', { type: 'button', className: 'secondary', textContent: 'Make a revised alternative', disabled: !isShown || !showing.drawn || busy || Boolean(revisionForm) });
+        revise.addEventListener('click', () => { if (isShown && showing?.drawn && !busy && !revisionForm) beginRevision(variant); });
+        item.append(view, revise, ...(!revisionForm ? [form] : []));
       }
       choices.append(item);
     }
-    compare.replaceChildren(choices);
+    compare.replaceChildren(choices, ...(revisionForm ? [revisionForm.node] : []));
+    revisionForm?.sync?.();
+  }
+
+  async function beginRevision(parent) {
+    const lifetime = ++revisionGeneration;
+    const mine = { parentId: parent.id, context: null, pending: null, loading: false, saving: false, unavailable: false, stale: false, preview: null, targetId: null, inputs: [], edited: [], abort: null };
+    const heading = el('h4', { textContent: 'Make a revised alternative', tabIndex: -1 });
+    const description = el('p', { className: 'hint' });
+    const note = el('p', { className: 'form-message', role: 'status' });
+    const fields = el('fieldset', { className: 'space-edit' });
+    const target = select([['', 'Choose one object']], '');
+    target.setAttribute('aria-label', 'Object in this alternative to revise');
+    const time = select([['', 'Choose the new alternative’s time'], ['unknown', 'Start with time unknown']], '');
+    time.setAttribute('aria-label', 'Time for revised alternative');
+    const reaffirm = el('input', { type: 'checkbox' });
+    const timeNote = el('p', { className: 'hint' });
+    const timeConfirm = el('label', { className: 'memory-consent', hidden: true }, [reaffirm, ' I assert the displayed parent time again as my own assertion; it is not verified']);
+    const preview = el('button', { type: 'button', className: 'secondary', textContent: 'Preview revised alternative' });
+    const reset = el('button', { type: 'button', className: 'secondary', textContent: 'Reset revision to parent' });
+    const save = el('button', { type: 'button', textContent: 'Save revised alternative' });
+    const close = el('button', { type: 'button', className: 'secondary', textContent: 'Close revision' });
+    mine.node = el('section', { className: 'alternative-revision' }, [heading, description,
+      el('p', { className: 'hint', textContent: 'Create a new owner revision from this saved alternative. The current scene, parent, other alternatives, original material and existing visitor links stay unchanged. One object can move or turn; the parent’s other poses, rule and relative scale are retained.' }),
+      fields, timeNote, timeConfirm, note, el('div', { className: 'actions' }, [close, reset, preview, save])]);
+    const alive = () => !disposed && revisionForm === mine && lifetime === revisionGeneration;
+    const clone = (edit) => edit.objects ? copyArrangement(edit) : { ...edit, offset: [...edit.offset], yaw: edit.yaw };
+    const clearPreview = () => {
+      mine.preview = null;
+      mine.issue = null;
+      if (showing?.kind === 'revision') {
+        showing = null;
+        bridge.showTransform(null);
+      }
+      bridge.setLocked(true);
+    };
+    mine.invalidate = (text, unavailable = false, stale = false) => {
+      mine.abort?.abort();
+      mine.admission = (mine.admission ?? 0) + 1;
+      mine.loading = false;
+      clearPreview();
+      mine.unavailable = unavailable;
+      mine.stale = stale;
+      note.textContent = text;
+      mine.sync();
+    };
+    const changed = () => {
+      if (mine.loading || mine.saving || mine.pending) return;
+      clearPreview();
+      note.textContent = 'Your revision has not been previewed. Preview it again before saving.';
+      mine.sync();
+    };
+    const candidate = () => {
+      if (!mine.context || (mine.context.edit.objects && !mine.targetId)) return null;
+      const parentEdit = mine.context.edit;
+      const base = parentEdit.objects ? objectState(parentEdit, mine.targetId) : parentEdit;
+      let transform = isComposition(parentEdit) ? copyPose(base) : { offset: [...base.offset], yaw: base.yaw };
+      for (let axis = 0; axis < mine.inputs.length; axis += 1) {
+        if (!mine.edited[axis]) continue;
+        const raw = mine.inputs[axis].value;
+        if (isComposition(parentEdit)) {
+          transform = poseWithAxis(transform, axis, raw);
+          if (!transform) return null;
+        } else {
+          const value = raw.trim() === '' ? NaN : Number(raw);
+          if (axis < 3) transform.offset[axis] = value;
+          else transform.yaw = value * Math.PI / 180;
+        }
+      }
+      if (isComposition(parentEdit) ? poseProblem(transform) : transformProblem(transform)) return null;
+      const edit = parentEdit.objects ? withObject(parentEdit, mine.targetId, transform) : { ...clone(parentEdit), ...transform };
+      const requestTransform = isComposition(parentEdit)
+        ? { targetId: mine.targetId, pose: { position: [...transform.position], quaternion: [...transform.quaternion] } }
+        : { ...(parentEdit.objects ? { targetId: mine.targetId } : {}), offset: [...transform.offset], yaw: transform.yaw };
+      return { edit, transform: requestTransform, dirty: !sameJson(edit, clone(parentEdit)), key: JSON.stringify([edit, time.value, reaffirm.checked]) };
+    };
+    const bindTarget = () => {
+      const edit = mine.context.edit;
+      const base = edit.objects ? objectState(edit, mine.targetId) : edit;
+      const axes = isComposition(edit) ? poseAxes.slice(0, 6) : [['Left / right', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], ['Down / up', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], ['Away / toward', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], ['Turn (degrees)', -180, 180, 1]];
+      const values = base ? isComposition(edit) ? poseValues(base).slice(0, 6) : [...base.offset, base.yaw * 180 / Math.PI] : axes.map(() => '');
+      mine.edited = axes.map(() => false);
+      mine.inputs = axes.map(([name, min, max, step], axis) => {
+        const input = el('input', { type: 'number', min, max, step, value: String(values[axis]) });
+        input.setAttribute('aria-label', `Revision ${name}`);
+        input.addEventListener('input', () => { if (mine.loading || mine.saving || mine.pending) return; mine.edited[axis] = true; changed(); });
+        return input;
+      });
+      fields.replaceChildren(el('legend', { textContent: 'Pose in the selected parent alternative' }),
+        ...(edit.objects ? [field('Object', target)] : []), ...mine.inputs.map((input, axis) => field(axes[axis][0], input)), field('New alternative time', time));
+    };
+    mine.sync = () => {
+      if (!alive()) return;
+      const hidden = !mine.context || mine.unavailable || mine.stale;
+      const locked = mine.loading || mine.saving || Boolean(mine.pending) || busy || hidden;
+      description.hidden = fields.hidden = timeNote.hidden = hidden;
+      description.textContent = hidden ? '' : `Parent: “${variantLabel(mine.parentId)}”. ${mine.context.edit.objects && bridge.targets ? bridge.targets.describe(mine.context.edit) : formatTransform(mine.context.edit)}`;
+      timeNote.textContent = hidden ? '' : `Parent time: ${describeEra(mine.context.latestEra, variantLabel)}.${mine.context.latestEra?.statement ? ` Based on: ${mine.context.latestEra.statement}` : ''} A retained relative reference stays relative to the same alternative; no date is inferred.`;
+      timeConfirm.hidden = hidden || time.value !== 'reconfirm-parent';
+      [...mine.inputs, target, time, reaffirm].forEach((input) => { input.disabled = locked; });
+      if (!hidden && mine.context.edit.objects && !mine.targetId) mine.inputs.forEach((input) => { input.disabled = true; });
+      const value = hidden ? null : candidate();
+      const issue = mine.issue ?? null;
+      preview.disabled = locked || !value?.dirty || !time.value || (time.value === 'reconfirm-parent' && !reaffirm.checked);
+      save.disabled = mine.saving || mine.loading || busy || (!mine.pending && (hidden || !mine.preview || mine.preview.key !== value?.key || Boolean(issue)));
+      save.textContent = mine.pending ? 'Retry the earlier revision save' : 'Save revised alternative';
+      reset.disabled = locked || !mine.inputs.length;
+      close.disabled = mine.saving || Boolean(mine.pending);
+      if (issue) note.textContent = issue;
+    };
+    const admit = async (initial = false) => {
+      mine.abort?.abort();
+      mine.abort = new AbortController();
+      const admission = mine.admission = (mine.admission ?? 0) + 1;
+      mine.loading = true;
+      clearPreview();
+      note.textContent = 'Checking this parent alternative and its current sources…';
+      mine.sync();
+      const result = await request(`${bridge.jobUrl}/variants/${encodeURIComponent(mine.parentId)}/revision-context`, { signal: mine.abort.signal });
+      if (!alive() || admission !== mine.admission) return false;
+      mine.loading = false;
+      const context = result.body;
+      let valid = result.ok && context?.revisionAllowed === true && context.parentVariantId === mine.parentId && Number.isInteger(context.eraRevision) && context.eraRevision >= 0 && context.edit && Array.isArray(context.contributionIds);
+      if (valid) {
+        try {
+          const edit = clone(context.edit);
+          valid = edit.objects ? edit.objects.length === 2 && new Set(edit.objects.map((object) => object.id)).size === 2 && edit.objects.every((object) => !(isComposition(edit) ? poseProblem(object) : transformProblem(object))) : !transformProblem(edit);
+        } catch { valid = false; }
+      }
+      if (!valid) { mine.invalidate(withReason(result, mine.pending ? 'The earlier save outcome is still unknown. Current access could not be checked; retry that same request when access returns.' : 'This alternative could not be admitted for revision. Close and reopen it after checking access. No preview or new alternative was saved.'), true); return false; }
+      if (!initial && !mine.pending && (context.eraRevision !== mine.context.eraRevision || !sameJson(context.edit, mine.context.edit) || !sameJson(context.contributionIds, mine.context.contributionIds))) {
+        mine.invalidate('The parent or its time assertion changed. Close this revision and reopen it to review the current parent.', false, true); return false;
+      }
+      mine.unavailable = Boolean(mine.pending && context.eraRevision !== mine.context.eraRevision);
+      if (initial) {
+        mine.context = { ...context, edit: clone(context.edit), contributionIds: [...context.contributionIds] };
+        if (context.edit.objects) target.replaceChildren(el('option', { value: '', textContent: 'Choose one object' }), ...context.edit.objects.map((object) => el('option', { value: object.id, textContent: bridge.targets?.nameOf(object.id) ?? object.id })));
+        if (context.latestEra && context.latestEra.kind !== 'unknown') time.append(el('option', { value: 'reconfirm-parent', textContent: 'Re-confirm the displayed parent time assertion' }));
+        bindTarget();
+      }
+      mine.sync();
+      return true;
+    };
+    target.addEventListener('change', () => {
+      if (!alive() || mine.loading || mine.saving || mine.pending) return;
+      if (candidate()?.dirty) { target.value = mine.targetId ?? ''; note.textContent = 'Reset this revision to the parent before choosing another object.'; return; }
+      mine.targetId = target.value || null;
+      bindTarget(); changed();
+    });
+    time.addEventListener('change', () => { reaffirm.checked = false; changed(); });
+    reaffirm.addEventListener('change', changed);
+    reset.addEventListener('click', () => { if (mine.loading || mine.saving || mine.pending || !mine.context) return; bindTarget(); changed(); });
+    preview.addEventListener('click', async () => {
+      if (preview.disabled || !alive()) return;
+      const value = candidate();
+      if (!await admit()) return;
+      const issue = bridge.revisionProblem?.(value.edit) ?? null;
+      if (issue) { mine.issue = issue; note.textContent = issue; mine.sync(); return; }
+      const drawn = show('revision', mine.parentId, value.edit);
+      mine.preview = drawn ? value : null;
+      note.textContent = drawn ? 'Preview only: this owner revision starts from the selected parent, including its other objects and rule. Nothing is saved.' : 'The 3D view is not available, so this revision cannot be saved without a preview.';
+      mine.sync();
+    });
+    save.addEventListener('click', async () => {
+      if (save.disabled || !alive()) return;
+      const retrying = Boolean(mine.pending);
+      const value = mine.preview;
+      if (retrying && !await admit()) return;
+      if (!retrying) {
+        const issue = value && bridge.revisionProblem?.(value.edit);
+        if (!value || value.key !== candidate()?.key || issue) { clearPreview(); mine.issue = issue; mine.sync(); return; }
+      }
+      mine.pending ??= { requestId: crypto.randomUUID(), baseEraRevision: mine.context.eraRevision, transform: value.transform, timeMode: time.value, confirmed: true };
+      mine.saving = true;
+      readToken += 1;
+      note.textContent = 'Saving a new owner revision…';
+      mine.sync();
+      const result = await postJson(`${bridge.jobUrl}/variants/${encodeURIComponent(mine.parentId)}/revisions`, mine.pending);
+      if (!alive()) return;
+      mine.saving = false;
+      const child = result.body;
+      const accepted = result.ok && typeof child?.id === 'string' && child.id !== mine.parentId && child.edit?.version === null && child.revision?.parentVariantId === mine.parentId;
+      if (unclear(result) || (result.ok && !accepted) || (retrying && [401, 403, 409].includes(result.status))) {
+        note.textContent = withReason(result, 'Rehere could not confirm whether this revision was saved. Retry the earlier save with the same request; new changes stay paused.');
+        if ([401, 403].includes(result.status)) mine.invalidate(note.textContent, true);
+        else mine.sync();
+        return;
+      }
+      mine.pending = null;
+      if (!accepted) {
+        mine.invalidate(withReason(result, result.status === 409 ? 'The parent time, geometry or allowed uses changed, or no pose change was made. Close and reopen this revision to review before saving again.' : 'The revision could not be saved. Preview again before retrying.'), [401, 403].includes(result.status), result.status === 409);
+        return;
+      }
+      const childId = child.id;
+      revisionForm = null;
+      revisionGeneration += 1;
+      stopShowing();
+      bridge.setLocked(false);
+      const intent = viewIntent;
+      const baseVersion = bridge.editor().version;
+      try {
+        const refreshed = await refresh();
+        if (disposed || revisionForm || lifetime + 1 !== revisionGeneration) return;
+        const usable = refreshed && state.variants.find((variant) => variant.id === childId && !variant.blocked);
+        const follow = viewIntent === intent && bridge.editor().clean && bridge.editor().version === baseVersion;
+        if (usable && follow) show('variant', childId, usable.edit);
+        message.textContent = usable
+          ? follow ? 'Saved a new owner revision. The current scene and its parent alternative are unchanged.' : 'Saved a new owner revision. Your newer view is kept; its parent alternative is unchanged.'
+          : 'The owner revision was saved, but current access could not confirm that it can be shown. Refresh the alternatives to check.';
+        render();
+      } catch {
+        if (disposed || revisionForm || lifetime + 1 !== revisionGeneration) return;
+        message.textContent = 'The owner revision was saved, but its display could not be refreshed. Refresh the alternatives to check; do not save it again.';
+      }
+    });
+    close.addEventListener('click', () => {
+      if (!alive() || mine.saving || mine.pending) return;
+      revisionForm = null;
+      revisionGeneration += 1;
+      mine.abort?.abort();
+      stopShowing(); bridge.setLocked(false); render();
+    });
+    revisionForm = mine;
+    stopShowing();
+    bridge.setLocked(true);
+    renderCompare();
+    heading.focus(); heading.scrollIntoView?.({ block: 'nearest' });
+    if (await admit(true)) { note.textContent = 'Choose the one object to revise and explicitly choose the new alternative’s time. Your current saved scene will not change.'; mine.sync(); }
   }
 
   function eraControl(variant) {
@@ -2260,6 +2498,7 @@ export function mountCollaboration(container, bridge) {
     const result = await request(`${bridge.jobUrl}/collaboration`);
     if (disposed || token !== readToken) return null;
     if (!result.ok || !Array.isArray(result.body?.contributions) || !Array.isArray(result.body?.variants)) {
+      revisionForm?.invalidate?.('The current alternatives could not be read. Check access and preview again before saving.', true);
       status.textContent = 'Recollections could not be loaded. Try Refresh.';
       return false;
     }
@@ -2270,6 +2509,11 @@ export function mountCollaboration(container, bridge) {
     const changed = lastSeen !== null && seen !== lastSeen;
     lastSeen = seen;
     state = result.body;
+    if (revisionForm) {
+      const parent = state.variants.find((variant) => variant.id === revisionForm.parentId);
+      if (state.blocked || !parent || parent.blocked) revisionForm.invalidate('This alternative is not available under its current sources and supporting recollections.', true);
+      else if (revisionForm.context && parent.eraRevision !== revisionForm.context.eraRevision && !revisionForm.pending) revisionForm.invalidate('The parent’s time assertion changed. Close this revision and reopen it to review the current assertion.', false, true);
+    }
     if (showing?.kind === 'variant' && !state.variants.some((variant) => variant.id === showing.id && !variant.blocked)) stopShowing();
     const candidateSource = showing?.kind === 'candidate' ? state.contributions.find((entry) => entry.id === showing.id) : null;
     if (showing?.kind === 'candidate' && (!candidateSource || FINAL.has(candidateSource.status))) stopShowing();
@@ -2363,12 +2607,17 @@ export function mountCollaboration(container, bridge) {
     refresh,
     revealForObject,
     showAll,
+    noteViewIntent() { viewIntent += 1; },
     // Re-renders controls that depend on the manual editor's state.
     sync() {
       reviewForm?.refreshControls();
+      revisionForm?.sync?.();
     },
     dispose() {
       disposed = true;
+      revisionGeneration += 1;
+      revisionForm?.abort?.abort();
+      revisionForm = null;
       readToken += 1;
       releaseReviewPhoto();
       if (showing) {

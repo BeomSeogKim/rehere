@@ -747,6 +747,22 @@ export class ReconstructionStore {
     return photos;
   }
 
+  // Callers hold the mutex. Every original photo of the scene, with current
+  // place use, and every derived file must still match its recorded checksum.
+  async assertSceneFiles(manifest) {
+    for (const binding of geometrySources(manifest)) {
+      const original = await this.verifiedOriginal(manifest.draftId, binding.sourceId, 'place');
+      if (original.source.sha256 !== binding.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
+    }
+    if (isComposition(manifest)) {
+      await this.compositionAssets(manifest);
+      return;
+    }
+    const assets = path.join(this.jobDir(manifest.draftId, manifest.id), 'assets');
+    if (!(await safeJobDirectory(assets, this.rootDir)) || manifest.derivedAssets?.length !== Object.keys(OUTPUTS).length) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+    for (const name of Object.keys(OUTPUTS)) await verifiedAsset(path.join(assets, name), manifest.derivedAssets.find((entry) => entry.name === name), OUTPUTS[name]);
+  }
+
   async compositionAssets(manifest) {
     const folder = path.join(this.jobDir(manifest.draftId, manifest.id), 'assets');
     if (!(await safeJobDirectory(folder, this.rootDir)) || manifest.derivedAssets?.length !== 3) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);

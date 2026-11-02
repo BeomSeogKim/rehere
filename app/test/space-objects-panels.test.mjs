@@ -465,7 +465,7 @@ describe('sharing follows the recollection panel', () => {
     await settle();
     assert.equal(ui.posts(`/contributions/${CID}/review`)[0].body.photoReviewed, true);
 
-    assert.equal(historyReads(), before + 1, 'the share choices were read again once, after the change');
+    assert.equal(historyReads(), before + 2, 'sharing and story choices each refresh after the change');
     const views = ui.find((node) => node.tag === 'fieldset' && node.children[0]?.textContent === 'Views to share')[0];
     const alternative = views.findAll((node) => node.tag === 'label' && /Mina’s alternative/.test(node.textContent))[0];
     assert.ok(alternative, 'the new alternative is offered');

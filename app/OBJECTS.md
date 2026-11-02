@@ -231,6 +231,10 @@ two named visible surfaces. Background intersections, hidden backs, solid
 volumes, a movement's path and physical room boundaries are not checked. The
 relative depth is an estimate, so a clear result is not physical clearance.
 
+To refine a saved alternative without changing the current scene, use
+[owner revisions](COLLABORATION.md#revise-a-saved-reconstruction). They keep
+the selected parent's other object, rule and relative scale.
+
 ## Planning, recollections and stories
 
 A memory proposal names one confirmed object. The planner sees both objects
@@ -272,6 +276,8 @@ authority, source-use and contribution checks.
 | `POST /<job>/relationship` | `requestId`, `baseVersion`, `relationship` (rule or `null`), `confirmed: true` |
 | `POST /<job>/undo` | `requestId`, `baseVersion`, `targetVersion`, `ruleChangeConfirmed` |
 | `POST /<job>/proposals` | the existing fields plus `targetId` |
+| `GET /<job>/variants/<parent>/revision-context` | Verified owner revision context; see [owner revisions](COLLABORATION.md#revise-a-saved-reconstruction) |
+| `POST /<job>/variants/<parent>/revisions` | `requestId`, `baseEraRevision`, one-object `transform`, `timeMode`, `confirmed: true`; see [owner revisions](COLLABORATION.md#revise-a-saved-reconstruction) |
 | `GET /<job>/objects/<object>/region-links` | Current owner links and their availability |
 | `POST /<job>/objects/<object>/region-links` | `requestId`, `baseRevision`, `action` (`set` or `remove`), `sourceId`, `box` (or `null` for removal), `confirmed: true` |
 | `GET /<job>/region-reference/<source>` | Place-permitted reference dimensions in stored pixel order |
