@@ -106,7 +106,7 @@ standard error. After exit `5` the directory may hold some outputs but no
 | `mask.png` | Mask at the source resolution: binary, or for two objects 0 background, 63 unassigned, 127 object 1, 255 object 2 |
 | `mask-overlay.jpg` | Mask tinted over the texture for review; two objects get two tints, outlines and white unassigned pixels, with no text |
 | `surface.json` | Surface grid for the scene builder |
-| `summary.json` | Hashes, box, orientation, coverage, devices, timings, model revisions |
+| `summary.json` | Hashes, box, orientation, mask coverage, surviving foreground/background triangles, devices, timings, model revisions |
 
 `summary.json` is written last; its absence means the output set is incomplete.
 `surface.json` records the source ID, the SHA-256 of the original input bytes,
@@ -118,7 +118,9 @@ and `source.selected_objects` hold each ID, label and box, and `regions` gives
 every grid cell `-1` (unassigned), `0` (background), `1` or `2` instead of a
 binary `foreground`. `summary.json` adds per-object coverage and triangle
 counts, background triangles, the overlap pixel count and full-precision ratio,
-and the `mask.png` legend. One-box output is unchanged.
+and the `mask.png` legend. A single-object summary records `mask_coverage`,
+`foreground_triangles` and `background_triangles` beside its unchanged binary
+`foreground` surface.
 
 ## Method and limits
 
@@ -135,10 +137,10 @@ and the `mask.png` legend. One-box output is unchanged.
 - The 2nd-98th percentiles of relative inverse depth map to pseudo-depth from 2
   to 5 arbitrary units on a 256-column grid with a 55-degree horizontal field of
   view. This is not metric or calibrated depth.
-- A mask covering under 1% or over 60% of the grid is rejected, as is any
-  result where the scene builder would keep no foreground or no background
-  triangle after its mask-boundary and depth-span rules. Non-finite or
-  constant depth is rejected.
+- A single-object mask covering over 60% of the grid is rejected. Its foreground
+  must keep at least 32 triangles and its background at least one after the
+  scene builder's mask-boundary and depth-span rules; there is no lower
+  percentage requirement. Non-finite or constant depth is rejected.
 - Two objects: depth runs once and SAM2 once with both boxes. Pixels in both
   masks become unassigned rather than background; an overlap above 1% of the
   smaller mask is rejected. An unassigned pixel also unassigns every grid node

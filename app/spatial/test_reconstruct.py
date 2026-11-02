@@ -95,12 +95,57 @@ class SurfaceTests(unittest.TestCase):
         background, foreground = reconstruct.surviving_triangles(self.smooth, block_mask())
         self.assertEqual(foreground, 72)
         self.assertGreater(background, 0)
-        self.assertAlmostEqual(reconstruct.check_surface(self.smooth, block_mask()), 49 / 400)
+        coverage, triangles = reconstruct.check_surface(self.smooth, block_mask())
+        self.assertAlmostEqual(coverage, 49 / 400)
+        self.assertEqual(triangles, (background, foreground))
 
-    def test_rejects_coverage_outside_range(self):
-        for stop in (1, 17):
-            with self.subTest(stop=stop), self.assertRaises(reconstruct.ProposalRejected):
-                reconstruct.check_surface(self.smooth, block_mask(start=0, stop=stop))
+    def test_accepts_clean_mask_under_one_percent_with_enough_triangles(self):
+        mask = block_mask(size=100, start=20, stop=26)
+        coverage, (background, foreground) = reconstruct.check_surface(np.full(mask.shape, 3.0), mask)
+        self.assertLess(coverage, 0.01)
+        self.assertEqual(foreground, 50)
+        self.assertGreater(background, 0)
+
+    def test_accepts_exactly_32_triangles_and_rejects_31(self):
+        mask = block_mask(size=100, start=20, stop=25)
+        depth = np.full(mask.shape, 3.0)
+        self.assertEqual(reconstruct.check_surface(depth, mask)[1][1], 32)
+        mask[20, 20] = False
+        with self.assertRaisesRegex(reconstruct.ProposalRejected, "only 31 renderable triangles, fewer than 32"):
+            reconstruct.check_surface(depth, mask)
+
+    def test_rejects_empty_thin_and_speckled_masks_below_triangle_floor(self):
+        empty = np.zeros((100, 100), bool)
+        thin = empty.copy()
+        thin[20:22, 20:36] = True
+        speckled = empty.copy()
+        speckled[::2, ::2] = True
+        for name, mask, count in (("empty", empty, 0), ("thin", thin, 30), ("speckled", speckled, 0)):
+            with self.subTest(name), self.assertRaisesRegex(reconstruct.ProposalRejected, f"only {count} renderable triangles, fewer than 32"):
+                reconstruct.check_surface(np.full(mask.shape, 3.0), mask)
+
+    def test_keeps_sixty_percent_upper_bound(self):
+        mask = np.zeros((20, 20), bool)
+        mask[:12] = True
+        self.assertEqual(reconstruct.check_surface(self.smooth, mask)[0], 0.6)
+        mask[12, 0] = True
+        with self.assertRaisesRegex(reconstruct.ProposalRejected, "over 60%"):
+            reconstruct.check_surface(self.smooth, mask)
+
+    def test_accepts_one_surviving_background_triangle(self):
+        mask = np.zeros((8, 8), bool)
+        mask[1:7, 1:7] = True
+        depth = np.where(np.indices(mask.shape).sum(axis=0) % 2, 5.0, 2.0)
+        depth[mask] = 3.0
+        depth[0, 0] = depth[0, 1] = depth[1, 0] = 3.0
+        self.assertEqual(reconstruct.check_surface(depth, mask)[1], (1, 50))
+
+    def test_rejects_foreground_with_too_few_span_valid_triangles(self):
+        mask = block_mask()
+        depth = np.full(mask.shape, 3.0)
+        depth[mask] = np.where(np.indices(mask.shape).sum(axis=0) % 2, 5.0, 2.0)[mask]
+        with self.assertRaisesRegex(reconstruct.ProposalRejected, "only 0 renderable triangles, fewer than 32"):
+            reconstruct.check_surface(depth, mask)
 
     def test_rejects_regions_whose_triangles_all_exceed_depth_span(self):
         checkerboard = np.where(np.indices((20, 20)).sum(axis=0) % 2, 5.0, 2.0)
@@ -154,6 +199,58 @@ class WriteTests(unittest.TestCase):
         with unittest.mock.patch.object(reconstruct, "reconstruct", side_effect=error), contextlib.redirect_stderr(stderr):
             self.assertEqual(reconstruct.main(argv), reconstruct.EXIT_WRITE)
         self.assertEqual(stderr.getvalue(), "error: cannot write out/mask.png: Permission denied\n")
+
+
+class SummaryTests(unittest.TestCase):
+    def reconstruct_with_proposals(self, root, mask, box, depth=None):
+        torch = unittest.mock.MagicMock(__version__="synthetic")
+        torch.backends.mps.is_available.return_value = False
+        torch.nn.functional.interpolate.return_value.__getitem__.return_value.numpy.return_value = np.linspace(0, 1, 256 * 256).reshape(256, 256)
+        depth_processor, depth_model, mask_processor, mask_model = [unittest.mock.MagicMock() for _ in range(4)]
+        depth_processor.return_value.to.return_value = {}
+        mask_processor.return_value = {"original_sizes": unittest.mock.MagicMock()}
+        processed_mask = unittest.mock.MagicMock()
+        processed_mask.__getitem__.return_value.numpy.return_value = mask
+        mask_processor.post_process_masks.return_value = [processed_mask]
+        loaders = (torch, object(), object(), object(), object())
+        image = root / "photo.png"
+        image.write_bytes(encode(Image.new("RGB", (mask.shape[1], mask.shape[0])), "PNG"))
+        depth_patch = (unittest.mock.patch.object(reconstruct, "pseudo_depth", return_value=(depth, np.zeros_like(depth)))
+                       if depth is not None else contextlib.nullcontext())
+        with unittest.mock.patch.object(reconstruct, "_load_models", return_value=loaders), unittest.mock.patch.object(
+                reconstruct, "_pretrained", side_effect=[depth_processor, depth_model, mask_processor, mask_model]), depth_patch:
+            return reconstruct.reconstruct(image, root / "output", SOURCE_ID, box=box)
+
+    def test_published_summary_reports_actual_surviving_triangle_counts(self):
+        mask = np.zeros((64, 64), bool)
+        mask[20:24, 20:24] = True
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = self.reconstruct_with_proposals(root, mask, [20, 20, 24, 24])
+            output = root / "output"
+            surface = json.loads((output / "surface.json").read_text())
+            depth = np.array(surface["depth"]).reshape(surface["height"], surface["width"])
+            grid_mask = np.array(surface["foreground"], bool).reshape(depth.shape)
+            background, foreground = reconstruct.surviving_triangles(depth, grid_mask)
+            self.assertLess(summary["mask_coverage"], 0.01)
+            self.assertGreaterEqual(foreground, 32)
+            self.assertEqual(summary["mask_coverage"], round(float(grid_mask.mean()), 5))
+            self.assertEqual(summary["foreground_triangles"], foreground)
+            self.assertEqual(summary["background_triangles"], background)
+            self.assertEqual(json.loads((output / "summary.json").read_text()), summary)
+
+    def test_admission_uses_six_decimal_depths_at_the_span_boundary(self):
+        mask = np.zeros((256, 256), bool)
+        mask[80:85, 80:85] = True
+        depth = np.full(mask.shape, 3.00000049)
+        depth[80, 80] = 3.3500004
+        self.assertEqual(reconstruct.surviving_triangles(depth, mask)[1], 32)
+        self.assertEqual(reconstruct.surviving_triangles(np.round(depth, 6), mask)[1], 31)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(reconstruct.ProposalRejected, "only 31 renderable triangles, fewer than 32"):
+                self.reconstruct_with_proposals(root, mask, [80, 80, 85, 85], depth)
+            self.assertFalse((root / "output").exists())
 
 
 class ImageTests(unittest.TestCase):

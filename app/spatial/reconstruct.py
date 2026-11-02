@@ -25,7 +25,7 @@ MAX_PIXELS = 32_000_000
 GRID_WIDTH = 256
 MAX_GRID_CELLS = 262_144
 NEAR, FAR = 2.0, 5.0
-COVERAGE_RANGE = (0.01, 0.6)
+MAX_MASK_COVERAGE = 0.6
 MAX_TRIANGLE_DEPTH_SPAN = 0.35
 # Two-object scenes (schema_version 2). Region values: -1 void (ambiguous mask
 # overlap, never drawn), 0 background, 1 and 2 the objects in request order.
@@ -312,15 +312,16 @@ def two_object_overlay(rgb, regions):
 
 
 def check_surface(depth, grid_mask):
-    """Reject proposals the scene builder cannot turn into two non-empty meshes."""
+    """Require a renderable foreground and a non-empty background mesh."""
     coverage = float(grid_mask.mean())
-    low, high = COVERAGE_RANGE
-    if not low <= coverage <= high:
-        raise ProposalRejected(f"mask covers {coverage:.1%} of the image, outside {low:.0%}-{high:.0%}; choose a different box")
+    if coverage > MAX_MASK_COVERAGE:
+        raise ProposalRejected(f"mask covers {coverage:.1%} of the image, over {MAX_MASK_COVERAGE:.0%}; choose a different box")
     background, foreground = surviving_triangles(depth, grid_mask)
-    if not background or not foreground:
-        raise ProposalRejected("depth and mask leave no renderable foreground or background surface; choose a different box or photograph")
-    return coverage
+    if foreground < MIN_REGION_TRIANGLES:
+        raise ProposalRejected(f"foreground keeps only {foreground} renderable triangles, fewer than {MIN_REGION_TRIANGLES}; choose a different box or photograph")
+    if not background:
+        raise ProposalRejected("depth and mask leave no renderable background surface; choose a different box or photograph")
+    return coverage, (background, foreground)
 
 
 def write_outputs(output, files):
@@ -428,7 +429,7 @@ def reconstruct(image_path, output, source_id, box=None, objects=None):
     mask_image = Image.fromarray(mask.astype("uint8") * 255)
     grid_mask = np.asarray(mask_image.resize((grid_width, grid_height), Image.Resampling.NEAREST)) > 0
     rounded_depth = np.round(depth, 6)
-    coverage = check_surface(rounded_depth, grid_mask)
+    coverage, (background_triangles, foreground_triangles) = check_surface(rounded_depth, grid_mask)
 
     texture = _encode(rgb, "JPEG", quality=92)
     overlay = Image.composite(Image.blend(rgb, Image.new("RGB", rgb.size, (30, 150, 220)), 0.45), rgb, mask_image)
@@ -468,6 +469,8 @@ def reconstruct(image_path, output, source_id, box=None, objects=None):
         "box_xyxy": box,
         "grid": [grid_width, grid_height],
         "mask_coverage": round(coverage, 5),
+        "foreground_triangles": foreground_triangles,
+        "background_triangles": background_triangles,
         "evidence": "model proposals; not human-confirmed observations",
         "depth_device": depth_device,
         "mask_device": "cpu",
