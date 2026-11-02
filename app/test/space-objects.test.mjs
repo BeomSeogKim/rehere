@@ -133,6 +133,36 @@ async function openScene(ui) {
   await settle();
 }
 
+describe('selected object inspection', () => {
+  it('labels a corrected outline and discards it when the selected object changes', async () => {
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, job({ outline: { kind: 'owner-corrected' } })));
+    const ui = await mount({ sceneId: JOB });
+    const trigger = ui.button('Inspect selected object');
+    const details = ui.find((node) => node.className === 'source-details object-inspection')[0];
+    trigger.dispatch('click');
+    assert.match(details.textContent, /Choose an object first/);
+    ui.button('A: Counter').dispatch('click');
+    trigger.dispatch('click');
+    await settle();
+    const image = details.findAll((node) => node.tag === 'img')[0];
+    const late = image.onload;
+    await late();
+    assert.equal(image.hidden, false);
+    assert.match(details.textContent, /A: Counter is the blue area/);
+    assert.match(details.textContent, /owner correction/);
+    ui.button('B: Flour stack').dispatch('click');
+    assert.equal(image.hidden, true);
+    assert.equal(details.open, false);
+    await late();
+    assert.equal(image.hidden, true, 'the earlier object cannot reappear');
+    trigger.dispatch('click');
+    await settle();
+    await image.onload();
+    assert.match(details.textContent, /B: Flour stack is the orange area/);
+    assert.equal(requests.filter((entry) => entry.method !== 'GET').length, 0);
+  });
+});
+
 describe('two-object build selection', () => {
   it('offers an exact ready build for review without confirming its outlines', async () => {
     const ui = await mount();

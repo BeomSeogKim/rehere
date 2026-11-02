@@ -276,6 +276,103 @@ describe('place landing', () => {
   });
 });
 
+describe('inspecting the selected object', () => {
+  it('checks the exact saved scene before showing the outline and returns focus without a write', async () => {
+    const view = await openScene();
+    const trigger = view.button('Inspect selected object');
+    const details = view.find((node) => node.className === 'source-details object-inspection')[0];
+    const image = details.findAll((node) => node.tag === 'img')[0];
+    let focused = false;
+    trigger.focus = () => { focused = true; };
+    trigger.dispatch('click');
+    await settle();
+    assert.equal(details.open, true);
+    assert.equal(image.hidden, true, 'the image is hidden until it loads and the scene is checked again');
+    assert.match(image.src, /mask-overlay\.jpg\?inspect=/);
+    await image.onload();
+    assert.equal(image.hidden, false);
+    const depth = details.findAll((node) => node.tag === 'img')[1];
+    assert.equal(depth.hidden, true, 'depth waits for its own load and current-scene check');
+    await depth.onload();
+    assert.equal(depth.hidden, false);
+    assert.match(details.textContent, /model-proposed outline/);
+    assert.match(details.textContent, /If the highlighted area is not the object you meant/);
+    view.button('Return to this place').dispatch('click');
+    assert.equal(details.open, false);
+    assert.equal(image.hidden, true);
+    assert.equal(focused, true);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('hides both images if a delayed depth load finds the scene restricted', async () => {
+    const view = await openScene();
+    view.button('Inspect selected object').dispatch('click');
+    await settle();
+    const details = view.find((node) => node.className === 'source-details object-inspection')[0];
+    const [image, depth] = details.findAll((node) => node.tag === 'img');
+    await image.onload();
+    assert.equal(image.hidden, false);
+    assert.equal(depth.hidden, true);
+    job.usageBlocked = true;
+    await depth.onload();
+    assert.equal(image.hidden, true);
+    assert.equal(depth.hidden, true);
+    assert.match(details.textContent, /unavailable/);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('does not show cached or late images after a restriction, load failure or close', async () => {
+    const view = await openScene();
+    const trigger = view.button('Inspect selected object');
+    const details = view.find((node) => node.className === 'source-details object-inspection')[0];
+    const image = details.findAll((node) => node.tag === 'img')[0];
+    job.usageBlocked = true;
+    trigger.dispatch('click');
+    await settle();
+    assert.equal(image.hidden, true);
+    assert.match(details.textContent, /unavailable/);
+    job.usageBlocked = false;
+    trigger.dispatch('click');
+    await settle();
+    job.usageBlocked = true;
+    await image.onload();
+    assert.equal(image.hidden, true, 'a restriction after the image request prevents display');
+    assert.match(details.textContent, /unavailable/);
+    job.usageBlocked = false;
+    trigger.dispatch('click');
+    await settle();
+    image.onerror();
+    assert.equal(image.hidden, true);
+    assert.match(details.textContent, /could not be shown/);
+    trigger.dispatch('click');
+    await settle();
+    const late = image.onload;
+    view.button('Return to this place').dispatch('click');
+    await late();
+    assert.equal(image.hidden, true);
+    assert.equal(details.open, false);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('opens scene choices for a wrong object without building or altering the scene', async () => {
+    const view = await openScene();
+    const others = view.find((node) => node.className === 'space-others')[0];
+    let focused = false;
+    others.children[0].focus = () => { focused = true; };
+    view.button('Inspect selected object').dispatch('click');
+    await settle();
+    view.button('Choose another scene').dispatch('click');
+    assert.equal(others.open, true);
+    assert.equal(focused, true);
+    assert.equal(posts.length, 0);
+    assert.equal(view.canvases().length, 1);
+    view.space.dispose();
+  });
+});
+
 describe('viewer setup failures release what was created', () => {
   it('releases the renderer and texture when the surface is malformed', async () => {
     surfaceBody = { ...surface(), depth: surface().depth.map(() => -1) };

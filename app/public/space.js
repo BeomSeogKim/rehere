@@ -143,6 +143,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   let sharesPanel = null;
   let storiesPanel = null;
   let blockedPanel = null;
+  let inspection = null;
   let currentPlace = draft.place;
   let placeHeading = null;
   // The selected object's links to regions in other photos, inside its photo
@@ -245,6 +246,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   function closePanel() {
     panelGeneration += 1;
     placeHeading = null;
+    inspection?.dispose();
+    inspection = null;
     if (handoff) status.textContent = '';
     handoff = null;
     readyAction.replaceChildren();
@@ -611,6 +614,118 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     return provider ? [el('p', { className: 'hint', textContent: `Photo provided by ${provider}` })] : [];
   };
 
+  function inspectObject({ job, jobId, token, state, describe, depth = false }) {
+    let generation = 0;
+    let shown = null;
+    const summary = el('summary', { textContent: 'Selected object in the photo' });
+    const status = el('p', { className: 'hint', role: 'status' });
+    const image = el('img', { className: 'space-proposal', hidden: true });
+    const depthImage = depth ? el('img', { className: 'space-proposal', hidden: true, alt: 'Relative depth estimate for the source photo as a greyscale image' }) : null;
+    const trigger = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect selected object' });
+    const back = el('button', { type: 'button', className: 'secondary', textContent: 'Return to this place' });
+    const choose = el('button', { type: 'button', className: 'secondary', textContent: 'Choose another scene' });
+    const details = el('details', { className: 'source-details object-inspection' }, [
+      summary, status, image,
+      el('p', { className: 'hint', textContent: 'If the highlighted area is not the object you meant, choose another scene or build one with a different selection. Nothing changes here.' }),
+      el('div', { className: 'actions' }, [back, choose]),
+      ...(depthImage ? [depthImage] : []),
+    ]);
+    const clear = () => {
+      generation += 1;
+      shown = null;
+      image.hidden = true;
+      image.onload = null;
+      image.onerror = null;
+      image.removeAttribute('src');
+      if (depthImage) { depthImage.hidden = true; depthImage.onload = null; depthImage.onerror = null; depthImage.removeAttribute('src'); }
+    };
+    const current = (mine, snapshot) => {
+      const now = state();
+      return !disposed && token === panelGeneration && generation === mine && details.open &&
+        now.target === snapshot.target && now.version === snapshot.version && now.ready;
+    };
+    const check = async (mine, snapshot) => {
+      if (!current(mine, snapshot)) return false;
+      const result = await request(`${base}/${jobId}`, { cache: 'no-store', credentials: 'same-origin' });
+      if (!current(mine, snapshot)) return false;
+      return Boolean(result.ok && result.body?.id === jobId && result.body.status === 'ready' && !result.body.usageBlocked &&
+        result.body.sourceId === job.sourceId && result.body.edit?.version === snapshot.version);
+    };
+    const close = (focus = false) => {
+      clear();
+      details.open = false;
+      if (focus) trigger.focus();
+    };
+    const open = async () => {
+      clear();
+      const snapshot = state();
+      shown = snapshot;
+      details.open = true;
+      summary.focus();
+      summary.scrollIntoView?.({ block: 'start' });
+      if (!snapshot.target || !snapshot.ready) {
+        status.textContent = snapshot.target ? 'Load the current saved scene before inspecting this selection.' : 'Choose an object first.';
+        return;
+      }
+      const mine = generation;
+      status.textContent = 'Checking this scene’s photo and outline…';
+      if (!(await check(mine, snapshot))) {
+        if (current(mine, snapshot)) status.textContent = 'This photo or outline is unavailable, or the saved scene changed. Reopen the scene to check.';
+        return;
+      }
+      const description = describe(snapshot.target);
+      image.alt = description.alt;
+      const verifiedLoad = async (element, onVerified = () => {}) => {
+        if (!(await check(mine, snapshot))) {
+          if (current(mine, snapshot)) {
+            clear();
+            status.textContent = 'This photo or outline is unavailable, or the saved scene changed. Reopen the scene to check.';
+          }
+          return;
+        }
+        if (!current(mine, snapshot)) return;
+        element.hidden = false;
+        onVerified();
+      };
+      image.onload = () => verifiedLoad(image, () => {
+        status.textContent = description.text;
+        if (depthImage) {
+          depthImage.onload = () => verifiedLoad(depthImage);
+          depthImage.onerror = () => {
+            if (!current(mine, snapshot)) return;
+            depthImage.hidden = true;
+            status.textContent = `${description.text} The depth image could not be shown.`;
+          };
+          depthImage.src = `${assetUrl(jobId, 'depth-preview.png')}?inspect=${crypto.randomUUID()}`;
+        }
+      });
+      image.onerror = () => {
+        if (!current(mine, snapshot)) return;
+        image.removeAttribute('src');
+        status.textContent = 'The selected object’s photo or outline could not be shown. The scene is unchanged.';
+      };
+      image.src = `${assetUrl(jobId, 'mask-overlay.jpg')}?inspect=${crypto.randomUUID()}`;
+    };
+    trigger.addEventListener('click', open);
+    summary.addEventListener('click', (event) => { event.preventDefault(); if (details.open) close(); else open(); });
+    back.addEventListener('click', () => close(true));
+    choose.addEventListener('click', () => {
+      close();
+      others.open = true;
+      others.children[0].focus();
+      others.children[0].scrollIntoView?.({ block: 'start' });
+    });
+    return {
+      trigger, details,
+      sync() {
+        if (!details.open || !shown) return;
+        const now = state();
+        if (!now.ready || now.target !== shown.target || now.version !== shown.version) close(details.contains(document.activeElement));
+      },
+      dispose() { close(); },
+    };
+  }
+
   async function openScene(jobId) {
     closePanel();
     const token = panelGeneration;
@@ -686,14 +801,6 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const photoSide = photographedSideControls();
     const side = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect from the side' });
     const explore = createExploreToggle();
-    const [x1, y1, x2, y2] = job.box;
-    const proposals = el('details', { className: 'source-details' }, [
-      el('summary', { textContent: 'Model proposals: outline and depth' }),
-      el('p', { className: 'hint', textContent: `Your box: ${x1}, ${y1} to ${x2}, ${y2} pixels. The outline and depth below are model proposals, not confirmed observations.` }),
-      el('img', { className: 'space-proposal', src: assetUrl(jobId, 'mask-overlay.jpg'), alt: `Photo ${number} with the proposed outline of the selected object tinted blue` }),
-      el('img', { className: 'space-proposal', src: assetUrl(jobId, 'depth-preview.png'), alt: `Relative depth estimate for photo ${number} as a greyscale image` }),
-    ]);
-
     const session = createEditSession(job.edit, () => crypto.randomUUID());
     const axes = [
       ['Left / right', OFFSET_LIMIT, 0.01],
@@ -771,6 +878,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       reload.hidden = !(session.uncertain || conflict);
       reload.disabled = busy;
       photoSide.button.disabled = !viewer || Boolean(comparison);
+      inspection?.sync();
       memoryEdit?.sync();
       collaborationPanel?.sync();
     };
@@ -1089,12 +1197,22 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       } else focusSection(memorySection);
     });
     visitAction.addEventListener('click', () => focusSection(sharesSection, true));
+    inspection = inspectObject({
+      job, jobId, token, depth: true,
+      state: () => ({ target: 'selected-foreground', version: session.saved.version, ready: !session.uncertain && !conflict && !saving && !reloading }),
+      describe: () => ({
+        text: job.outline?.kind === 'owner-corrected'
+          ? 'The blue area is the saved owner-corrected outline on a copy of the photo. Check that it matches the object you mean; depth is still an estimate.'
+          : 'The blue area is the model-proposed outline on a copy of the photo. Check that it matches the object you mean; it may include the wrong area.',
+        alt: `Photo ${number} with the selected object’s ${job.outline?.kind === 'owner-corrected' ? 'owner-corrected' : 'model-proposed'} outline tinted blue`,
+      }),
+    });
     const placeLanding = el('section', { className: 'place-landing', 'aria-label': 'This place' }, [
       el('h4', { textContent: 'This place' }),
       el('p', { className: 'hint', textContent: 'The scene begins with one photograph. Its shape and depth are estimates; a memory is someone’s account.' }),
       placeWords,
       fullWordsDetails,
-      el('div', { className: 'actions' }, [placeAction, originalPhoto, visitAction]),
+      el('div', { className: 'actions' }, [placeAction, inspection.trigger, originalPhoto, visitAction]),
       placeStatus,
     ]);
     placeLanding.setAttribute('aria-label', 'This place');
@@ -1147,11 +1265,11 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           placeLanding,
           manualEdit,
           otherActions,
+          inspection.details,
           memorySection,
           collaborationSection,
           storiesSection,
           sharesSection,
-          proposals,
         ],
       ),
     );
@@ -1658,6 +1776,16 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     // settled only by an exact retry or by loading the saved version.
     let ruleSaving = false;
     let ruleUncertain = false;
+    if (!composition) {
+      inspection = inspectObject({
+        job, jobId, token,
+        state: () => ({ target: selected, version: session.saved.version, ready: !session.uncertain && !conflict && !saving && !reloading && !ruleSaving && !ruleUncertain }),
+        describe: (id) => ({
+          text: `${nameOf(id)} is the ${letterOf(id) === 'A' ? 'blue' : 'orange'} area on this photo copy. ${job.outline?.kind === 'owner-corrected' ? 'The outline includes an owner correction.' : 'The outline was proposed by a model.'} Check that it matches the object you mean. White overlap is left empty.`,
+          alt: `Photo ${number} with ${nameOf(id)} shown in ${letterOf(id) === 'A' ? 'blue' : 'orange'} and the other object in a different colour`,
+        }),
+      });
+    }
     const axes = composition ? poseAxes.map(([name, min, max, step]) => [name, max, step, min]) : [
       ['Left / right', OFFSET_LIMIT, 0.01],
       ['Down / up', OFFSET_LIMIT, 0.01],
@@ -1747,7 +1875,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       const object = objects.find((entry) => entry.id === selected);
       const sourcePhoto = photoFor(selected);
       evidence.replaceChildren(
-        el('p', { className: 'hint', textContent: composition ? `Source photo ${sourcePhoto.number} for ${nameOf(selected)}. This photographed surface retains the source depth estimate; its pose and relative scale are owner assumptions.` : `Photo evidence for ${nameOf(selected)}: the box you drew. The outline inside it is the model’s proposal.` }),
+        el('p', { className: 'hint', textContent: composition ? `Source photo ${sourcePhoto.number} for ${nameOf(selected)}. This photographed surface retains the source depth estimate; its pose and relative scale are owner assumptions.` : `Photo evidence for ${nameOf(selected)}: the box you drew. ${job.outline?.kind === 'owner-corrected' ? 'Its saved outline includes an owner correction.' : 'The outline inside it is the model’s proposal.'}` }),
         el('div', { className: 'anchor-frame' }, [el('img', { src: sourcePhoto.url, alt: `Photo ${sourcePhoto.number} with the box for ${nameOf(selected)}` }), boxOver(object)]),
       );
       const links = el('div');
@@ -1860,6 +1988,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       ruleSave.disabled = ruleUncertain ? ruleSaving || reloading : !clean || ruleConfirm.checked !== true;
       ruleRemove.disabled = ruleUncertain || !clean || !rule || ruleConfirm.checked !== true;
       ruleOrder.disabled = ruleSaving || ruleUncertain;
+      inspection?.sync();
       memoryEdit?.sync();
       collaborationPanel?.sync();
     }
@@ -2126,6 +2255,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         ]),
         // The memory panel, with any face-anchor point and its confirmation,
         // stays open; only the general photo evidence can be collapsed.
+        ...(inspection ? [inspection.trigger, inspection.details] : []),
         memorySection,
         evidenceBox,
         collaborationSection,
