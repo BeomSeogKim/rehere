@@ -223,6 +223,32 @@ describe('composition creation', () => {
     assert.deepEqual(sent[0].body.context, { keep: false, bounds: null });
   });
 
+  it('keeps an unresolved composition warning through a background completion, its list failure and later navigation', async () => {
+    const BACKGROUND = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    const building = { id: BACKGROUND, sourceId: SOURCES[0], status: 'processing', createdAt: '2026-11-01T00:00:00Z', usageBlocked: false };
+    routes[`GET ${BASE}`] = () => Promise.resolve(json(200, [...parents, job(), building]));
+    let finish;
+    routes[`GET ${BASE}/${BACKGROUND}`] = () => new Promise((resolve) => { finish = resolve; });
+    const ui = await mount({ open: false });
+    assert.ok(finish, 'the background build is being polled');
+    await prepareComposition(ui, { context: false });
+    const check = ui.find((node) => node.tag === 'label' && /I inspected the two surfaces/.test(node.textContent))[0].children[0];
+    check.checked = true; check.dispatch('change');
+    routes[`POST ${BASE}`] = () => Promise.resolve(json(503, { error: 'Unknown save' }));
+    ui.button('Save this composition').dispatch('click'); await settle();
+    ui.button('Cancel').dispatch('click'); await settle();
+    const status = ui.container.children.find((node) => node.role === 'status');
+    const warning = 'The composition save outcome is unknown. Check the refreshed saved scene list before starting another composition.';
+    assert.equal(status.textContent, warning);
+    routes[`GET ${BASE}`] = () => Promise.resolve(json(503, null));
+    finish(json(200, { ...building, status: 'ready' })); await settle();
+    assert.equal(status.textContent, warning, 'neither the completion nor its list failure replaces the warning');
+    const background = ui.find((node) => node.className === 'hint space-background')[0];
+    assert.equal(background.textContent, 'Photo 1: A partial scene finished building. The saved scene list could not be loaded; reload the page to see it.');
+    ui.button('Build a partial scene').dispatch('click'); await settle();
+    assert.equal(status.textContent, warning, 'a later navigation keeps the warning');
+  });
+
   it('previews two distinct stored surfaces and saves exact explicit poses with optional fixed context', async () => {
     const ui = await mount({ open: false });
     ui.button('Compose objects from two photos').dispatch('click'); await settle();

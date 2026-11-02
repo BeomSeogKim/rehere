@@ -38,10 +38,14 @@ let jobs;
 // the rotated 801x1007 as naturalWidth/naturalHeight.
 let sizeResponse;
 let sizeRequests;
+let jobResponse;
+let reads;
+let listResponse;
 
 before(async () => {
   globalThis.document = { createElement: (tag) => new FakeElement(tag) };
   globalThis.fetch = async (url, options = {}) => {
+    reads.push({ url, method: options.method ?? 'GET' });
     if (options.method === 'POST') {
       const pending = deferred();
       posts.push({ url, body: JSON.parse(options.body), respond: pending.resolve });
@@ -52,7 +56,8 @@ before(async () => {
       return sizeResponse(url);
     }
     if (url === '/api/invitations') return json(200, []);
-    if (url.endsWith('/reconstructions')) return json(200, jobs);
+    if (url.endsWith('/reconstructions')) return listResponse ? listResponse() : json(200, jobs);
+    if (url.endsWith(JOB_ID) && jobResponse) return jobResponse();
     return json(200, jobs.find((job) => url.endsWith(job.id)) ?? manifest('ready'));
   };
   ({ mountSpace } = await import('../public/space.js'));
@@ -74,10 +79,14 @@ function mount(sources = { [SOURCE_A]: granted, [SOURCE_B]: granted }) {
   posts = [];
   jobs = [];
   sizeRequests = [];
+  reads = [];
+  jobResponse = null;
+  listResponse = null;
   sizeResponse = () => json(200, { width: 1007, height: 801 });
   const container = new FakeElement('section');
   const draft = { id: DRAFT_ID, photos: [{ name: 'photo-1.jpg', sourceId: SOURCE_A }, { name: 'photo-2.jpg', sourceId: SOURCE_B }] };
-  const space = mountSpace(container, { draft, sourceFor: (id) => sources[id] ?? null });
+  const calls = [];
+  const space = mountSpace(container, { draft, sourceFor: (id) => sources[id] ?? null, onScene: (id) => calls.push(id) });
   mounted.push(space);
   const find = (predicate) => container.findAll(predicate);
   // Messages of the build or scene panel, not of the invitation manager.
@@ -102,12 +111,370 @@ function mount(sources = { [SOURCE_A]: granted, [SOURCE_B]: granted }) {
   };
   const buildButton = () => button('Build partial scene')[0];
   const message = () => panel().findAll((node) => node.className === 'form-message')[0]?.textContent;
-  return { space, container, find, button, heading, select, open, typeBox, image, inputs, buildButton, message };
+  return { space, container, find, button, heading, select, open, typeBox, image, inputs, buildButton, message, calls };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+const statusLine = (view) => view.container.children.find((node) => node.role === 'status').textContent;
+const background = (view) => view.find((node) => node.className === 'hint space-background')[0].textContent;
 
 describe('partial scene build panel', () => {
+  it('offers the exact ready build beside its status without opening it automatically', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    const ready = { ...manifest('ready'), usageBlocked: false };
+    jobs = [ready];
+    posts[0].respond(json(202, ready));
+    await settle();
+    const handoff = view.find((node) => node.className === 'actions space-ready')[0];
+    assert.match(view.container.textContent, /Photo 1: Your partial scene is ready to review/);
+    assert.equal(handoff.children[0].textContent, 'Open scene');
+    assert.deepEqual(view.calls, [null], 'completion did not open a scene');
+    jobResponse = () => json(404, null);
+    handoff.children[0].dispatch('click');
+    await settle();
+    assert.deepEqual(view.calls, [null, JOB_ID], 'the click opens the exact job');
+    assert.ok(reads.some((entry) => entry.url.endsWith(`/${JOB_ID}`)));
+    assert.match(view.container.textContent, /This scene could not be found/);
+    assert.equal(posts.length, 1, 'opening did not trigger another action');
+  });
+
+  it('shows a polled result only while the original selection is current', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    const answer = deferred();
+    jobResponse = () => answer.promise;
+    view.buildButton().dispatch('click');
+    jobs = [manifest('queued')];
+    posts[0].respond(json(202, manifest('queued')));
+    await settle();
+    const handoff = view.find((node) => node.className === 'actions space-ready')[0];
+    assert.equal(handoff.children.length, 0);
+    const ready = { ...manifest('ready'), usageBlocked: false };
+    jobs = [ready];
+    answer.resolve(json(200, ready));
+    await settle();
+    assert.equal(handoff.children[0].textContent, 'Open scene');
+    assert.deepEqual(view.calls, [null]);
+
+    await view.select(1, [5, 5, 60, 70]);
+    assert.equal(handoff.children.length, 0, 'a new selection clears the old action');
+    assert.equal(view.heading(), 'Choose an object in photo 2');
+  });
+
+  it('does not let a late build completion replace a newer selection', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    const answer = deferred();
+    jobResponse = () => answer.promise;
+    view.buildButton().dispatch('click');
+    jobs = [manifest('queued')];
+    posts[0].respond(json(202, manifest('queued')));
+    await settle();
+    await view.select(1, [5, 5, 60, 70]);
+    const ready = { ...manifest('ready'), usageBlocked: false };
+    jobs = [ready];
+    answer.resolve(json(200, ready));
+    await settle();
+    assert.equal(view.heading(), 'Choose an object in photo 2');
+    assert.equal(view.find((node) => node.className === 'actions space-ready')[0].children.length, 0);
+    assert.deepEqual(view.calls, [null, null]);
+  });
+
+  it('polls a build at once, keeps it observed when the creator moves on during the list read, and ignores the late stale list', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    const list = deferred();
+    listResponse = () => list.promise;
+    const answer = deferred();
+    jobResponse = () => answer.promise;
+    posts[0].respond(json(202, manifest('queued')));
+    await settle();
+    assert.ok(reads.some((entry) => entry.url.endsWith(`/${JOB_ID}`)), 'polling does not wait for the list read');
+    await view.select(1, [5, 5, 60, 70]);
+    const ready = { ...manifest('ready'), usageBlocked: false };
+    jobs = [ready];
+    listResponse = null;
+    answer.resolve(json(200, ready));
+    await settle();
+    assert.equal(background(view), 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.');
+    list.resolve(json(200, [manifest('queued')]));
+    await settle();
+    assert.equal(background(view), 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.', 'a superseded stale list changes nothing');
+    assert.equal(view.heading(), 'Choose an object in photo 2');
+    assert.equal(view.find((node) => node.className === 'actions space-ready')[0].children.length, 0);
+    assert.deepEqual(view.calls, [null, null]);
+  });
+
+  it('lets a newer followed build take polling over and polls the older one by its exact ID afterwards', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    const older = { ...manifest('queued'), id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' };
+    jobs = [older];
+    posts[0].respond(json(202, older));
+    await settle();
+    await view.select(1, [5, 5, 60, 70]);
+    view.buildButton().dispatch('click');
+    const newer = { ...manifest('queued'), sourceId: SOURCE_B };
+    const answer = deferred();
+    jobResponse = () => answer.promise;
+    jobs = [older, newer];
+    const olderReads = () => reads.filter((entry) => entry.url.endsWith(`/${older.id}`)).length;
+    posts[1].respond(json(202, newer));
+    await settle();
+    const before = olderReads();
+    assert.ok(reads.some((entry) => entry.url.endsWith(`/${JOB_ID}`)), 'the newer build is polled');
+    assert.match(statusLine(view), /^Photo 2: Accepted\. Waiting to start\.$/);
+
+    jobs = [{ ...newer, status: 'ready', usageBlocked: false }, { ...older, status: 'ready', usageBlocked: false }];
+    assert.equal(olderReads(), before, 'the older build waits while the newer one is polled');
+    answer.resolve(json(200, jobs[0]));
+    await settle();
+    assert.equal(view.find((node) => node.className === 'actions space-ready')[0].children[0]?.textContent, 'Open scene', 'the newer build keeps its handoff');
+    assert.match(statusLine(view), /^Photo 2: Your partial scene is ready to review\.$/);
+    assert.ok(olderReads() > before, 'the waiting build is polled once polling is free');
+    assert.equal(background(view), 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.');
+  });
+
+  it('starts the exact accepted build while an unrelated list read is held', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    await view.select(1, [5, 5, 60, 70]);
+    const held = deferred();
+    listResponse = () => held.promise;
+    posts[0].respond(json(202, manifest('queued')));
+    await settle();
+    try {
+      assert.ok(reads.some((entry) => entry.url.endsWith(`/${JOB_ID}`)), 'a held list does not delay observing the accepted build');
+    } finally {
+      held.resolve(json(503, null));
+      await settle();
+    }
+  });
+
+  it('advances the waiting queue while the finished build\'s list refresh is held', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    await view.select(1, [5, 5, 60, 70]);
+    view.buildButton().dispatch('click');
+    const newer = { ...manifest('queued'), sourceId: SOURCE_B };
+    const answer = deferred();
+    jobResponse = () => answer.promise;
+    jobs = [newer];
+    posts[1].respond(json(202, newer));
+    await settle();
+    const older = { ...manifest('queued'), id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' };
+    jobs = [newer, older];
+    posts[0].respond(json(202, older));
+    await settle();
+    assert.ok(!reads.some((entry) => entry.url.endsWith(`/${older.id}`)), 'the older build waits while the newer one is polled');
+    const held = deferred();
+    listResponse = () => held.promise;
+    answer.resolve(json(200, { ...newer, status: 'ready', usageBlocked: false }));
+    await settle();
+    try {
+      assert.ok(reads.some((entry) => entry.url.endsWith(`/${older.id}`)), 'the waiting build is polled without waiting for the list');
+    } finally {
+      held.resolve(json(503, null));
+      await settle();
+    }
+  });
+
+  it('confirms the listing from the newest list and ignores a late superseded one', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    await view.select(1, [5, 5, 60, 70]);
+    const ready = { ...manifest('ready'), usageBlocked: false };
+    const first = deferred();
+    let calls = 0;
+    listResponse = () => (++calls === 1 ? first.promise : json(200, [ready]));
+    jobResponse = () => json(200, ready);
+    posts[0].respond(json(202, manifest('queued')));
+    await settle();
+    assert.equal(background(view), 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.');
+    first.resolve(json(200, []));
+    await settle();
+    assert.equal(background(view), 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.');
+    assert.equal(view.find((node) => node.className === 'space-builds')[0].children.length, 1, 'the late empty list is not shown');
+  });
+
+  it('says a finished build is not shown yet until a later list confirms it', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    await view.select(1, [5, 5, 60, 70]);
+    const ready = { ...manifest('ready'), usageBlocked: false };
+    listResponse = () => json(200, []);
+    jobResponse = () => json(200, ready);
+    posts[0].respond(json(202, manifest('queued')));
+    await settle();
+    assert.equal(view.find((node) => node.className === 'space-builds')[0].children.length, 0);
+    assert.equal(background(view), 'Photo 1: A partial scene finished building. The saved scene list does not show it yet; reload the page to check.');
+    const newer = { ...manifest('queued'), id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', sourceId: SOURCE_B };
+    jobs = [newer];
+    listResponse = () => json(200, [ready, newer]);
+    view.buildButton().dispatch('click');
+    posts[1].respond(json(202, newer));
+    await settle();
+    assert.equal(background(view), 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.', 'the next list that shows it confirms it');
+  });
+
+  for (const [outcome, finished, notice] of [
+    ['ready', { ...manifest('ready'), usageBlocked: false }, 'Photo 1: A partial scene finished building. Checking the saved scene list…'],
+    ['failed', { ...manifest('failed'), error: 'The build failed.' }, 'Photo 1: Failed. The build failed.'],
+  ]) {
+    it(`announces a ${outcome} background build at once while its list refresh is held`, async () => {
+      const view = mount();
+      await view.select(0, [1, 1, 50, 40]);
+      view.buildButton().dispatch('click');
+      await view.select(1, [5, 5, 60, 70]);
+      const answer = deferred();
+      jobResponse = () => answer.promise;
+      jobs = [manifest('queued')];
+      posts[0].respond(json(202, manifest('queued')));
+      await settle();
+      assert.ok(reads.some((entry) => entry.url.endsWith(`/${JOB_ID}`)));
+      const held = deferred();
+      listResponse = () => held.promise;
+      const focused = [];
+      const focus = FakeElement.prototype.focus;
+      FakeElement.prototype.focus = function () { focused.push(this); };
+      try {
+        answer.resolve(json(200, finished));
+        await settle();
+        assert.equal(background(view), notice);
+        assert.equal(statusLine(view), '', 'the creator\'s status is left alone');
+        assert.equal(view.heading(), 'Choose an object in photo 2');
+        assert.deepEqual(view.calls, [null, null]);
+        assert.deepEqual(focused, [], 'completion does not move focus');
+      } finally {
+        FakeElement.prototype.focus = focus;
+        held.resolve(json(503, null));
+        await settle();
+      }
+    });
+  }
+
+  it('announces an already finished build accepted after navigation while the list read is held', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    await view.select(1, [5, 5, 60, 70]);
+    const held = deferred();
+    listResponse = () => held.promise;
+    posts[0].respond(json(202, { ...manifest('ready'), usageBlocked: false }));
+    await settle();
+    try {
+      assert.equal(background(view), 'Photo 1: A partial scene finished building. Checking the saved scene list…');
+      assert.equal(view.heading(), 'Choose an object in photo 2');
+    } finally {
+      held.resolve(json(200, [{ ...manifest('ready'), usageBlocked: false }]));
+      await settle();
+    }
+    assert.equal(background(view), 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.', 'the list read refines its own notice');
+  });
+
+  it('does not let a late listing confirmation hide a newer background failure', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    await view.select(1, [5, 5, 60, 70]);
+    const earlier = { ...manifest('ready'), usageBlocked: false };
+    jobResponse = () => json(200, earlier);
+    posts[0].respond(json(202, manifest('queued')));
+    await settle();
+    assert.match(background(view), /does not show it yet/);
+
+    view.buildButton().dispatch('click');
+    await view.select(0, [1, 1, 50, 40]);
+    const failed = { ...manifest('failed'), id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', sourceId: SOURCE_B, error: 'The later build failed.' };
+    jobs = [failed];
+    posts[1].respond(json(202, { ...failed, status: 'queued', error: null }));
+    await settle();
+    assert.equal(background(view), 'Photo 2: Failed. The later build failed.');
+
+    view.buildButton().dispatch('click');
+    const third = { ...manifest('queued'), id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' };
+    jobs = [earlier, failed, third];
+    posts[2].respond(json(202, third));
+    await settle();
+    assert.equal(background(view), 'Photo 2: Failed. The later build failed.', 'an older confirmation is retired by the newer notice');
+  });
+
+  for (const [listed, expected] of [
+    ['a stale', () => json(200, [])],
+    ['an already ready', () => json(200, [{ ...manifest('ready'), usageBlocked: false }])],
+    ['a failed', () => json(503, null)],
+  ]) {
+    it(`observes a build accepted after navigation before the response, with ${listed} list`, async () => {
+      const view = mount();
+      await view.select(0, [1, 1, 50, 40]);
+      view.buildButton().dispatch('click');
+      await view.select(1, [5, 5, 60, 70]);
+      listResponse = expected;
+      jobResponse = () => json(200, { ...manifest('ready'), usageBlocked: false });
+      posts[0].respond(json(202, manifest('queued')));
+      await settle();
+      assert.ok(reads.some((entry) => entry.url.endsWith(`/${JOB_ID}`)), 'the exact accepted build is polled');
+      assert.equal(background(view), {
+        'a stale': 'Photo 1: A partial scene finished building. The saved scene list does not show it yet; reload the page to check.',
+        'an already ready': 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.',
+        'a failed': 'Photo 1: A partial scene finished building. The saved scene list could not be loaded; reload the page to see it.',
+      }[listed]);
+      assert.equal(view.heading(), 'Choose an object in photo 2');
+      assert.equal(statusLine(view), '', 'the creator\'s status is left alone');
+      assert.equal(view.find((node) => node.className === 'actions space-ready')[0].children.length, 0);
+      assert.deepEqual(view.calls, [null, null]);
+    });
+  }
+
+  it('does not present a ready action after the saved-scene list fails', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    view.buildButton().dispatch('click');
+    listResponse = () => json(503, null);
+    posts[0].respond(json(202, { ...manifest('ready'), usageBlocked: false }));
+    await settle();
+    assert.match(view.container.textContent, /Saved partial scenes could not be loaded/);
+    assert.equal(view.find((node) => node.className === 'actions space-ready')[0].children.length, 0);
+  });
+
+  it('does not attribute a different polled job to the requested build', async () => {
+    const view = mount();
+    await view.select(0, [1, 1, 50, 40]);
+    jobResponse = () => json(200, { ...manifest('ready'), id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', usageBlocked: false });
+    view.buildButton().dispatch('click');
+    jobs = [manifest('queued')];
+    posts[0].respond(json(202, manifest('queued')));
+    await settle();
+    assert.match(view.container.textContent, /This build could not be confirmed/);
+    assert.equal(view.find((node) => node.className === 'actions space-ready')[0].children.length, 0);
+  });
+
+  for (const [state, extra, expected] of [
+    ['failed', { error: 'The build failed.' }, /Failed/],
+    ['interrupted', {}, /Interrupted/],
+    ['ready', { usageBlocked: true }, /cannot be shown/],
+    ['ready', {}, /access could not be confirmed/],
+  ]) {
+    it(`does not offer a ready action for ${state}${extra.usageBlocked ? ' blocked' : ''}`, async () => {
+      const view = mount();
+      await view.select(0, [1, 1, 50, 40]);
+      view.buildButton().dispatch('click');
+      const response = { ...manifest(state), ...extra };
+      jobs = [response];
+      posts[0].respond(json(202, response));
+      await settle();
+      assert.match(view.container.textContent, expected);
+      assert.equal(view.find((node) => node.className === 'actions space-ready')[0].children.length, 0);
+    });
+  }
   it('keeps a newer selection when an older build is acknowledged late, and still lists the job', async () => {
     const view = mount();
     await view.select(0, [1, 1, 50, 40]);

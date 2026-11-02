@@ -134,6 +134,68 @@ async function openScene(ui) {
 }
 
 describe('two-object build selection', () => {
+  it('offers an exact ready build for review without confirming its outlines', async () => {
+    const ui = await mount();
+    ui.button('Build with two objects').dispatch('click');
+    await settle();
+    ui.find((node) => node.tag === 'img')[0].dispatch('load');
+    const fieldsets = ui.find((node) => node.tag === 'fieldset');
+    for (const [index, label] of ['Counter', 'Flour stack'].entries()) {
+      const [name, ...edges] = fieldsets[index].findAll((node) => node.tag === 'input');
+      name.value = label;
+      name.dispatch('input');
+      [index * 100, 0, index * 100 + 80, 100].forEach((value, edge) => (edges[edge].value = String(value)));
+      edges[0].dispatch('input');
+    }
+    const unconfirmed = job({ objectsConfirmed: false });
+    routes[`POST ${BASE}`] = () => Promise.resolve(json(202, unconfirmed));
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, unconfirmed));
+    ui.button('Build partial scene with two objects').dispatch('click');
+    await settle();
+    const handoff = ui.find((node) => node.className === 'actions space-ready')[0];
+    assert.match(ui.text(), /Photo 1: Your partial scene is ready\. Open it to check the two proposed outlines first\./);
+    assert.equal(handoff.children[0].textContent, 'Open scene');
+    assert.equal(ui.button('The outlines match A and B'), undefined, 'the scene has not opened automatically');
+    handoff.children[0].dispatch('click');
+    await settle();
+    assert.match(ui.text(), /Check the two outlines/);
+    assert.equal(ui.button('Apply and save'), undefined);
+    assert.equal(ui.posts('/objects/confirm').length, 0, 'opening never confirms the outlines');
+    assert.equal(ui.find((node) => node.tag === 'nav' && node.attributes['aria-label'] === 'Continue with this place').length, 0);
+  });
+
+  it('observes a build accepted after the creator moved on, despite a stale list, and announces it in text only', async () => {
+    const ui = await mount();
+    ui.button('Build with two objects').dispatch('click');
+    await settle();
+    ui.find((node) => node.tag === 'img')[0].dispatch('load');
+    const fieldsets = ui.find((node) => node.tag === 'fieldset');
+    for (const [index, label] of ['Counter', 'Flour stack'].entries()) {
+      const [name, ...edges] = fieldsets[index].findAll((node) => node.tag === 'input');
+      name.value = label;
+      name.dispatch('input');
+      [index * 100, 0, index * 100 + 80, 100].forEach((value, edge) => (edges[edge].value = String(value)));
+      edges[0].dispatch('input');
+    }
+    let respond;
+    routes[`POST ${BASE}`] = () => new Promise((resolve) => (respond = resolve));
+    routes[`GET ${BASE}`] = () => Promise.resolve(json(200, []));
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, job({ objectsConfirmed: false })));
+    ui.button('Build partial scene with two objects').dispatch('click');
+    await settle();
+    ui.button('Build a partial scene').dispatch('click');
+    await settle();
+    respond(json(202, job({ status: 'queued', objectsConfirmed: false })));
+    await settle();
+    assert.ok(requests.some((r) => r.method === 'GET' && r.url === JOB_URL), 'the exact accepted build is polled');
+    const background = ui.find((node) => node.className === 'hint space-background')[0];
+    assert.equal(background.textContent, 'Photo 1: A partial scene finished building. The saved scene list does not show it yet; reload the page to check.');
+    assert.ok(ui.button('Build partial scene'), 'the newer single-object selection stays');
+    assert.equal(ui.button('Build partial scene with two objects'), undefined);
+    assert.equal(ui.find((node) => node.className === 'actions space-ready')[0].children.length, 0);
+    assert.equal(ui.posts('/objects/confirm').length, 0);
+  });
+
   it('sends two named boxes in order, and asks for distinct names', async () => {
     const ui = await mount();
     ui.button('Build with two objects').dispatch('click');

@@ -127,6 +127,13 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   let disposed = false;
   let pollTimer = null;
   let pollingJob = null;
+  // Accepted builds waiting while another build is polled. Each is polled by
+  // its exact ID once polling is free, so none is dropped without a result.
+  const waiting = new Set();
+  // The ready build the background notice currently describes, until a list
+  // read confirms it; any newer notice retires it.
+  let notice = null;
+  let handoff = null;
   let jobsGeneration = 0;
   let viewer = null;
   let outlineEditor = null;
@@ -153,6 +160,11 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
   const status = el('p', { className: 'hint', role: 'status' });
   status.setAttribute('aria-live', 'polite');
+  const readyAction = el('div', { className: 'actions space-ready' });
+  // Builds the creator is not following are announced here, apart from the
+  // status above, so they never replace guidance such as an unresolved save.
+  const backgroundStatus = el('p', { className: 'hint space-background', role: 'status' });
+  backgroundStatus.setAttribute('aria-live', 'polite');
   const buildList = el('ul', { className: 'space-builds' });
   const panel = el('div', { className: 'space-panel' });
 
@@ -209,6 +221,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }),
     panel,
     status,
+    readyAction,
+    backgroundStatus,
     others,
     invitationsSection,
   );
@@ -222,6 +236,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
   function closePanel() {
     panelGeneration += 1;
+    if (handoff) status.textContent = '';
+    handoff = null;
+    readyAction.replaceChildren();
     compositionEditor?.dispose();
     compositionEditor = null;
     outlineEditor?.dispose();
@@ -243,6 +260,99 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     viewer?.dispose();
     viewer = null;
     panel.replaceChildren();
+  }
+
+  const following = (jobId) => handoff?.id === jobId && handoff.generation === panelGeneration;
+
+  function showBuild(job) {
+    if (!following(job.id)) return;
+    const number = photoNumber(job.sourceId);
+    const photo = number ? `Photo ${number}` : 'This photo';
+    readyAction.replaceChildren();
+    if (job.status === 'ready' && job.usageBlocked === false) {
+      status.textContent = job.objectsConfirmed === false
+        ? `${photo}: Your partial scene is ready. Open it to check the two proposed outlines first.`
+        : `${photo}: Your partial scene is ready to review.`;
+      const open = el('button', { type: 'button', textContent: 'Open scene' });
+      open.setAttribute('aria-label', `Open the ready scene from ${number ? `photo ${number}` : 'this photo'}`);
+      open.addEventListener('click', () => {
+        if (!disposed && handoff?.id === job.id && handoff.generation === panelGeneration) openScene(job.id);
+      });
+      readyAction.append(open);
+    } else if (job.status === 'ready') {
+      status.textContent = job.usageBlocked === true
+        ? `${photo}: This scene cannot be shown under its current source or recollection uses.`
+        : `${photo}: The scene's current access could not be confirmed. Reload to check.`;
+    } else status.textContent = `${photo}: ${jobStatusText(job)}`;
+  }
+
+  const finishedText = (job, where) => {
+    const number = photoNumber(job.sourceId);
+    return `${number ? `Photo ${number}` : 'This photo'}: ${job.status === 'ready' ? `A partial scene finished building. ${where}` : jobStatusText(job)}`;
+  };
+
+  // Announces a known outcome at once, in text only: no action, focus,
+  // navigation or panel change, and never after waiting for a list read.
+  function announceBackground(job) {
+    notice = job.status === 'ready' ? { job, checked: false } : null;
+    backgroundStatus.textContent = finishedText(job, 'Checking the saved scene list…');
+  }
+
+  // A list read refines only the current notice. A ready build is said to be
+  // listed only when the list shows that exact job as ready. `jobs` is null
+  // when the read failed.
+  function refineNotice(jobs) {
+    if (!notice) return;
+    const { job } = notice;
+    if (jobs?.some((entry) => entry.id === job.id && entry.status === 'ready')) {
+      notice = null;
+      backgroundStatus.textContent = finishedText(job, 'It is listed under “Build or choose another scene”.');
+    } else if (!notice.checked) {
+      notice.checked = true;
+      backgroundStatus.textContent = finishedText(job, jobs
+        ? 'The saved scene list does not show it yet; reload the page to check.'
+        : 'The saved scene list could not be loaded; reload the page to see it.');
+    }
+  }
+
+  // Observes an accepted build by its exact ID before any list read, which may
+  // never settle. It is followed only from the panel that started it and takes
+  // polling over only then; otherwise it waits for polling to be free.
+  function followBuild(job, { follow = true } = {}) {
+    if (follow) {
+      handoff = { id: job.id, generation: panelGeneration };
+      showBuild(job);
+    }
+    const active = ACTIVE_STATUSES.has(job.status);
+    if (active && (follow || pollingJob === null)) poll(job.id);
+    else if (active) waiting.add(job.id);
+    else if (!follow) announceBackground(job);
+    loadJobs({ resumePolling: false, quiet: !follow });
+  }
+
+  function nextActions(memory, collaboration, shares) {
+    const go = (target, disclosure = false) => {
+      const details = disclosure ? target.children[0] : null;
+      if (details) details.open = true;
+      // Focus lands on the section's heading so its name is announced.
+      const destination = details?.children[0] ?? target.querySelector?.('h4') ?? target;
+      if (!details) destination.setAttribute('tabindex', '-1');
+      destination.focus();
+      destination.scrollIntoView?.({ block: 'start' });
+    };
+    const label = el('p', { textContent: 'Continue with this place' });
+    label.setAttribute('aria-hidden', 'true');
+    const nav = el('nav', { className: 'memory-edit' }, [
+      label,
+      el('div', { className: 'actions' }, [
+        el('button', { type: 'button', className: 'secondary', textContent: 'Change from a memory', onclick: () => go(memory) }),
+        el('button', { type: 'button', className: 'secondary', textContent: 'Review recollections', onclick: () => go(collaboration) }),
+        el('button', { type: 'button', className: 'secondary', textContent: 'Invite someone', onclick: () => go(invitationsSection, true) }),
+        el('button', { type: 'button', className: 'secondary', textContent: 'Visitor sharing', onclick: () => go(shares, true) }),
+      ]),
+    ]);
+    nav.setAttribute('aria-label', 'Continue with this place');
+    return nav;
   }
 
   function renderJobs(jobs) {
@@ -269,40 +379,76 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     );
   }
 
-  async function loadJobs({ resumePolling = true } = {}) {
+  // A quiet refresh leaves the creator's status line alone.
+  async function loadJobs({ resumePolling = true, quiet = false } = {}) {
     const generation = ++jobsGeneration;
+    const panelAtStart = panelGeneration;
     const result = await request(base);
     if (disposed || generation !== jobsGeneration) return;
     if (!result.ok || !Array.isArray(result.body)) {
-      status.textContent = 'Saved partial scenes could not be loaded. Reload the page to try again.';
+      if (!quiet && panelAtStart === panelGeneration) {
+        status.textContent = 'Saved partial scenes could not be loaded. Reload the page to try again.';
+        readyAction.replaceChildren();
+      }
+      refineNotice(null);
       return;
     }
     renderJobs(result.body);
+    refineNotice(result.body);
     const active = result.body.find((job) => ACTIVE_STATUSES.has(job.status));
-    if (resumePolling && active && pollingJob !== active.id) poll(active.id);
+    if (resumePolling && active && pollingJob !== active.id) {
+      if (!handoff && sceneId === null && panelAtStart === 0 && panelGeneration === panelAtStart) {
+        handoff = { id: active.id, generation: panelGeneration };
+      }
+      poll(active.id);
+    }
   }
 
-  // Polls one job at a time; a newer poll or navigation drops older responses.
+  function pollNext() {
+    const [next] = waiting;
+    if (next !== undefined && pollingJob === null && !disposed) poll(next);
+  }
+
+  // Polls one job at a time; a newer poll or navigation drops older responses,
+  // and a build it replaces waits for its turn.
   function poll(jobId) {
+    if (pollingJob !== null && pollingJob !== jobId) waiting.add(pollingJob);
+    waiting.delete(jobId);
     stopPolling();
     pollingJob = jobId;
     const tick = async () => {
       const result = await request(`${base}/${jobId}`);
       if (disposed || pollingJob !== jobId) return;
       if (result.ok && result.body) {
-        status.textContent = `Photo ${photoNumber(result.body.sourceId)}: ${jobStatusText(result.body)}`;
+        if (result.body.id !== jobId) {
+          if (following(jobId)) {
+            status.textContent = 'This build could not be confirmed. Reload the page to check.';
+            readyAction.replaceChildren();
+          }
+          stopPolling();
+          pollNext();
+          return;
+        }
+        showBuild(result.body);
         if (!ACTIVE_STATUSES.has(result.body.status)) {
           stopPolling();
-          // Do not restart polling from a list that may lag this response.
-          await loadJobs({ resumePolling: false });
+          pollNext();
+          const followed = following(jobId);
+          if (!followed) announceBackground(result.body);
+          // Not awaited, and polling is not restarted from a list that may lag this response.
+          loadJobs({ resumePolling: false, quiet: !followed });
           return;
         }
       } else if (result.status === 404) {
         stopPolling();
-        status.textContent = 'This build could not be found.';
+        if (following(jobId)) {
+          status.textContent = 'This build could not be found.';
+          readyAction.replaceChildren();
+        }
+        pollNext();
         return;
       } else {
-        status.textContent = 'Checking the build again…';
+        if (following(jobId)) status.textContent = 'Checking the build again…';
       }
       pollTimer = setTimeout(tick, POLL_MS);
     };
@@ -416,8 +562,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       if (disposed) return;
       const accepted = result.ok && Boolean(result.body?.id);
       if (token !== panelGeneration) {
-        // The person moved on; an accepted job still appears in the list.
-        if (accepted) await loadJobs();
+        // The person moved on; the accepted build is observed in the background.
+        if (accepted) followBuild(result.body, { follow: false });
         return;
       }
       build.disabled = false;
@@ -431,9 +577,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         return;
       }
       closePanel();
-      status.textContent = `Photo ${index + 1}: ${jobStatusText(result.body)}`;
-      await loadJobs();
-      if (ACTIVE_STATUSES.has(result.body.status)) poll(result.body.id);
+      followBuild(result.body);
     });
     cancel.addEventListener('click', closePanel);
 
@@ -747,6 +891,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
     panel.replaceChildren(
       heading,
+      nextActions(memorySection, collaborationSection, sharesSection),
       sceneWorkspace(
         [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, viewport, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })],
         [
@@ -1017,7 +1162,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       if (disposed) return;
       const accepted = result.ok && Boolean(result.body?.id);
       if (token !== panelGeneration) {
-        if (accepted) await loadJobs();
+        if (accepted) followBuild(result.body, { follow: false });
         return;
       }
       build.disabled = false;
@@ -1031,9 +1176,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         return;
       }
       closePanel();
-      status.textContent = `Photo ${index + 1}: ${jobStatusText(result.body)}`;
-      await loadJobs();
-      if (ACTIVE_STATUSES.has(result.body.status)) poll(result.body.id);
+      followBuild(result.body);
     });
 
     panel.replaceChildren(
@@ -1711,6 +1854,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     ruleRemove.addEventListener('click', () => invalid.size === 0 && !ruleSaving && !ruleUncertain && saveRule(null));
 
     panel.append(
+      nextActions(memorySection, collaborationSection, sharesSection),
       sceneWorkspace(stage, [
         el('div', { className: 'actions', role: 'group' }, [el('span', { textContent: 'Object: ' }), ...pick]),
         el('fieldset', { className: 'space-edit' }, [

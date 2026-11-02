@@ -153,6 +153,57 @@ describe('opening one exact saved scene', () => {
   });
 });
 
+describe('continuing from an opened scene', () => {
+  it('moves focus to the existing sections without triggering their actions', async () => {
+    const ui = await mount({ sceneId: JOB });
+    const nav = ui.find((node) => node.tag === 'nav' && node.attributes['aria-label'] === 'Continue with this place')[0];
+    assert.ok(nav);
+    const findTarget = (predicate) => ui.find(predicate)[0];
+    assert.equal(nav.children[0].attributes['aria-hidden'], 'true', 'the visible label does not repeat the navigation name');
+    // The fake DOM has no selectors; answer the heading query the way a browser would.
+    const heading = (text) => {
+      const section = findTarget((node) => node.tag === 'section' && node.children[0]?.tag === 'h4' && node.children[0].textContent === text);
+      section.querySelector = (selector) => (selector === 'h4' ? section.children[0] : null);
+      return section.children[0];
+    };
+    const memory = heading('Change it from a memory');
+    const recollections = heading('Recollections from others');
+    const invite = findTarget((node) => node.tag === 'details' && node.className === 'source-details collab-invitations');
+    const sharing = findTarget((node) => node.tag === 'details' && node.className === 'source-details share-panel');
+    const clicks = [
+      ['Change from a memory', memory],
+      ['Review recollections', recollections],
+      ['Invite someone', invite.children[0]],
+      ['Visitor sharing', sharing.children[0]],
+    ];
+    for (const [label, target] of clicks) {
+      let focused = false;
+      let scrolled = false;
+      target.focus = () => { focused = true; };
+      target.scrollIntoView = () => { scrolled = true; };
+      nav.findAll((node) => node.tag === 'button' && node.textContent === label)[0].dispatch('click');
+      assert.equal(focused, true, label);
+      assert.equal(scrolled, true, label);
+    }
+    assert.equal(memory.attributes.tabindex, '-1', 'focus lands on the named section heading');
+    assert.equal(recollections.attributes.tabindex, '-1');
+    assert.equal(invite.open, true);
+    assert.equal(sharing.open, true);
+    assert.equal(invite.children[0].attributes.tabindex, undefined, 'the invitation summary remains keyboard reachable');
+    assert.equal(sharing.children[0].attributes.tabindex, undefined, 'the sharing summary remains keyboard reachable');
+    assert.equal(ui.posts().length, 0, 'navigation sends no model, contribution or share action');
+    assert.deepEqual(ui.calls, [JOB]);
+  });
+
+  it('keeps the outline check first when two objects are not confirmed', async () => {
+    routes[`GET ${BASE}/${JOB}`] = () => Promise.resolve(json(200, job(JOB, { objectsConfirmed: false })));
+    const ui = await mount({ sceneId: JOB });
+    assert.match(ui.panel().textContent, /Check the two outlines/);
+    assert.equal(ui.find((node) => node.tag === 'nav' && node.attributes['aria-label'] === 'Continue with this place').length, 0);
+    assert.equal(ui.posts().length, 0);
+  });
+});
+
 describe('a scene that cannot be shown keeps its address and offers the other choices', () => {
   const cases = {
     unknown: [() => Promise.resolve(json(404, { error: 'Not found.' })), /^This scene could not be found\.$/],
@@ -188,6 +239,42 @@ describe('a scene that cannot be shown keeps its address and offers the other ch
 });
 
 describe('lifecycle', () => {
+  for (const [outcome, overrides, notice] of [
+    ['ready', {}, 'Photo 1: A partial scene finished building. It is listed under “Build or choose another scene”.'],
+    ['failed', { status: 'failed', error: 'The build failed.' }, 'Photo 1: Failed. The build failed.'],
+  ]) {
+    it(`a ${outcome} background build is announced in text without replacing an explicitly opened scene`, async () => {
+      const pending = deferred();
+      const building = job(JOB, { status: 'processing' });
+      routes[`GET ${BASE}`] = () => Promise.resolve(json(200, [building, job(JOB2)]));
+      routes[`GET ${BASE}/${JOB}`] = () => pending.promise;
+      const ui = await mount();
+      ui.openButton('dddddddd').dispatch('click');
+      await settle();
+      const before = ui.panel().textContent;
+      const status = ui.container.children.find((node) => node.role === 'status');
+      const statusBefore = status.textContent;
+      const focused = [];
+      const focus = FakeElement.prototype.focus;
+      FakeElement.prototype.focus = function () { focused.push(this); };
+      routes[`GET ${BASE}`] = () => Promise.resolve(json(200, [job(JOB, overrides), job(JOB2)]));
+      try {
+        pending.resolve(json(200, job(JOB, overrides)));
+        await settle();
+      } finally {
+        FakeElement.prototype.focus = focus;
+      }
+      assert.equal(ui.find((node) => node.className === 'hint space-background')[0].textContent, notice);
+      assert.equal(status.textContent, statusBefore, 'the creator\'s status line is left alone');
+      assert.equal(focused.length, 0, 'completion does not move focus');
+      assert.deepEqual(ui.calls, [JOB2]);
+      assert.equal(ui.panel().textContent, before);
+      assert.equal(ui.others().open, false, 'the other choices stay as the creator left them');
+      assert.equal(ui.find((node) => node.className === 'actions space-ready')[0].children.length, 0);
+      assert.equal(ui.posts().length, 0);
+    });
+  }
+
   it('an explicit build choice reports no scene', async () => {
     const ui = await mount({ sceneId: JOB });
     ui.find((node) => node.tag === 'button' && node.textContent === 'Build a partial scene')[0].dispatch('click');
