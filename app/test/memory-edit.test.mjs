@@ -78,7 +78,7 @@ beforeEach(() => {
   };
 });
 
-function mount({ source = publicSource, editor = { version: 1, offset: [0, 0, 0], yaw: 0, clean: true } } = {}) {
+function mount({ source = publicSource, editor = { version: 1, offset: [0, 0, 0], yaw: 0, clean: true }, extra = {} } = {}) {
   const calls = [];
   const bridge = {
     jobUrl: JOB_URL,
@@ -104,6 +104,7 @@ function mount({ source = publicSource, editor = { version: 1, offset: [0, 0, 0]
       calls.push(['conflict']);
       bridge.editorState.clean = false;
     },
+    ...extra,
   };
   const container = new FakeElement('section');
   const handle = mountMemoryEdit(container, bridge);
@@ -941,5 +942,145 @@ describe('saved proposals chooser', () => {
     await settle();
     assert.doesNotMatch(view.container.textContent, /toward the door|Reason given/);
     view.handle.dispose();
+  });
+});
+
+describe('blocked planning guidance', () => {
+  const privateSource = { ...publicSource, origin: { kind: 'own', reference: '' } };
+  const noModel = { ...publicSource, permissions: { place: true, model: false, share: true } };
+  const names = { 'object-1': 'A: Counter', 'object-2': 'B: Lamp' };
+  const composed = (sources, nameOf = (id) => names[id]) => mount({ extra: { frame: 'owner-composition', geometrySources: sources, targets: { nameOf, selected: () => null } } });
+  const recoveryText = (view) => view.find((node) => node.tag === 'p' && /separate place/.test(node.textContent ?? '')).map((node) => node.textContent);
+  const blockedText = (view) => view.find((node) => node.className === 'memory-blocked').flatMap((list) => list.children.map((node) => node.textContent));
+  const assertClosed = async (view) => {
+    await settle();
+    assert.equal(view.button('Plan a change'), undefined);
+    assert.equal(view.text(), undefined);
+    assert.equal(view.find((node) => node.tag === 'button').length, 0);
+    assert.deepEqual(posts, []);
+    view.handle.dispose();
+  };
+
+  it('explains a legacy photo with a generic label and its current-use facts, with recovery once', async () => {
+    const view = mount({ source: noModel });
+    const [item] = blockedText(view);
+    assert.match(item, /^This scene photo: .*model processing/);
+    assert.match(item, /Not currently allowed: “Use for model processing”\./);
+    assert.doesNotMatch(item, /Not currently allowed:.*reconstruct|not granted|owner|private/i);
+    assert.doesNotMatch(item, /photo \d|separate place/);
+    const [recovery] = recoveryText(view);
+    assert.equal(recoveryText(view).length, 1);
+    assert.match(recovery, /can only be narrowed, never broadened/);
+    assert.match(recovery, /public label creates no rights and does not make a photo public/);
+    assert.match(recovery, /provider can truthfully allow the needed uses and whose actual origin is public/);
+    assert.match(recovery, /save it as a new memory with those uses allowed, then build a scene there/);
+    assert.match(recovery, /separate place: this place’s scene, recollections, stories and visitor links are not moved or unblocked/);
+    assert.match(recovery, /cannot be combined with photos here/);
+    assert.doesNotMatch(recovery, /owner|append|add (it|material) to this/i);
+    await assertClosed(view);
+  });
+
+  it('describes a non-public origin as saved, without calling it private', async () => {
+    for (const origin of [{ kind: 'own' }, { kind: 'other' }, { kind: 'unknown' }, { kind: 'stock' }, undefined, { kind: '<b>x</b>' }]) {
+      const view = mount({ source: { ...publicSource, origin } });
+      const [item] = blockedText(view);
+      assert.match(item, /only photos saved as a public source/);
+      assert.match(item, /saved origin is not recorded as a public source/);
+      assert.doesNotMatch(item, /private|<b>|“(?:own|other|unknown|stock)”|Not currently allowed/);
+      assert.doesNotMatch(recoveryText(view)[0], /private/);
+      await assertClosed(view);
+    }
+  });
+
+  it('gives no recommendation when the legacy source is missing', async () => {
+    const view = mount({ source: null });
+    const [item] = blockedText(view);
+    assert.match(item, /no source details/);
+    assert.match(item, /no specific recommendation/);
+    assert.doesNotMatch(item, /different|new memory|separate place/);
+    assert.equal(recoveryText(view).length, 0);
+    await assertClosed(view);
+  });
+
+  it('lists only the blocked composition photo, labeled by its scene object', async () => {
+    const view = composed([publicSource, privateSource]);
+    const items = blockedText(view);
+    assert.equal(items.length, 1);
+    assert.match(items[0], /^Source photo for object B: .*public source/);
+    assert.doesNotMatch(items[0], /Counter|Lamp/);
+    assert.match(items[0], /saved origin is not recorded as a public source/);
+    assert.doesNotMatch(items[0], /separate place|new memory/);
+    assert.match(view.container.textContent, /until both source photos qualify/);
+    await assertClosed(view);
+  });
+
+  it('lists both blocked composition photos with their distinct reasons', async () => {
+    const view = composed([noModel, privateSource]);
+    const items = blockedText(view);
+    assert.equal(items.length, 2);
+    assert.match(items[0], /^Source photo for object A: .*model processing/);
+    assert.match(items[1], /^Source photo for object B: .*public source/);
+    assert.match(items[0], /Not currently allowed: “Use for model processing”/);
+    assert.doesNotMatch(items[0], /saved origin/);
+    assert.doesNotMatch(items[1], /Not currently allowed/);
+    assert.equal(recoveryText(view).length, 1);
+    assert.equal(view.container.textContent.split('separate place').length, 2);
+    assert.doesNotMatch(view.container.textContent, /combine.*(new|other) place|composition from/i);
+    await assertClosed(view);
+  });
+
+  it('falls back to a generic label for untrusted or mismatched object names', async () => {
+    const generic = ['A scene source photo', 'A scene source photo'];
+    const cases = [
+      [() => 'B: swapped', ['A scene source photo', 'Source photo for object B']],
+      [() => undefined, generic],
+      [() => ({ A: 1 }), generic],
+      [() => '<img src=x>', generic],
+      [() => { throw new Error('bad'); }, generic],
+    ];
+    for (const [nameOf, expected] of cases) {
+      const view = composed([privateSource, privateSource], nameOf);
+      assert.deepEqual(blockedText(view).map((item) => item.split(':')[0]), expected);
+      await assertClosed(view);
+    }
+  });
+
+  it('keeps planning off, with no specific advice, for malformed composition sources', async () => {
+    for (const sources of [undefined, [], [publicSource], [publicSource, publicSource, publicSource]]) {
+      const view = composed(sources);
+      assert.equal(blockedText(view).length, 0);
+      assert.match(view.container.textContent, /Both photo source records are required before planning\. Which photo is affected cannot be told/);
+      assert.equal(recoveryText(view).length, 0);
+      await assertClosed(view);
+    }
+    const view = composed([null, publicSource]);
+    assert.match(blockedText(view)[0], /^Source photo for object A: This photo has no source details/);
+    assert.match(blockedText(view)[0], /no specific recommendation/);
+    assert.equal(blockedText(view).length, 1);
+    await assertClosed(view);
+    const onlyMissing = composed([null, null]);
+    assert.equal(blockedText(onlyMissing).length, 2);
+    assert.equal(recoveryText(onlyMissing).length, 0);
+    await assertClosed(onlyMissing);
+  });
+
+  it('leaves ready composition and legacy photos unchanged', async () => {
+    const view = composed([publicSource, publicSource]);
+    await settle();
+    assert.equal(blockedText(view).length, 0);
+    assert.ok(view.text());
+    assert.ok(view.button('Plan a change'));
+    assert.doesNotMatch(view.container.textContent, /Planning stays off|until both source photos|separate place/);
+    view.handle.dispose();
+    const legacy = mount();
+    await settle();
+    assert.ok(legacy.button('Plan a change'));
+    assert.doesNotMatch(legacy.container.textContent, /Planning stays off/);
+    legacy.handle.dispose();
+  });
+
+  it('keeps the exported reasons and legacy guard returns', () => {
+    assert.match(proposalBlockedReason({ ...publicSource, permissions: { place: false, model: true } }), /reconstruct this place/);
+    assert.equal(proposalBlockedReason(undefined) !== null, true);
   });
 });

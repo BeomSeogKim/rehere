@@ -25,6 +25,21 @@ export function proposalBlockedReason(source) {
   return null;
 }
 
+const GRANTS = [['place', '“Use to reconstruct this place”'], ['model', '“Use for model processing”']];
+
+// The facts behind one blocked photo, from its own record only.
+function blockedFacts(source) {
+  if (!source) return 'Its source details are not available here, so no specific recommendation can be made.';
+  const off = GRANTS.filter(([key]) => source.permissions?.[key] !== true).map(([, name]) => name);
+  const facts = [];
+  if (off.length) facts.push(`Not currently allowed: ${off.join(' and ')}.`);
+  if (source.origin?.kind !== 'public') facts.push('Its saved origin is not recorded as a public source.');
+  return facts.join(' ');
+}
+
+// Shown once after the per-photo list. A public label creates no rights.
+const RECOVERY = 'A saved use can only be narrowed, never broadened, and a public label creates no rights and does not make a photo public. If you genuinely have different material whose provider can truthfully allow the needed uses and whose actual origin is public, you may save it as a new memory with those uses allowed, then build a scene there. That is a separate place: this place’s scene, recollections, stories and visitor links are not moved or unblocked, and photos from the new place cannot be combined with photos here.';
+
 // The object a two-object proposal was planned for: the stored request's
 // target, or the plan's own when only that is given.
 const targetOf = (proposal) => proposal?.targetId ?? proposal?.result?.targetId ?? null;
@@ -183,7 +198,33 @@ export function mountMemoryEdit(container, bridge) {
   const older = (next, than) => Boolean(than) && String(next.updatedAt ?? '') < String(than.updatedAt ?? '');
   const composition = isComposition(bridge);
   const sources = bridge.geometrySources;
+  // Scene-local A/B only when the bridge names the object at that position
+  // with the matching letter; its free-text label and any other value are ignored.
+  const sourceLabel = (index) => {
+    let named;
+    try {
+      named = bridge.targets?.nameOf?.(OBJECT_IDS[index]);
+    } catch {
+      named = null;
+    }
+    return typeof named === 'string' && /^[AB](?::|$)/.test(named) && named[0] === 'AB'[index] ? `Source photo for object ${named[0]}` : 'A scene source photo';
+  };
   const blocked = composition ? (!Array.isArray(sources) || sources.length !== 2 ? 'Both photo source records are required before planning.' : sources.map(proposalBlockedReason).find(Boolean)) : proposalBlockedReason(bridge.source);
+
+  function blockedNotes() {
+    const wellFormed = !composition || (Array.isArray(sources) && sources.length === 2);
+    if (!wellFormed) return el('p', { className: 'hint', textContent: `${blocked} Which photo is affected cannot be told from what is available, so no specific recommendation can be made.` });
+    const entries = composition ? sources.map((source, index) => [sourceLabel(index), source]) : [['This scene photo', bridge.source]];
+    const items = entries
+      .filter(([, source]) => proposalBlockedReason(source))
+      .map(([name, source]) => el('li', { textContent: `${name}: ${proposalBlockedReason(source)} ${blockedFacts(source)}` }));
+    const advice = entries.some(([, source]) => source && proposalBlockedReason(source));
+    return el('div', {}, [
+      el('p', { className: 'hint', textContent: composition ? 'Planning stays off until both source photos qualify.' : 'Planning stays off for this photo.' }),
+      el('ul', { className: 'memory-blocked' }, items),
+      ...(advice ? [el('p', { className: 'hint', textContent: RECOVERY })] : []),
+    ]);
+  }
 
   const text = el('textarea', { rows: 3, maxLength: TEXT_LIMIT });
   text.id = `memory-text-${Math.random().toString(36).slice(2)}`;
@@ -221,7 +262,7 @@ export function mountMemoryEdit(container, bridge) {
         composition ? 'Use only public or synthetic material in this development version. Plan sends your message and metadata-free copies of both source photos to Meta. It may propose one object pose change; relative scale stays as saved. Nothing changes until you apply it.' : 'Use only public or synthetic material in this development version. When you press Plan, your message and a small copy of this photo without file metadata are sent to Meta, which proposes one change to the selected object. Nothing changes until you apply it.',
     }),
     ...(blocked
-      ? [el('p', { className: 'hint', textContent: blocked })]
+      ? [blockedNotes()]
       : [
           label,
           text,
