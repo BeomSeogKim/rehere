@@ -175,6 +175,11 @@ export function mountMemoryEdit(container, bridge) {
   let pollToken = 0;
   let busy = false;
   let previewing = false;
+  let comparing = false;
+  let comparisonView = null;
+  let comparisonReadCertain = false;
+  let comparisonProposal = null;
+  let comparisonTrigger = null;
   let frontChecked = false;
   // The facing relation the 3D preview actually drew, or null if none.
   let guide = null;
@@ -285,7 +290,17 @@ export function mountMemoryEdit(container, bridge) {
     const anchor = on && current.result.action === 'face_object' ? current.result.faceObjectId : on && current.result.action === 'face_anchor' ? current.result.anchor.point : null;
     guide = bridge.showTransform(on ? current.result.transform : null, anchor, targetOf(current)) ?? null;
     if (!on) frontChecked = false;
-    bridge.setLocked(on || busy);
+    bridge.setLocked(on || busy || comparing);
+  }
+
+  function endComparison({ explicit = false } = {}) {
+    if (!comparing) return;
+    comparing = false;
+    comparisonView = null;
+    comparisonProposal = null;
+    bridge.comparison.close({ focusHidden: !explicit && !disposed });
+    if (previewing) setPreview(false);
+    else bridge.setLocked(busy);
   }
 
   function stopPolling() {
@@ -315,6 +330,53 @@ export function mountMemoryEdit(container, bridge) {
   // An unknown plan, cancel, apply or undo outcome; apply and undo only while
   // their request can still be repeated.
   const unsettled = () => Boolean(planAttempt || cancelAttempt || (applyAttempt && reusable(applyAttempt)) || (undoAttempt && reusable(undoAttempt)));
+  const comparisonSource = () => bridge.comparison?.source ? bridge.comparison.source() : bridge.source;
+  const singleProposalForScene = () => current?.result?.targetId === 'selected-foreground' &&
+    current.result.sourceId === bridge.sourceId && current.result.baseVersion === current.baseVersion &&
+    ['translate', 'rotate', 'face_anchor'].includes(current.result.action);
+  const comparable = () => Boolean(bridge.comparison && !composition && !bridge.targets && !proposalBlockedReason(comparisonSource()) &&
+    comparisonReadCertain && !busy && !unsettled() && bridge.comparison.available() && current &&
+    (!comparing || current === comparisonProposal) &&
+    current.status === 'ready' && !isRedacted(current) && current.result?.transform &&
+    singleProposalForScene() &&
+    current.baseVersion === bridge.editor().version && bridge.editor().clean);
+
+  function beginComparison() {
+    if (!comparable()) return;
+    if (previewing) setPreview(false);
+    comparing = true;
+    comparisonView = 'saved';
+    comparisonProposal = current;
+    const opened = bridge.comparison.open({
+      statement: current.statement.text,
+      action: proposalTitle(current.result),
+      select(view) {
+        if (!comparing) return false;
+        if (!comparable()) {
+          endComparison();
+          sync();
+          return false;
+        }
+        comparisonView = view;
+        setPreview(view === 'proposed');
+        sync();
+        return true;
+      },
+      exit() {
+        endComparison({ explicit: true });
+        sync();
+        comparisonTrigger?.focus();
+      },
+    });
+    if (!opened) {
+      comparing = false;
+      comparisonView = null;
+      comparisonProposal = null;
+      return;
+    }
+    bridge.setLocked(true);
+    sync();
+  }
   // Why another proposal cannot be reviewed now, or ''. Planning in progress
   // stays reachable: only planning proposals can be chosen then.
   function switchBlock(target) {
@@ -339,6 +401,7 @@ export function mountMemoryEdit(container, bridge) {
   function choose(id) {
     const target = proposals.find((proposal) => proposal.id === id);
     if (!target || target.id === current?.id || switchBlock(target)) return;
+    if (comparing) endComparison();
     if (previewing) setPreview(false);
     frontChecked = false;
     if (pollingId && pollingId !== id) stopPolling();
@@ -354,6 +417,7 @@ export function mountMemoryEdit(container, bridge) {
   // nothing else is chosen in its place.
   function dropSelection() {
     removedIds.add(current.id);
+    if (comparing) endComparison();
     if (previewing) setPreview(false);
     if (pollingId === current?.id) stopPolling();
     current = null;
@@ -382,6 +446,7 @@ export function mountMemoryEdit(container, bridge) {
 
   function sync() {
     if (disposed) return;
+    if (comparing && !comparable()) endComparison();
     // Only a shown, unredacted ready proposal can stay on the scene, whatever
     // status a record claims: a redaction ends its guide, front check and lock.
     if (previewing && (!current || current.status !== 'ready' || isRedacted(current) || !current.result?.transform)) setPreview(false);
@@ -453,6 +518,7 @@ export function mountMemoryEdit(container, bridge) {
         el('p', {}, [el('strong', { textContent: 'Proposal (AI suggestion): ' }), proposalTitle(result)]),
         el('p', { className: 'hint', textContent: `Reason given: ${result.reason}` }),
       );
+      if (bridge.targets || composition) nodes.push(el('p', { className: 'hint', textContent: 'Photo, Saved and Proposed comparison is available only for a single-photo scene with one object.' }));
       if (composition) {
         const before = editor.arrangement;
         const after = before ? withObject(before, targetOf(current), result.transform) : null;
@@ -528,19 +594,55 @@ export function mountMemoryEdit(container, bridge) {
       if (current.baseVersion !== editor.version) {
         nodes.push(el('p', { className: 'hint', textContent: `This proposal was made for version ${current.baseVersion}, but the saved position is now version ${editor.version}. Plan again to use it.` }));
       } else {
-        const toggle = el('button', { type: 'button', className: 'secondary', textContent: previewing ? 'Stop preview' : 'Preview on the scene', disabled: busy || (!previewing && !editor.clean) });
+        const singleCompare = Boolean(bridge.comparison && !bridge.targets && !composition);
+        const reviewed = current;
+        const held = () => singleCompare && (!bridge.comparison.available() || Boolean(proposalBlockedReason(comparisonSource())) || !singleProposalForScene() || unsettled() || !comparisonReadCertain);
+        const canApply = () => !busy && previewing && (!needsFront || (front && frontChecked)) &&
+          (!singleCompare || (!held() && current === reviewed && current.status === 'ready' && !isRedacted(current) &&
+            current.baseVersion === bridge.editor().version && bridge.editor().clean &&
+            (!comparing || comparisonView === 'proposed')));
+        const toggle = el('button', { type: 'button', className: 'secondary', textContent: previewing ? 'Stop preview' : 'Preview on the scene', disabled: busy || comparing || held() || (!previewing && !editor.clean) });
         toggle.addEventListener('click', () => {
+          if (singleCompare && (busy || comparing || held() || current !== reviewed || (!previewing && !bridge.editor().clean))) return;
           setPreview(!previewing);
           sync();
         });
-        const apply = el('button', { type: 'button', textContent: 'Apply and save this proposal', disabled: busy || !previewing || (needsFront && (!front || !frontChecked)) });
-        apply.addEventListener('click', () => applyProposal(needsFront && Boolean(front) && frontChecked));
+        const apply = el('button', { type: 'button', textContent: 'Apply and save this proposal', disabled: !canApply() });
+        apply.addEventListener('click', () => {
+          if (!canApply()) {
+            sync();
+            return;
+          }
+          applyProposal(needsFront && Boolean(front) && frontChecked);
+        });
         front?.addEventListener('change', () => {
           frontChecked = front.checked;
-          apply.disabled = busy || !previewing || !frontChecked;
+          apply.disabled = !canApply();
         });
         if (previewing) nodes.push(el('p', { className: 'hint', textContent: 'Showing the proposed position on the scene. It is not saved.' }));
-        nodes.push(el('div', { className: 'actions' }, [toggle, apply]));
+        const actions = comparing ? [apply] : [toggle, apply];
+        if (singleCompare) {
+          if (!bridge.comparison.available()) nodes.push(el('p', { className: 'hint', textContent: 'The 3D preview is not available or its photo source could not be confirmed, so a new proposal cannot be applied here.' }));
+          else if (!singleProposalForScene()) nodes.push(el('p', { className: 'hint', textContent: 'This proposal does not identify this scene’s photo and selected object, so it cannot be compared or applied here.' }));
+          if (!comparing) {
+            const compare = el('button', { type: 'button', className: 'secondary', textContent: 'Compare photo, saved and proposal', disabled: !comparable() });
+            comparisonTrigger = compare;
+            compare.addEventListener('click', beginComparison);
+            actions.unshift(compare);
+          }
+          if (applyAttempt && reusable(applyAttempt) && applyAttempt.id === current.id && singleProposalForScene() && !proposalBlockedReason(comparisonSource())) {
+            const retry = el('button', { type: 'button', className: 'secondary', textContent: 'Retry the unconfirmed apply', disabled: busy });
+            retry.addEventListener('click', () => {
+              if (busy || current !== reviewed || isRedacted(current) || current.status !== 'ready' ||
+                  !applyAttempt || !reusable(applyAttempt) || applyAttempt.id !== current.id ||
+                  !singleProposalForScene() || proposalBlockedReason(comparisonSource())) return;
+              applyProposal(applyAttempt.body.frontConfirmed);
+            });
+            actions.push(retry);
+            nodes.push(el('p', { className: 'hint', textContent: 'This repeats the same unconfirmed request; it does not create a new apply request.' }));
+          }
+        }
+        nodes.push(el('div', { className: 'actions' }, actions));
       }
     }
     review.replaceChildren(...nodes);
@@ -602,6 +704,11 @@ export function mountMemoryEdit(container, bridge) {
   // newer read replaced it (that read's own promise is latestRead).
   let latestRead = null;
   function refresh() {
+    if (bridge.comparison) {
+      comparisonReadCertain = false;
+      if (comparing) endComparison();
+      sync();
+    }
     latestRead = readOnce();
     return latestRead;
   }
@@ -609,6 +716,12 @@ export function mountMemoryEdit(container, bridge) {
     const token = ++readToken;
     const [list, versions] = await Promise.all([request(`${bridge.jobUrl}/proposals`), request(`${bridge.jobUrl}/history`)]);
     if (disposed || token !== readToken) return null;
+    const version = bridge.editor().version;
+    const historyVersions = Array.isArray(versions.body) ? versions.body.map((entry) => entry?.version) : [];
+    const newerSavedVersion = historyVersions.some((saved) => saved > version);
+    comparisonReadCertain = Boolean(list.ok && versions.ok && Array.isArray(list.body) && Array.isArray(versions.body) &&
+      historyVersions.every(Number.isInteger) && historyVersions.includes(version) && !newerSavedVersion);
+    if (bridge.comparison && versions.ok && newerSavedVersion) bridge.conflict();
     if (list.ok && Array.isArray(list.body)) {
       proposals = list.body.filter((proposal) => !removedIds.has(proposal?.id)).map(guard);
       if (current) {
@@ -630,6 +743,8 @@ export function mountMemoryEdit(container, bridge) {
     }
     if (versions.ok && Array.isArray(versions.body)) history = versions.body;
     if (!list.ok || !versions.ok) status.textContent = 'Saved proposals or versions could not be loaded. Reload the page to try again.';
+    else if (bridge.comparison && !comparisonReadCertain) status.textContent = 'The current saved version could not be confirmed. Load the saved version or reload the page.';
+    else if (status.textContent === 'The current saved version could not be confirmed. Load the saved version or reload the page.') status.textContent = '';
     sync();
     return list.ok && versions.ok && Array.isArray(list.body);
   }
@@ -747,6 +862,7 @@ export function mountMemoryEdit(container, bridge) {
   // Runs one server mutation at a time with the manual editor locked.
   async function mutate(run) {
     busy = true;
+    if (comparing) endComparison();
     readToken += 1;
     message.textContent = '';
     bridge.setLocked(true);
@@ -917,6 +1033,7 @@ export function mountMemoryEdit(container, bridge) {
     showAll,
     dispose() {
       disposed = true;
+      if (comparing) endComparison();
       stopPolling();
     },
   };

@@ -174,7 +174,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   // controls ignore pointer, wheel and keys, touch scrolls the page, and the
   // canvas is not a tab stop. Changing the mode never moves the camera. Only
   // the explicit choice to explore moves focus, to the canvas, so arrow keys
-  // work at once; callers use setInteractive(true) only for that choice.
+  // work at once. A temporary view can restore the mode without moving focus.
   let interactive = false;
   const setInteractive = (on) => {
     interactive = Boolean(on);
@@ -183,9 +183,9 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     canvas.tabIndex = interactive ? 0 : -1;
   };
   setInteractive(false);
-  const explore = (on) => {
+  const explore = (on, { focus = true } = {}) => {
     setInteractive(on);
-    if (interactive) canvas.focus();
+    if (interactive && focus) canvas.focus();
   };
   const draw = () => {
     if (isReleased()) return;

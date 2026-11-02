@@ -21,7 +21,7 @@ export class WebGLRenderer {
   }
   setPixelRatio() {}
   setSize() {}
-  render() {}
+  render(scene) { globalThis.lastRenderedScene = scene; }
   dispose() { log('renderer.dispose'); }
   forceContextLoss() { log('renderer.forceContextLoss'); }
 }
@@ -157,12 +157,13 @@ before(async () => {
 });
 
 after(() => {
-  for (const name of ['document', 'window', 'ResizeObserver', 'fetch', 'viewerLog', 'viewerFail']) delete globalThis[name];
+  for (const name of ['document', 'window', 'ResizeObserver', 'fetch', 'viewerLog', 'viewerFail', 'lastRenderedScene']) delete globalThis[name];
 });
 
 beforeEach(() => {
   globalThis.viewerLog = [];
   globalThis.viewerFail = null;
+  globalThis.document.activeElement = null;
   posts = [];
   heldGets = null;
   gets = [];
@@ -197,11 +198,11 @@ async function openScene({ sources = [] } = {}) {
   // The scene's own message follows its viewport.
   const viewMessage = () => {
     const viewport = find((node) => node.className === 'space-viewport')[0];
-    return viewport.parent.children[viewport.parent.children.indexOf(viewport) + 1].textContent;
+    return viewport.parent.parent.children.find((node) => node.className === 'form-message' && node.role === 'alert').textContent;
   };
   const axis = (label) => find((node) => node.tag === 'input' && node.attributes['aria-label'] === label)[0];
   const canvases = () => find((node) => node.tag === 'canvas');
-  return { space, button, editStatus, viewMessage, axis, canvases, find };
+  return { space, button, editStatus, viewMessage, axis, canvases, find, source: granted };
 }
 
 const count = (entry) => globalThis.viewerLog.filter((item) => item === entry).length;
@@ -382,6 +383,281 @@ describe('memory proposals inside the scene', () => {
     appliedVersion: null,
   });
 
+  it('compares the actual saved and proposed transforms at one camera and restores the previous view', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    view.button('Explore in 3D').dispatch('click');
+    view.button('Inspect from the side').dispatch('click');
+    const previous = { position: globalThis.viewerControls.object.position.toArray(), target: globalThis.viewerControls.target.toArray() };
+    const foreground = globalThis.lastRenderedScene.getObjectByName('selected-foreground');
+    const savedPosition = foreground.position.toArray();
+    const viewport = view.find((node) => node.className === 'space-viewport')[0];
+    Object.assign(viewport, { clientWidth: 400, clientHeight: 300 });
+    const compare = view.button('Compare photo, saved and proposal');
+    assert.equal(compare.disabled, false);
+    compare.dispatch('click');
+    const bar = view.find((node) => node.classList.contains('visit-compare'))[0];
+    const frame = view.find((node) => node.classList.contains('memory-comparison-frame'))[0];
+    const pressed = () => ['Photo', 'Saved', 'Proposed'].filter((name) => view.button(name).attributes['aria-pressed'] === 'true');
+    assert.equal(bar.hidden, false);
+    assert.ok(bar.parent.children.indexOf(bar) < bar.parent.children.indexOf(frame), 'controls and context precede the scene');
+    assert.deepEqual(pressed(), ['Saved']);
+    assert.equal(view.button('Preview on the scene'), undefined, 'the redundant inspector preview is hidden');
+    assert.match(bar.textContent, /Your memory: “It was further left\.”/);
+    assert.match(bar.textContent, /Proposed change: Move the selected object/);
+    assert.equal(view.button('Original viewpoint').parent.hidden, true, 'camera controls pause during comparison');
+    assert.equal(view.button('Explore in 3D').disabled, true);
+    assert.equal(view.axis('Left / right').disabled, true);
+    const camera = globalThis.viewerControls.object.position.toArray();
+    const target = globalThis.viewerControls.target.toArray();
+    const projection = [...globalThis.viewerControls.object.projectionMatrix.elements];
+    assert.deepEqual(camera, [0, 0, 0]);
+    assert.deepEqual(foreground.position.toArray(), savedPosition);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+
+    view.button('Proposed').dispatch('click');
+    assert.deepEqual(pressed(), ['Proposed']);
+    assert.equal(foreground.position.x, savedPosition[0] - 0.5);
+    assert.deepEqual(globalThis.viewerControls.object.position.toArray(), camera);
+    assert.deepEqual(globalThis.viewerControls.target.toArray(), target);
+    assert.deepEqual([...globalThis.viewerControls.object.projectionMatrix.elements], projection);
+    assert.equal(view.button('Apply and save this proposal').disabled, false);
+    view.button('Saved').dispatch('click');
+    assert.deepEqual(pressed(), ['Saved']);
+    assert.deepEqual(foreground.position.toArray(), savedPosition);
+    assert.deepEqual(globalThis.viewerControls.object.position.toArray(), camera);
+    assert.deepEqual([...globalThis.viewerControls.object.projectionMatrix.elements], projection);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+
+    view.button('Photo').dispatch('click');
+    assert.deepEqual(pressed(), ['Saved'], 'the photo is not selected before its bytes load');
+    const image = view.find((node) => node.className === 'visit-compare-photo')[0];
+    assert.equal(new URL(image.src, 'http://127.0.0.1').pathname, `/api/drafts/${DRAFT_ID}/reconstructions/${JOB_ID}/assets/texture.jpg`);
+    const lateLoad = image.onload;
+    view.button('Proposed').dispatch('click');
+    lateLoad();
+    assert.deepEqual(pressed(), ['Proposed']);
+    assert.equal(image.hidden, true, 'a late Photo load cannot replace the newer choice');
+    assert.equal(foreground.position.x, savedPosition[0] - 0.5);
+    view.button('Photo').dispatch('click');
+    image.onload();
+    assert.deepEqual(pressed(), ['Photo']);
+    assert.equal(image.hidden, false);
+    const box = view.find((node) => node.className === 'box-overlay')[0];
+    assert.equal(box.hidden, false);
+    assert.deepEqual({ left: box.style.left, top: box.style.top, width: box.style.width, height: box.style.height },
+      { left: '80px', top: '60px', width: '180px', height: '180px' });
+    assert.match(bar.textContent, /box marks the selected photo region/);
+    Object.assign(viewport, { clientWidth: 300, clientHeight: 300 });
+    globalThis.viewerResize();
+    assert.deepEqual({ left: box.style.left, top: box.style.top, width: box.style.width, height: box.style.height },
+      { left: '50px', top: '75px', width: '150px', height: '150px' });
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    view.button('Leave comparison').dispatch('click');
+    assert.equal(bar.hidden, true);
+    assert.deepEqual(foreground.position.toArray(), savedPosition);
+    assert.deepEqual(globalThis.viewerControls.object.position.toArray(), previous.position);
+    assert.deepEqual(globalThis.viewerControls.target.toArray(), previous.target);
+    assert.equal(view.button('Original viewpoint').parent.hidden, false);
+    assert.equal(view.button('Explore in 3D').attributes['aria-pressed'], 'true');
+    assert.equal(view.axis('Left / right').disabled, false);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('holds an unsaved manual edit and only sends a visible proposed change on explicit apply', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    const x = view.axis('Left / right');
+    x.value = '0.3';
+    x.dispatch('input');
+    assert.equal(view.button('Compare photo, saved and proposal').disabled, true);
+    assert.equal(x.value, '0.3');
+    assert.equal(posts.length, 0);
+    view.button('Revert to saved').dispatch('click');
+    view.button('Compare photo, saved and proposal').dispatch('click');
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    view.button('Proposed').dispatch('click');
+    view.button('Apply and save this proposal').dispatch('click');
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].body.baseVersion, 1);
+    assert.equal(posts[0].body.frontConfirmed, false);
+    const edit = { version: 2, offset: [-0.5, 0, 0], yaw: 0 };
+    proposals = [{ ...ready(), status: 'applied', appliedVersion: 2 }];
+    posts[0].respond(json(200, { edit, proposal: proposals[0] }));
+    await settle();
+    assert.equal(view.editStatus(), 'Saved, version 2.');
+    assert.equal(x.value, '-0.5');
+    view.space.dispose();
+    job.edit = edit;
+    const reopened = await openScene();
+    assert.equal(reopened.editStatus(), 'Saved, version 2.');
+    assert.equal(reopened.axis('Left / right').value, '-0.5');
+    reopened.space.dispose();
+  });
+
+  it('keeps the saved scene usable when the bound photo fails, and drops a load after source withdrawal', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    view.button('Compare photo, saved and proposal').dispatch('click');
+    const bar = view.find((node) => node.classList.contains('visit-compare'))[0];
+    const image = view.find((node) => node.className === 'visit-compare-photo')[0];
+    view.button('Photo').dispatch('click');
+    image.onerror();
+    assert.equal(image.hidden, true);
+    assert.match(bar.textContent, /photo could not be shown/);
+    assert.equal(view.button('Saved').attributes['aria-pressed'], 'true');
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    view.button('Photo').dispatch('click');
+    const late = image.onload;
+    view.source.permissions.place = false;
+    late();
+    assert.equal(bar.hidden, true);
+    assert.equal(image.hidden, true);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('retries a restored photo with a fresh URL and ignores the failed request’s late callbacks', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    view.button('Compare photo, saved and proposal').dispatch('click');
+    const bar = view.find((node) => node.classList.contains('visit-compare'))[0];
+    const image = view.find((node) => node.className === 'visit-compare-photo')[0];
+    const pressed = () => ['Photo', 'Saved', 'Proposed'].filter((name) => view.button(name).attributes['aria-pressed'] === 'true');
+    view.button('Photo').dispatch('click');
+    const firstUrl = image.src;
+    const firstLoad = image.onload;
+    const firstError = image.onerror;
+    firstError();
+    assert.match(bar.textContent, /photo could not be shown/);
+    assert.deepEqual(pressed(), ['Saved']);
+    view.button('Photo').dispatch('click');
+    const secondUrl = image.src;
+    assert.notEqual(secondUrl, firstUrl);
+    assert.equal(new URL(secondUrl, 'http://127.0.0.1').pathname, new URL(firstUrl, 'http://127.0.0.1').pathname);
+    assert.match(bar.textContent, /photo could not be shown\. Trying again/);
+    assert.equal(image.hidden, true);
+    assert.deepEqual(pressed(), ['Saved']);
+    const secondLoad = image.onload;
+    firstLoad();
+    firstError();
+    assert.match(bar.textContent, /photo could not be shown\. Trying again/, 'an obsolete outcome cannot hide the retry');
+    assert.equal(image.hidden, true);
+    image.onerror();
+    assert.match(bar.textContent, /photo could not be shown/, 'a repeated failure remains visible');
+    assert.deepEqual(pressed(), ['Saved']);
+    view.button('Photo').dispatch('click');
+    assert.notEqual(image.src, secondUrl);
+    secondLoad();
+    assert.equal(image.hidden, true, 'an old successful callback cannot replace the latest request');
+    image.onload();
+    assert.equal(image.hidden, false);
+    assert.deepEqual(pressed(), ['Photo']);
+    assert.doesNotMatch(bar.textContent, /photo could not be shown|Loading the photo/);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('does not steal unrelated focus when a held photo load observes a source restriction', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    const canvas = view.canvases()[0];
+    let canvasFocuses = 0;
+    canvas.focus = () => { canvasFocuses += 1; globalThis.document.activeElement = canvas; };
+    view.button('Explore in 3D').dispatch('click');
+    assert.equal(canvasFocuses, 1, 'an explicit Explore choice focuses the canvas');
+    view.button('Compare photo, saved and proposal').dispatch('click');
+    view.button('Photo').dispatch('click');
+    const image = view.find((node) => node.className === 'visit-compare-photo')[0];
+    const late = image.onload;
+    const unrelated = view.find((node) => node.tag === 'textarea')[0];
+    globalThis.document.activeElement = unrelated;
+    view.source.permissions.place = false;
+    late();
+    assert.equal(view.find((node) => node.classList.contains('visit-compare'))[0].hidden, true);
+    assert.equal(canvasFocuses, 1, 'restoring exploration is not a new Explore choice');
+    assert.equal(globalThis.document.activeElement, unrelated);
+    assert.equal(view.button('Explore in 3D').attributes['aria-pressed'], 'true');
+    view.space.dispose();
+  });
+
+  it('moves focus to a visible control when asynchronous closure hides the focused comparison', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    view.button('Compare photo, saved and proposal').dispatch('click');
+    view.button('Photo').dispatch('click');
+    const image = view.find((node) => node.className === 'visit-compare-photo')[0];
+    const late = image.onload;
+    const focused = view.button('Saved');
+    const original = view.button('Original viewpoint');
+    original.focus = () => { globalThis.document.activeElement = original; };
+    globalThis.document.activeElement = focused;
+    view.source.permissions.place = false;
+    late();
+    assert.equal(view.find((node) => node.classList.contains('visit-compare'))[0].hidden, true);
+    assert.equal(globalThis.document.activeElement, original);
+    assert.equal(original.disabled, false);
+    assert.equal(view.button('Explore in 3D').attributes['aria-pressed'], 'false');
+    view.space.dispose();
+  });
+
+  it('returns focus to the comparison trigger on explicit Leave', async () => {
+    const originalFocus = FakeElement.prototype.focus;
+    FakeElement.prototype.focus = function focus() { globalThis.document.activeElement = this; };
+    try {
+      proposals = [ready()];
+      const view = await openScene();
+      view.button('Compare photo, saved and proposal').dispatch('click');
+      assert.equal(globalThis.document.activeElement, view.button('Saved'));
+      view.button('Leave comparison').dispatch('click');
+      assert.equal(globalThis.document.activeElement, view.button('Compare photo, saved and proposal'));
+      assert.equal(globalThis.document.activeElement.disabled, false);
+      view.space.dispose();
+    } finally {
+      FakeElement.prototype.focus = originalFocus;
+    }
+  });
+
+  it('rechecks source permission at apply even if the visible button was enabled earlier', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    view.button('Compare photo, saved and proposal').dispatch('click');
+    view.button('Proposed').dispatch('click');
+    const apply = view.button('Apply and save this proposal');
+    assert.equal(apply.disabled, false);
+    view.source.permissions.place = false;
+    apply.dispatch('click');
+    assert.equal(posts.length, 0);
+    assert.equal(view.find((node) => node.classList.contains('visit-compare'))[0].hidden, true);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    view.space.dispose();
+  });
+
+  it('replays the exact unconfirmed apply without requiring another preview', async () => {
+    proposals = [ready()];
+    const view = await openScene();
+    view.button('Compare photo, saved and proposal').dispatch('click');
+    view.button('Proposed').dispatch('click');
+    view.button('Apply and save this proposal').dispatch('click');
+    posts[0].respond({ status: 0, ok: false, json: async () => null });
+    await settle();
+    assert.equal(view.button('Compare photo, saved and proposal').disabled, true);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    const retry = view.button('Retry the unconfirmed apply');
+    assert.equal(retry.disabled, false);
+    retry.dispatch('click');
+    assert.deepEqual(posts[1].body, posts[0].body);
+    const edit = { version: 2, offset: [-0.5, 0, 0], yaw: 0 };
+    proposals = [{ ...ready(), status: 'applied', appliedVersion: 2 }];
+    posts[1].respond(json(200, { edit, proposal: proposals[0] }));
+    await settle();
+    assert.equal(view.editStatus(), 'Saved, version 2.');
+    view.space.dispose();
+  });
+
   it('pauses manual editing while a proposal is previewed and adopts the server-confirmed version', async () => {
     proposals = [ready()];
     const view = await openScene();
@@ -461,6 +737,27 @@ describe('face-anchor preview in the scene', () => {
       appliedVersion: null,
     };
   };
+
+  it('requires a fresh visible direction check when comparison returns to Proposed', async () => {
+    proposals = [faceProposal()];
+    const view = await openScene();
+    view.button('Compare photo, saved and proposal').dispatch('click');
+    view.button('Proposed').dispatch('click');
+    let check = view.find((node) => node.tag === 'input' && node.type === 'checkbox' && node.parent?.textContent.includes('I checked the scene'))[0];
+    assert.ok(check);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    check.checked = true;
+    check.dispatch('change');
+    assert.equal(view.button('Apply and save this proposal').disabled, false);
+    view.button('Saved').dispatch('click');
+    view.button('Proposed').dispatch('click');
+    check = view.find((node) => node.tag === 'input' && node.type === 'checkbox' && node.parent?.textContent.includes('I checked the scene'))[0];
+    assert.ok(check);
+    assert.equal(check.checked, false);
+    assert.equal(view.button('Apply and save this proposal').disabled, true);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
 
   it('draws the photographed side and the target line, and offers confirmation only when they agree', async () => {
     proposals = [faceProposal()];

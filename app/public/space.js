@@ -718,6 +718,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     // other holds it, so no two editors write from different states.
     const lockedBy = new Set();
     let proposalPreview = null;
+    let comparison = null;
     // The manual field being typed in, and every number field whose own text
     // is not a valid value (field -> message). Neither is rewritten from the
     // preview, and any invalid field blocks saving, until it is fixed or an
@@ -758,7 +759,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       for (const control of controls) control.range.disabled = control.number.disabled = reloading || locked;
       reload.hidden = !(session.uncertain || conflict);
       reload.disabled = busy;
-      photoSide.button.disabled = !viewer;
+      photoSide.button.disabled = !viewer || Boolean(comparison);
       memoryEdit?.sync();
       collaborationPanel?.sync();
     };
@@ -889,11 +890,166 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       showEdit();
     });
 
+    const comparisonPhoto = el('img', { className: 'visit-compare-photo', alt: 'The photo copy used to build this scene', hidden: true });
+    const comparisonBox = el('div', { className: 'box-overlay', hidden: true });
+    comparisonBox.setAttribute('aria-hidden', 'true');
+    const comparisonFrame = el('div', { className: 'visit-compare-frame memory-comparison-frame' }, [viewport, comparisonPhoto, comparisonBox]);
+    const comparisonWords = el('p', { className: 'memory-comparison-words', tabIndex: 0 });
+    const comparisonAction = el('p');
+    const comparisonStatus = el('p', { className: 'hint', role: 'status' });
+    const comparisonPhotoNote = el('p', { className: 'hint', hidden: true });
+    const photoChoice = el('button', { type: 'button', className: 'secondary', textContent: 'Photo' });
+    const savedChoice = el('button', { type: 'button', className: 'secondary', textContent: 'Saved' });
+    const proposedChoice = el('button', { type: 'button', className: 'secondary', textContent: 'Proposed' });
+    const leaveComparison = el('button', { type: 'button', className: 'secondary', textContent: 'Leave comparison' });
+    const comparisonBar = el('div', { className: 'visit-compare memory-comparison', hidden: true }, [
+      el('div', { className: 'actions' }, [photoChoice, savedChoice, proposedChoice, leaveComparison]),
+      comparisonWords, comparisonAction,
+      el('p', { className: 'hint', textContent: 'Photo is the copy used to build this scene. Saved and Proposed use the same photo viewpoint. Switching does not save a change.' }),
+      comparisonPhotoNote, comparisonStatus,
+    ]);
+    const cameraActions = el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]);
+    let comparisonLoad = 0;
+    let comparisonTimer = null;
+    let comparisonResize = null;
+    let shownComparisonView = 'saved';
+    const imageSize = surfaceResult.body?.source?.image_size;
+    const boxUsable = Array.isArray(imageSize) && imageSize.length === 2 && imageSize.every((value) => Number.isInteger(value) && value > 0) &&
+      !boxProblem(job.box, ...imageSize);
+    const positionComparisonBox = () => {
+      comparisonBox.hidden = true;
+      if (shownComparisonView !== 'photo' || !boxUsable) return;
+      const width = viewport.clientWidth;
+      const height = viewport.clientHeight;
+      if (!width || !height) return;
+      const [imageWidth, imageHeight] = imageSize;
+      const [x1, y1, x2, y2] = job.box;
+      const fitWidth = Math.min(width, height * imageWidth / imageHeight);
+      const fitHeight = fitWidth * imageHeight / imageWidth;
+      Object.assign(comparisonBox.style, {
+        left: `${(width - fitWidth) / 2 + fitWidth * x1 / imageWidth}px`,
+        top: `${(height - fitHeight) / 2 + fitHeight * y1 / imageHeight}px`,
+        width: `${fitWidth * (x2 - x1) / imageWidth}px`,
+        height: `${fitHeight * (y2 - y1) / imageHeight}px`,
+      });
+      comparisonBox.hidden = false;
+    };
+    const cancelComparisonPhoto = () => {
+      comparisonLoad += 1;
+      clearTimeout(comparisonTimer);
+      comparisonTimer = null;
+      comparisonPhoto.onload = null;
+      comparisonPhoto.onerror = null;
+      comparisonPhoto.removeAttribute('src');
+    };
+    const showComparisonView = (view) => {
+      shownComparisonView = view;
+      for (const [button, name] of [[photoChoice, 'photo'], [savedChoice, 'saved'], [proposedChoice, 'proposed']]) {
+        button.setAttribute('aria-pressed', String(view === name));
+      }
+      comparisonPhoto.hidden = view !== 'photo';
+      comparisonPhotoNote.hidden = view !== 'photo';
+      comparisonFrame.classList.toggle('is-photo', view === 'photo');
+      positionComparisonBox();
+    };
+    const comparisonBridge = {
+      available: () => Boolean(viewer && surfaceResult.body?.source?.source_id === job.sourceId && !disposed && token === panelGeneration),
+      source: () => sourceFor(job.sourceId),
+      open(details) {
+        if (!this.available() || comparison) return false;
+        comparison = { ...details, camera: viewer.getCamera(), interactive: viewer.isInteractive() };
+        comparisonWords.textContent = `Your memory: “${details.statement}”`;
+        comparisonAction.textContent = `Proposed change: ${details.action}`;
+        comparisonPhotoNote.textContent = boxUsable ? 'The box marks the selected photo region; it is not a confirmed object outline.' : 'The selected photo box could not be shown here.';
+        comparisonStatus.textContent = '';
+        comparisonBar.hidden = false;
+        viewer.setInteractive(false);
+        explore.attach(null);
+        original.disabled = side.disabled = photoSide.button.disabled = true;
+        cameraActions.hidden = explore.status.hidden = photoSide.status.hidden = true;
+        comparisonFrame.classList.toggle('is-comparing', true);
+        viewer.setPhotoFraming(true);
+        viewer.originalView();
+        comparisonResize = new ResizeObserver(positionComparisonBox);
+        comparisonResize.observe(viewport);
+        showComparisonView('saved');
+        savedChoice.focus();
+        return true;
+      },
+      close({ focusHidden = true } = {}) {
+        if (!comparison) return;
+        const saved = comparison;
+        const focusWasInside = comparisonBar.contains(document.activeElement);
+        comparison = null;
+        comparisonResize?.disconnect();
+        comparisonResize = null;
+        cancelComparisonPhoto();
+        showComparisonView('saved');
+        comparisonBar.hidden = true;
+        comparisonWords.textContent = '';
+        comparisonAction.textContent = '';
+        comparisonStatus.textContent = '';
+        cameraActions.hidden = explore.status.hidden = photoSide.status.hidden = false;
+        comparisonFrame.classList.toggle('is-comparing', false);
+        viewer?.setPhotoFraming(false);
+        viewer?.setCamera(saved.camera);
+        if (saved.interactive) viewer?.setInteractive(true, { focus: false });
+        explore.attach(viewer);
+        original.disabled = side.disabled = !viewer;
+        photoSide.button.disabled = !viewer;
+        if (focusHidden && focusWasInside) original.focus();
+      },
+    };
+    const chooseComparisonScene = (view) => {
+      if (!comparison || !comparison.select(view) || !comparison) return;
+      cancelComparisonPhoto();
+      comparisonStatus.textContent = '';
+      showComparisonView(view);
+    };
+    savedChoice.addEventListener('click', () => chooseComparisonScene('saved'));
+    proposedChoice.addEventListener('click', () => chooseComparisonScene('proposed'));
+    photoChoice.addEventListener('click', () => {
+      // Until the photo actually loads, the drawn and selected view is Saved.
+      if (!comparison || !comparison.select('saved') || !comparison) return;
+      const retrying = comparisonStatus.textContent.startsWith('The photo could not be shown.');
+      cancelComparisonPhoto();
+      showComparisonView('saved');
+      const load = comparisonLoad;
+      comparisonStatus.textContent = retrying
+        ? 'The photo could not be shown. Trying again; the saved scene is still available.'
+        : 'Loading the photo…';
+      const settled = (ok) => {
+        if (!comparison || load !== comparisonLoad || disposed || token !== panelGeneration) return;
+        clearTimeout(comparisonTimer);
+        comparisonTimer = null;
+        comparisonLoad += 1;
+        comparisonPhoto.onload = null;
+        comparisonPhoto.onerror = null;
+        if (ok) {
+          if (!comparison.select('photo') || !comparison) return;
+          comparisonStatus.textContent = '';
+          showComparisonView('photo');
+        } else {
+          comparisonPhoto.removeAttribute('src');
+          comparison.select('saved');
+          comparisonStatus.textContent = 'The photo could not be shown. The saved scene is still available.';
+          showComparisonView('saved');
+        }
+      };
+      comparisonPhoto.onload = () => settled(true);
+      comparisonPhoto.onerror = () => settled(false);
+      comparisonTimer = setTimeout(() => settled(false), 10_000);
+      // A failed image can remain in the browser's image cache after the file
+      // returns. Each explicit choice requests the same asset under a new URL.
+      comparisonPhoto.src = `${assetUrl(jobId, 'texture.jpg')}?comparison=${crypto.randomUUID()}`;
+    });
+    leaveComparison.addEventListener('click', () => comparison?.exit());
+
     panel.replaceChildren(
       heading,
       nextActions(memorySection, collaborationSection, sharesSection),
       sceneWorkspace(
-        [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, viewport, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })],
+        [cameraActions, explore.status, photoSide.status, comparisonBar, comparisonFrame, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })],
         [
           el('fieldset', { className: 'space-edit' }, [
             el('legend', { textContent: 'Move the selected object' }),
@@ -923,8 +1079,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     memoryEdit = mountMemoryEdit(memorySection, {
       jobUrl: `${base}/${jobId}`,
       textureUrl: assetUrl(jobId, 'texture.jpg'),
+      sourceId: job.sourceId,
       source: sourceFor(job.sourceId),
       editor: editorFor('memory'),
+      comparison: comparisonBridge,
       // Returns the shown facing relation for a face-anchor point, or null when
       // there is no 3D view to show it in.
       showTransform(transform, point = null) {

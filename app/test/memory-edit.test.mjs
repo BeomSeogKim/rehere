@@ -1084,3 +1084,98 @@ describe('blocked planning guidance', () => {
     assert.equal(proposalBlockedReason(undefined) !== null, true);
   });
 });
+
+describe('single-object comparison boundaries', () => {
+  const setup = async () => {
+    state.proposals = [proposal()];
+    let opened = null;
+    let closed = 0;
+    const source = structuredClone(publicSource);
+    const comparison = {
+      available: () => true,
+      source: () => source,
+      open(details) { opened = details; return true; },
+      close() { closed += 1; },
+    };
+    const view = mount({ source, extra: { sourceId: 'src', comparison } });
+    await settle();
+    return { view, source, opened: () => opened, closed: () => closed };
+  };
+
+  it('closes the comparison on redaction and ignores its obsolete callbacks', async () => {
+    const test = await setup();
+    test.view.button('Compare photo, saved and proposal').dispatch('click');
+    const old = test.opened();
+    assert.ok(old);
+    assert.equal(old.select('proposed'), true);
+    state.proposals = [proposal({ redacted: true, statement: { ...proposal().statement, text: null }, result: null })];
+    await test.view.handle.refresh();
+    assert.equal(test.closed(), 1);
+    assert.equal(old.select('photo'), false);
+    assert.doesNotMatch(test.view.container.textContent, /The counter faced the window/);
+    assert.equal(posts.length, 0);
+    test.view.handle.dispose();
+  });
+
+  it('closes when a version or source permission changes and refuses a late selection', async () => {
+    for (const change of ['version', 'permission']) {
+      const test = await setup();
+      test.view.button('Compare photo, saved and proposal').dispatch('click');
+      const old = test.opened();
+      assert.equal(old.select('proposed'), true);
+      if (change === 'version') test.view.bridge.editorState.version = 2;
+      else test.source.permissions.place = false;
+      assert.equal(old.select('photo'), false);
+      assert.equal(test.closed(), 1);
+      assert.equal(posts.length, 0);
+      test.view.handle.dispose();
+    }
+  });
+
+  it('does not compare or apply a proposal bound to another source', async () => {
+    const test = await setup();
+    state.proposals = [proposal({ result: { ...proposal().result, sourceId: 'another-source' } })];
+    await test.view.handle.refresh();
+    assert.equal(test.view.button('Compare photo, saved and proposal').disabled, true);
+    assert.equal(test.view.button('Preview on the scene').disabled, true);
+    assert.equal(test.view.button('Apply and save this proposal').disabled, true);
+    assert.match(test.view.container.textContent, /does not identify this scene’s photo and selected object/);
+    assert.equal(posts.length, 0);
+    test.view.handle.dispose();
+  });
+
+  it('holds comparison when history reveals a newer saved version', async () => {
+    const test = await setup();
+    test.view.button('Compare photo, saved and proposal').dispatch('click');
+    const old = test.opened();
+    assert.equal(old.select('proposed'), true);
+    state.history = [...state.history, { version: 2, offset: [0.2, 0, 0], yaw: 0, kind: 'manual' }];
+    await test.view.handle.refresh();
+    assert.equal(test.closed(), 1);
+    assert.ok(test.view.calls.some(([name]) => name === 'conflict'));
+    assert.equal(test.view.button('Compare photo, saved and proposal').disabled, true);
+    assert.equal(test.view.button('Apply and save this proposal').disabled, true);
+    assert.equal(posts.length, 0);
+    test.view.handle.dispose();
+  });
+
+  it('keeps exact-request recovery available when the 3D preview is unavailable', async () => {
+    state.proposals = [proposal()];
+    let available = true;
+    const comparison = { available: () => available, source: () => publicSource, open: () => true, close() {} };
+    const view = mount({ extra: { sourceId: 'src', comparison } });
+    await settle();
+    view.button('Preview on the scene').dispatch('click');
+    view.button('Apply and save this proposal').dispatch('click');
+    posts[0].respond(lost());
+    await settle();
+    available = false;
+    view.handle.sync();
+    assert.equal(view.button('Preview on the scene').disabled, true);
+    const retry = view.button('Retry the unconfirmed apply');
+    assert.equal(retry.disabled, false);
+    retry.dispatch('click');
+    assert.deepEqual(posts[1].body, posts[0].body);
+    view.handle.dispose();
+  });
+});
