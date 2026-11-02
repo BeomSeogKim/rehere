@@ -67,7 +67,10 @@ Providers can later add or correct their listening captions while keeping the
 original recording and previous caption versions. Existing links using the
 recording stop; corrected words need a new explicit visitor preview and link.
 Owners can preview a manual change, adopt it or preserve an alternative, and
-record a separate explicit time assertion. Recordings can also be linked to a
+record a separate explicit time assertion. They can separately write a short
+message for the providing contributor and explicitly choose to show which
+named part an adoption or alternative used. The form previews that disclosure;
+private review notes stay private. Recordings can also be linked to a
 visitor view and object or place without changing geometry. Withdrawal blocks
 dependent uses. Providers can separately review and confirm removal of their
 whole contribution from this app's tracked local storage. Access stops first;

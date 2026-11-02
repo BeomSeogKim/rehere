@@ -77,8 +77,34 @@ identity. It does not modify the saved scene. The owner can mark a submission
 as under review, hold it, reject it, adopt it, or preserve it as an alternative.
 Owner review notes are private because they can mention other people's private
 material. Contributors receive the fixed outcome and linked reconstruction
-identifier, rather than those notes. Rejection never deletes other accepted
+identifier, rather than those notes. The owner can separately write a short
+message for that contributor and, for an adoption or alternative, explicitly
+choose to show the reviewed object's name. Neither choice is preselected or
+filled from a private note. The review form previews the exact outgoing
+message and name before saving. Rejection never deletes other accepted
 material or rewrites the provider's words.
+
+This feedback is visible only to the owner and the providing contributor.
+The captured name describes the reviewed part at that decision; later object
+renames do not rewrite it, and it is not a claim about the current scene or
+historical truth. Reviewing, holding and rejecting can carry a message without
+a part name. No message or name is added to visitor packets, stories or model
+inputs, and no notification is sent.
+
+The review request accepts optional `feedback: {showTarget, note}`. `showTarget`
+is a boolean; `note` is plain text of at most 500 UTF-16 code units. The form
+uses the trimmed note in both its preview and request. An explicit empty or
+whitespace-only message with `showTarget: false` is refused; omit `feedback`
+to keep the ordinary decision. `showTarget: true` is accepted only for an
+adoption or alternative and can accompany an empty note. The server captures
+the validated target's confirmed name, or `Selected foreground object` for a
+single foreground; a client cannot provide a replacement label.
+
+New feedback needs current source and contributed-material access. Later
+withdrawal, unavailable material or blocked linked arrangements hide saved
+feedback, including on receipt replays. Physical contribution deletion removes
+it from retained review records. Existing decisions without feedback retain
+their request and response shapes; private review reasons remain private.
 
 For adoption or an alternative, the owner manually positions and turns the
 selected foreground and previews it in the actual scene. This review path does
@@ -103,8 +129,9 @@ From a chosen object's **Sources**, open its relevant recollections in this
 same list. **Show all** keeps unassigned submissions and unknown older records
 reachable. Filtering does not select a review or replace its typed fields,
 acknowledgments, prepared retry or scene preview. The target association is
-owner-only metadata; it does not change contributors' fixed outcome details
-or an issued visitor snapshot.
+owner-only metadata. Only an explicitly chosen, captured part name can be
+included in that contributor's review feedback; the internal target identity
+and an issued visitor snapshot remain unchanged.
 
 For a photo-backed correction or alternative, the owner also explicitly
 acknowledges reviewing the contributed photo. The photo, contributor's words
@@ -122,7 +149,10 @@ the recording informed the reconstruction.
 
 A changed saved version requires another review. An unconfirmed response keeps
 the prepared request for an exact retry; reusing a request ID with different
-input is refused. Switching views or signing out clears temporary previews.
+input is refused. While a review save is unconfirmed, its fields and outgoing
+feedback stay locked to that request. Changing the viewed object cannot change
+the held disclosure or retry payload. Switching views or signing out clears
+temporary previews.
 Rendering failure is not counted as a completed spatial preview.
 
 An uncertain submission keeps its request ID. The page checks the provider's

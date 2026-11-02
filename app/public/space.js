@@ -1762,6 +1762,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       const targets = {
         selected: () => selected,
         nameOf: names,
+        labelOf: (id) => objects.find((object) => object.id === id)?.label ?? null,
         describe: (arrangement) => describeArrangement(arrangement, names),
         ruleText: (rule) => ruleWords(rule, names),
         anchorRegion([u, v]) {

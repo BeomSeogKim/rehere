@@ -22,6 +22,11 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 // Text limits count UTF-16 code units, as browsers report string length.
 export const COLLABORATION_LIMITS = Object.freeze({ text: 10_000, captionText: 20_000, periodClaim: 300, reason: 1000, eraLabel: 300, eraStatement: 2000, contributions: 200, revisions: 200 });
 const OFFSET_LIMIT = 2;
+// A message to the provider about one review: at most this many UTF-16 code
+// units, and the reviewed object's saved name under the scene's own name rule.
+const FEEDBACK_NOTE_LIMIT = 500;
+const FOREGROUND_LABEL = 'Selected foreground object';
+const objectName = (value) => typeof value === 'string' && value.length >= 1 && value.length <= 80 && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
 const DECISIONS = Object.freeze({ reviewing: 'reviewing', adopt: 'adopted', alternative: 'alternative', hold: 'held', reject: 'rejected' });
 const CONFLICTS = new Set(['unknown', 'viewpoint', 'time', 'memory', 'recognition']);
 const REVIEWABLE = new Set(['submitted', 'reviewing', 'held']);
@@ -361,7 +366,7 @@ const editFields = (edit) => (Array.isArray(edit.objects) ? arrangementOf(edit) 
 const ACKNOWLEDGMENTS = ['photoReviewed', 'voiceReviewed'];
 function parseReview(body, twoObjects, composition = false) {
   const keys = ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'];
-  const extra = body !== null && typeof body === 'object' ? ACKNOWLEDGMENTS.filter((key) => Object.hasOwn(body, key)) : [];
+  const extra = body !== null && typeof body === 'object' ? [...ACKNOWLEDGMENTS, 'feedback'].filter((key) => Object.hasOwn(body, key)) : [];
   if (!exactKeys(body, [...keys, ...extra])) throw fail(400, UNREADABLE);
   const { requestId, baseVersion, baseRevision, decision, reason, conflict } = body;
   const valid = isId(requestId) && Number.isInteger(baseVersion) && baseVersion >= 1 && Number.isInteger(baseRevision) && baseRevision >= 1
@@ -371,8 +376,21 @@ function parseReview(body, twoObjects, composition = false) {
   const transform = body.transform === null ? null : parseTransform(body.transform, twoObjects, composition);
   if (geometry ? !transform : body.transform !== null) throw fail(400, 'The candidate position and turn could not be read.');
   const request = { requestId, baseVersion, baseRevision, decision, reason, conflict, transform };
-  for (const key of extra) request[key] = body[key];
+  for (const key of extra) request[key] = key === 'feedback' ? parseFeedback(body.feedback, decision) : body[key];
   return request;
+}
+
+// What the owner chose to tell the provider: the received note exactly as
+// sent, never rewritten, and whether to name the reviewed part. A note that
+// is only whitespace says nothing; an empty note needs the part disclosure.
+function parseFeedback(feedback, decision) {
+  const valid = exactKeys(feedback, ['showTarget', 'note']) && typeof feedback.showTarget === 'boolean' && plain(feedback.note, FEEDBACK_NOTE_LIMIT)
+    && (feedback.note === '' ? feedback.showTarget : feedback.note.trim() !== '');
+  if (!valid) throw fail(400, UNREADABLE);
+  if (feedback.showTarget && decision !== 'adopt' && decision !== 'alternative') {
+    throw fail(400, 'Only a decision that uses the recollection in an arrangement can name the part it changed.');
+  }
+  return { showTarget: feedback.showTarget, note: feedback.note };
 }
 
 // The bundle payload: writing that may be blank, its grants only when there is
@@ -565,12 +583,15 @@ function variantTarget(manifest, variant) {
 }
 
 // The owner's review reason and conflict label are private notes: a provider
-// sees only the fixed decision, linked variant and timestamps. After withdrawal
+// sees the fixed decision, linked variant and timestamps, plus any separate
+// feedback the owner explicitly wrote for them (projectFeedback). After withdrawal
 // the owner's free-form reason may quote the original, so it is not projected
 // either; it stays on disk.
 // The providing principal (an owner too) also sees the request ID, for receipt
 // lookup after a lost response. Photo source IDs, checksums and names stay private.
-function projectContribution(manifest, contribution, principal) {
+// `sourceBlocked` is the scene photo's current place-use state; anything but
+// an explicit false hides review feedback.
+function projectContribution(manifest, contribution, principal, sourceBlocked) {
   if (contribution.status === 'deleted') return projectTombstone(contribution);
   const owner = principal.role === 'owner';
   const withdrawn = contribution.withdrawnAt !== null;
@@ -583,6 +604,7 @@ function projectContribution(manifest, contribution, principal) {
     reviewedAt: contribution.review.reviewedAt,
     variantId: contribution.review.variantId,
     version: contribution.review.version,
+    ...(Object.hasOwn(contribution.review, 'feedback') && { feedback: projectFeedback(manifest, contribution, sourceBlocked) }),
   };
   return {
     id: contribution.id,
@@ -603,6 +625,25 @@ function projectContribution(manifest, contribution, principal) {
     photo: projectPhoto(manifest, contribution),
     voice: projectVoice(manifest, contribution),
   };
+}
+
+// Review feedback for the owner and the provider, as a checked copy. It is
+// shown only while the scene photo has place use, the provider has not
+// withdrawn, their own photo or recording is still available, and a linked
+// arrangement's own dependencies (never current main's) are usable for the
+// place. A malformed record shows nothing.
+function projectFeedback(manifest, contribution, sourceBlocked) {
+  const { review } = contribution;
+  const { feedback } = review;
+  const linked = typeof review.variantId === 'string';
+  const shaped = exactKeys(feedback, ['partLabel', 'note']) && plain(feedback.note, FEEDBACK_NOTE_LIMIT)
+    && (feedback.partLabel === null ? feedback.note.trim() !== '' : linked && objectName(feedback.partLabel) && (feedback.note === '' || feedback.note.trim() !== ''));
+  if (!shaped || sourceBlocked !== false || contribution.withdrawnAt !== null || !photoAttested(manifest, contribution)) return null;
+  if (review.variantId !== null) {
+    const variant = collaborationOf(manifest).variants.find((item) => item.id === review.variantId);
+    if (!variant || dependenciesBlocked(manifest, variant.contributionIds)) return null;
+  }
+  return { partLabel: feedback.partLabel, note: feedback.note };
 }
 
 // The recording without IDs, raw hashes or names. The caption hash is the
@@ -850,7 +891,7 @@ export class CollaborationStore {
     // only spatial use follows the photo's current restrictions.
     return {
       revision: collaboration.revision,
-      contributions: collaboration.contributions.filter((item) => owner || item.principalId === principal.id).map((item) => projectContribution(manifest, item, principal)),
+      contributions: collaboration.contributions.filter((item) => owner || item.principalId === principal.id).map((item) => projectContribution(manifest, item, principal, !uses.place)),
       variants: owner ? collaboration.variants.map((item) => projectVariant(manifest, item, !uses.place)) : [],
       blocked: !uses.place || contributionBlocked,
       modelBlocked: !uses.model || modelBlocked(manifest),
@@ -867,7 +908,7 @@ export class CollaborationStore {
       const manifest = await this.#scene(draftId, jobId);
       const collaboration = collaborationOf(manifest);
       const replay = this.#receipt(collaboration, request, 'submit', principal.id, `${draftId}/${jobId}`);
-      if (replay) return projectContribution(manifest, collaboration.contributions.find((item) => item.id === replay.contributionId), principal);
+      if (replay) return await this.#project(manifest, collaboration.contributions.find((item) => item.id === replay.contributionId), principal);
       this.#ready(manifest);
       this.#roomFor(collaboration);
       const added = addContribution(manifest, collaboration, principal, request, new Date().toISOString());
@@ -875,7 +916,7 @@ export class CollaborationStore {
         requestId: request.requestId, action: 'submit', principalId: principal.id, target: `${draftId}/${jobId}`, digest: digest(request), contributionId: added.contribution.id,
       });
       const stored = await write();
-      return projectContribution(stored, added.contribution, principal);
+      return await this.#project(stored, added.contribution, principal);
     });
   }
 
@@ -915,7 +956,7 @@ export class CollaborationStore {
     if (joined) return joined;
     const current = await this.#scene(draftId, jobId);
     const replay = this.#receipt(collaborationOf(current), request, 'submit', principal.id, target, requestDigest);
-    if (replay) return projectContribution(current, collaborationOf(current).contributions.find((item) => item.id === replay.contributionId), principal);
+    if (replay) return await this.#project(current, collaborationOf(current).contributions.find((item) => item.id === replay.contributionId), principal);
     // Checked after the read too: work that finished before it was read as a
     // receipt, and work started meanwhile is joined.
     const running = this.#running(principal, draftId, jobId, request, requestDigest);
@@ -1002,7 +1043,7 @@ export class CollaborationStore {
         const collaboration = collaborationOf(manifest);
         const target = `${draftId}/${jobId}`;
         const replay = this.#receipt(collaboration, request, 'submit', principal.id, target, requestDigest);
-        if (replay) return projectContribution(manifest, collaboration.contributions.find((item) => item.id === replay.contributionId), principal);
+        if (replay) return await this.#project(manifest, collaboration.contributions.find((item) => item.id === replay.contributionId), principal);
         this.#ready(manifest);
         this.#roomFor(collaboration);
         if (await this.#sourceBlocked(manifest)) throw fail(409, SOURCE_STOPPED_MESSAGE);
@@ -1073,7 +1114,7 @@ export class CollaborationStore {
         // The attestation covers only verified records, so the published
         // manifest is read again before projecting the new bundle.
         const stored = await this.#scene(draftId, jobId);
-        return projectContribution(stored, stored.collaboration.contributions.find((item) => item.id === id), principal);
+        return await this.#project(stored, stored.collaboration.contributions.find((item) => item.id === id), principal);
       });
     } finally {
       // A deleted place's residue is left to the deletion's exact cleanup.
@@ -1103,7 +1144,7 @@ export class CollaborationStore {
       const collaboration = collaborationOf(manifest);
       const contribution = this.#providerContribution(manifest, principal, contributionId);
       const replay = this.#receipt(collaboration, request, 'captions', principal.id, contributionId);
-      if (replay) return { contribution: projectContribution(manifest, contribution, principal), appliedCaptionVersion: replay.captionVersion };
+      if (replay) return { contribution: await this.#project(manifest, contribution, principal), appliedCaptionVersion: replay.captionVersion };
       if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was withdrawn, so its captions cannot change.');
       if (!contribution.voice) throw fail(409, 'This contribution has no recording.');
       if (!photoAttested(manifest, contribution) || !captionChainValid(contribution)) throw fail(409, UNAVAILABLE_MATERIAL);
@@ -1130,7 +1171,7 @@ export class CollaborationStore {
       await write();
       // The attestation covers the changed record only after a fresh read.
       const stored = await this.#scene(draftId, jobId);
-      return { contribution: projectContribution(stored, collaborationOf(stored).contributions.find((item) => item.id === contributionId), principal), appliedCaptionVersion: version };
+      return { contribution: await this.#project(stored, collaborationOf(stored).contributions.find((item) => item.id === contributionId), principal), appliedCaptionVersion: version };
     });
   }
 
@@ -1302,7 +1343,7 @@ export class CollaborationStore {
       const receipt = collaborationOf(manifest).receipts.find((item) => item.requestId === requestId && item.action === 'captions'
         && item.principalId === principal.id && item.target === contributionId);
       if (!receipt) throw fail(404, 'This caption change could not be found.');
-      return { contribution: projectContribution(manifest, contribution, principal), appliedCaptionVersion: receipt.captionVersion };
+      return { contribution: await this.#project(manifest, contribution, principal), appliedCaptionVersion: receipt.captionVersion };
     });
   }
 
@@ -1367,6 +1408,19 @@ export class CollaborationStore {
       if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was withdrawn by the person who provided it.');
       if (!REVIEWABLE.has(contribution.status)) throw fail(409, 'This contribution already has a final decision.');
       if (request.baseRevision !== contribution.revision) throw fail(409, 'This contribution changed. Reload it before deciding.');
+      // New feedback is saved only where the provider could see it now.
+      let feedback = null;
+      if (request.feedback) {
+        if (await this.#sourceBlocked(manifest)) throw fail(409, SOURCE_STOPPED_MESSAGE);
+        if (!photoAttested(manifest, contribution)) throw fail(409, contribution.voice ? UNAVAILABLE_MATERIAL : UNAVAILABLE_PHOTO);
+        let partLabel = null;
+        if (request.feedback.showTarget) {
+          // The reviewed object's saved name now; later renames never change it.
+          partLabel = twoObjects ? manifest.objects.find((item) => item.id === request.transform.targetId)?.label : FOREGROUND_LABEL;
+          if (!objectName(partLabel)) throw fail(409, 'The name of the reviewed object could not be read, so it cannot be shown to the contributor.');
+        }
+        feedback = { partLabel, note: request.feedback.note };
+      }
 
       const now = new Date().toISOString();
       const review = {
@@ -1376,6 +1430,7 @@ export class CollaborationStore {
         // The captions the owner had when acknowledging the recording; later
         // additions or corrections show as a changed binding, never as approved.
         ...(needed.voiceReviewed && { voiceReviewed: true, captionSha256: contribution.voice.captions?.sha256 ?? null }),
+        ...(feedback && { feedback }),
       };
       let variant = null;
       let edit = null;
@@ -1448,12 +1503,27 @@ export class CollaborationStore {
     return !(await this.reconstructions.sceneSourceUses(manifest)).place;
   }
 
+  // Projects one contribution. Source settings are read only for a review
+  // that carries feedback, so other projections never depend on them; a
+  // lookup that fails only hides that feedback.
+  async #project(manifest, contribution, principal) {
+    let sourceBlocked = true;
+    if (contribution?.review && Object.hasOwn(contribution.review, 'feedback')) {
+      try {
+        sourceBlocked = await this.#sourceBlocked(manifest);
+      } catch {
+        sourceBlocked = true;
+      }
+    }
+    return projectContribution(manifest, contribution, principal, sourceBlocked);
+  }
+
   #reviewResult(manifest, collaboration, contributionId, receipt, sourceBlocked, principal) {
     const contribution = collaboration.contributions.find((item) => item.id === contributionId);
     const variant = receipt.variantId && collaboration.variants.find((item) => item.id === receipt.variantId);
     const edit = manifest.edits.find((item) => item.requestId === receipt.requestId && item.kind === 'contribution');
     return {
-      contribution: projectContribution(manifest, contribution, principal),
+      contribution: projectContribution(manifest, contribution, principal, sourceBlocked),
       variant: variant ? projectVariant(manifest, variant, sourceBlocked) : null,
       // The adopted geometry is withheld while that version cannot be used.
       edit: edit && !sourceBlocked && !dependencyIssue(manifest, versionDependencies(manifest, edit.version)) ? { version: edit.version, ...editFields(edit) } : null,
@@ -1471,7 +1541,7 @@ export class CollaborationStore {
       // A contributor cannot learn whether someone else's contribution exists.
       if (!contribution || (principal.role !== 'owner' && contribution.principalId !== principal.id)) throw fail(404, CONTRIBUTION_NOT_FOUND);
       if (contribution.principalId !== principal.id) throw fail(403, 'Only the person who provided this contribution can withdraw it.');
-      if (this.#receipt(collaboration, request, 'withdraw', principal.id, contributionId)) return projectContribution(manifest, contribution, principal);
+      if (this.#receipt(collaboration, request, 'withdraw', principal.id, contributionId)) return await this.#project(manifest, contribution, principal);
       if (contribution.withdrawnAt !== null) throw fail(409, 'This contribution was already withdrawn.');
       const withdrawn = {
         ...contribution, status: 'withdrawn', statusBeforeWithdrawal: contribution.status, withdrawnAt: new Date().toISOString(), revision: contribution.revision + 1,
@@ -1498,7 +1568,7 @@ export class CollaborationStore {
       }
       const stored = await this.reconstructions.update(manifest, changes);
       if (active && dependsHere(active)) this.reconstructions.activeProposal?.controller.abort();
-      return projectContribution(stored, withdrawn, principal);
+      return await this.#project(stored, withdrawn, principal);
     });
   }
 

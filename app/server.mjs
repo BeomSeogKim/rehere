@@ -725,11 +725,11 @@ export function createAppServer({
         return;
       }
       if (fourth === 'review') {
-        // photoReviewed and voiceReviewed are optional extra keys; the store
-        // decides when each is required.
+        // photoReviewed, voiceReviewed and feedback are optional extra keys;
+        // the store decides when each is required or allowed.
         const raw = await readJsonBody(req);
         const keys = ['requestId', 'baseVersion', 'baseRevision', 'decision', 'reason', 'conflict', 'transform'];
-        const extra = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? ['photoReviewed', 'voiceReviewed'].filter((key) => Object.hasOwn(raw, key)) : [];
+        const extra = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? ['photoReviewed', 'voiceReviewed', 'feedback'].filter((key) => Object.hasOwn(raw, key)) : [];
         const body = strictBody(raw, [...keys, ...extra]);
         sendJson(res, 200, await collaboration.review(draftId, jobId, current, third, body));
         return;

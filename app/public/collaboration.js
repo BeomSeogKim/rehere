@@ -18,6 +18,7 @@ import { TEXT_LIMITS as SOURCE_LIMITS, isCalendarDate } from './source-details.j
 export const TEXT_LIMIT = 10_000;
 export const PERIOD_LIMIT = 300;
 export const REASON_LIMIT = 1000;
+const FEEDBACK_LIMIT = 500;
 export const ERA_LABEL_LIMIT = 300;
 export const ERA_STATEMENT_LIMIT = 2000;
 export const OFFSET_LIMIT = 2;
@@ -188,6 +189,21 @@ export function contributionStatusText(contribution) {
     default:
       return 'Status unknown.';
   }
+}
+
+function feedbackBox(entry, owner = false) {
+  const feedback = entry.review?.feedback;
+  if (['withdrawn', 'deleted'].includes(entry.status) || !feedback || Object.keys(feedback).sort().join(',') !== 'note,partLabel'
+      || typeof feedback.note !== 'string' || feedback.note.length > FEEDBACK_LIMIT || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(feedback.note)
+      || (feedback.note !== '' && !feedback.note.trim())
+      || (feedback.partLabel !== null && (typeof feedback.partLabel !== 'string' || !feedback.partLabel || feedback.partLabel !== feedback.partLabel.trim() || feedback.partLabel.length > 80 || /[\u0000-\u001f\u007f]/.test(feedback.partLabel)))
+      || (!feedback.note.trim() && feedback.partLabel === null)) return null;
+  return el('div', { className: 'review-feedback' }, [
+    el('h5', { textContent: owner ? 'Feedback shared with the contributor' : 'Message from the owner' }),
+    ...(feedback.partLabel !== null ? [el('p', { textContent: `Reviewed part: ${feedback.partLabel}` })] : []),
+    ...(feedback.note ? [el('p', { className: 'memory-text', textContent: feedback.note })] : []),
+    el('p', { className: 'hint', textContent: 'This describes that review. It does not confirm the current scene or historical truth.' }),
+  ]);
 }
 
 // Writing is needed unless a recording is sent; a photo alone is not enough.
@@ -986,6 +1002,8 @@ export function mountContributor(container, { principal = null, media = null } =
               ? el('p', { className: 'hint', textContent: 'No written words were sent.' })
               : el('p', { className: 'memory-text', textContent: contribution.text }),
         ]);
+        const feedback = feedbackBox(contribution);
+        if (feedback) item.append(feedback);
         ownRows.set(contribution.id, item);
         if (contribution.periodClaim) item.append(el('p', { className: 'hint', textContent: `Time as you remember it: ${contribution.periodClaim}` }));
         // Without words there are no word uses; the line above already says so.
@@ -1687,7 +1705,8 @@ export function mountCollaboration(container, bridge) {
     reviewPlayer?.dispose();
     reviewPlayer = null;
   };
-  const reviewAttempt = attempts();
+  let pendingReview = null;
+  let reviewGeneration = 0;
   const eraAttempt = attempts();
   // Forms are kept while their record is unchanged, so typed input and a
   // prepared retry survive refreshes and editor state changes.
@@ -1766,8 +1785,9 @@ export function mountCollaboration(container, bridge) {
             el('p', { className: 'hint', textContent: deletionStateText(entry.deletion) }),
           ]);
         }
-        const pick = el('button', { type: 'button', className: 'secondary', textContent: entry.id === selectedId ? 'Selected' : 'Review', disabled: entry.id === selectedId || Boolean(revisionForm) || busy });
+        const pick = el('button', { type: 'button', className: 'secondary', textContent: entry.id === selectedId ? 'Selected' : 'Review', disabled: entry.id === selectedId || Boolean(revisionForm) || busy || Boolean(pendingReview) });
         pick.addEventListener('click', () => {
+          if (busy || pendingReview) return;
           stopShowing();
           selectedId = entry.id;
           message.textContent = '';
@@ -1806,6 +1826,8 @@ export function mountCollaboration(container, bridge) {
         if (entry.status !== 'withdrawn' && entry.review?.reason) notes.push(`Your note: ${entry.review.reason}`);
         if (entry.status !== 'withdrawn' && CONFLICTS[entry.review?.conflict]) notes.push(`Possible reason for a difference: ${CONFLICTS[entry.review.conflict]}`);
         if (notes.length) item.append(el('p', { className: 'hint', textContent: notes.join(' · ') }));
+        const feedback = feedbackBox(entry, true);
+        if (feedback) item.append(feedback);
         if (!FINAL.has(entry.status)) item.append(pick);
         return item;
       }),
@@ -1818,6 +1840,8 @@ export function mountCollaboration(container, bridge) {
   function renderReview() {
     const entry = contribution();
     if (!entry || FINAL.has(entry.status)) {
+      pendingReview = null;
+      reviewGeneration += 1;
       reviewForm = null;
       releaseReviewPhoto();
       review.replaceChildren();
@@ -1827,12 +1851,20 @@ export function mountCollaboration(container, bridge) {
     // became unavailable or changed rebuilds it, dropping the old image, the
     // acknowledgment and any candidate shown on the scene.
     const photoKey = photoBinding(entry.photo, entry.voice);
-    if (reviewForm && reviewForm.id === entry.id && reviewForm.revision === entry.revision && reviewForm.status === entry.status && reviewForm.photoKey === photoKey) {
+    if (reviewForm && reviewForm.id === entry.id && pendingReview && reviewForm.photoKey !== photoKey) {
+      releaseReviewPhoto();
+      reviewForm.hideMedia();
+      reviewForm.photoKey = photoKey;
+      if (showing?.kind === 'candidate') stopShowing();
+    }
+    if (reviewForm && reviewForm.id === entry.id && (pendingReview || (reviewForm.revision === entry.revision && reviewForm.status === entry.status && reviewForm.photoKey === photoKey))) {
       reviewForm.refreshControls();
       return;
     }
     if (reviewForm && reviewForm.id === entry.id && reviewForm.photoKey !== photoKey && showing?.kind === 'candidate') stopShowing();
     releaseReviewPhoto();
+    const formGeneration = ++reviewGeneration;
+    const alive = () => !disposed && formGeneration === reviewGeneration && reviewForm?.id === entry.id;
     const editor = bridge.editor();
     const decision = select(DECISIONS.map((value) => [value, DECISION_LABELS[value]]), 'reviewing');
     // A photo-backed recollection: its review copy is shown beside the scene,
@@ -1933,6 +1965,7 @@ export function mountCollaboration(container, bridge) {
       return '';
     };
     voiceAck.addEventListener('change', () => {
+      if (busy || pendingReview || completed) return;
       if (voiceAck.checked !== true && showing?.kind === 'candidate') stopShowing();
       reviewForm?.refreshControls();
     });
@@ -1946,6 +1979,12 @@ export function mountCollaboration(container, bridge) {
     };
     const reason = el('textarea', { rows: 2, maxLength: REASON_LIMIT });
     const conflict = select(Object.entries(CONFLICTS), 'unknown');
+    const shareTarget = el('input', { type: 'checkbox', checked: false });
+    shareTarget.setAttribute('aria-label', 'Share reviewed part with contributor');
+    const feedbackNote = el('textarea', { rows: 2, maxLength: FEEDBACK_LIMIT });
+    feedbackNote.setAttribute('aria-label', 'Note for contributor');
+    const feedbackPreview = el('div', { className: 'review-feedback-preview' });
+    let completed = false;
     const composition = isComposition(editor);
     const axes = composition ? poseAxes.slice(0, 6).map(([name]) => name) : ['Left / right', 'Down / up', 'Away / toward', 'Turn (degrees)'];
     const savedValues = (state) => (composition ? poseValues(state).slice(0, 6) : [...state.offset, Math.round((state.yaw * 180) / Math.PI)]).map(String);
@@ -1971,9 +2010,11 @@ export function mountCollaboration(container, bridge) {
     const targetDrafts = new Map();
     let fieldsTarget = null;
     const bindTarget = () => {
-      if (!bridge.targets) return;
+      if (!bridge.targets || pendingReview) return;
       const target = bridge.targets.selected();
       if (target === fieldsTarget) return;
+      shareTarget.checked = false;
+      if (showing?.kind === 'candidate') stopShowing();
       if (fieldsTarget) targetDrafts.set(fieldsTarget, { values: inputs.map((input) => input.value), edited, baseline });
       fieldsTarget = target;
       const saved = target ? bridge.editor(target) : null;
@@ -2011,9 +2052,24 @@ export function mountCollaboration(container, bridge) {
     const noTarget = () => Boolean(bridge.targets) && (!bridge.targets.selected() || fieldsTarget !== bridge.targets.selected());
     const geometry = () => decision.value === 'adopt' || decision.value === 'alternative';
     const previewed = () => showing?.kind === 'candidate' && showing.drawn && sameJson(showing.transform, candidate());
+    const partLabel = () => bridge.targets ? bridge.targets.labelOf?.(fieldsTarget) ?? null : 'Selected foreground object';
+    const feedbackInput = () => {
+      const note = feedbackNote.value.trim();
+      return shareTarget.checked && geometry() ? { showTarget: true, note } : note ? { showTarget: false, note } : null;
+    };
     const refreshControls = () => {
       bindTarget();
-      for (const input of inputs) input.disabled = noTarget();
+      const frozen = busy || Boolean(pendingReview) || completed;
+      for (const input of inputs) input.disabled = frozen || noTarget();
+      [decision, reason, conflict, feedbackNote, photoAck].forEach((input) => { input.disabled = frozen; });
+      voiceAck.disabled = frozen || !voicePlayed;
+      shareTarget.disabled = frozen || !geometry() || noTarget() || !partLabel();
+      const outgoing = pendingReview?.body.feedback ?? (pendingReview ? null : feedbackInput());
+      const outgoingLabel = pendingReview ? pendingReview.partLabel : outgoing?.showTarget ? partLabel() : null;
+      feedbackPreview.replaceChildren(el('h5', { textContent: 'Contributor will see' }),
+        ...(outgoing ? [el('p', { textContent: outgoingLabel ? `Reviewed part: ${outgoingLabel}` : 'No object label will be shared.' }),
+          ...(outgoing.note ? [el('p', { className: 'memory-text', textContent: outgoing.note })] : [el('p', { className: 'hint', textContent: 'No message will be shared.' })])]
+          : [el('p', { className: 'hint', textContent: 'No extra feedback will be shared. Your private note and difference label stay private.' })]));
       const editorNow = bridge.editor();
       candidateBox.hidden = !geometry();
       preview.hidden = !geometry();
@@ -2034,23 +2090,28 @@ export function mountCollaboration(container, bridge) {
           ? 'The 3D view is not available, so the candidate could not be previewed. Without a preview it cannot be adopted or kept; you can hold or decline it.'
           : 'Preview the candidate on the scene before saving it.';
       }
-      note.textContent = reasonText;
+      note.textContent = pendingReview ? 'The earlier decision is not confirmed. These fields and the outgoing feedback are frozen; Save decision retries the identical request.' : completed ? 'Decision saved. Refresh to see its current record; do not save it again.' : reasonText;
       targetNote.textContent = bridge.targets && !noTarget() ? `The candidate moves ${bridge.targets.nameOf(bridge.targets.selected())}; the other object stays as saved.` : '';
-      preview.disabled = busy || Boolean(revisionForm) || sceneMoved() || noTarget() || Boolean(entry.permissions && entry.permissions.place !== true) || Boolean(photoProblemText()) || Boolean(voiceProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
-      save.disabled = busy || Boolean(revisionForm) || (geometry() && Boolean(reasonText));
+      preview.disabled = frozen || Boolean(revisionForm) || sceneMoved() || noTarget() || Boolean(entry.permissions && entry.permissions.place !== true) || Boolean(photoProblemText()) || Boolean(voiceProblemText()) || Boolean(state.blocked) || Boolean(transformProblem(candidate())) || (!editorNow.clean && showing?.kind !== 'candidate');
+      save.disabled = busy || completed || Boolean(revisionForm) || (!pendingReview && ((geometry() && Boolean(reasonText)) || feedbackNote.value.trim().length > FEEDBACK_LIMIT || (shareTarget.checked === true && !partLabel())));
     };
 
     decision.addEventListener('change', () => {
-      if (!geometry()) stopShowing();
+      if (busy || pendingReview || completed) return;
+      if (!geometry()) { shareTarget.checked = false; stopShowing(); }
       refreshControls();
     });
+    shareTarget.addEventListener('change', refreshControls);
+    feedbackNote.addEventListener('input', refreshControls);
     photoAck.addEventListener('change', () => {
+      if (busy || pendingReview || completed) return;
       // Without the acknowledgment no candidate stays on the scene.
       if (photoAck.checked !== true && showing?.kind === 'candidate') stopShowing();
       refreshControls();
     });
     inputs.forEach((input, i) => {
       input.addEventListener('input', () => {
+        if (busy || pendingReview || completed) return;
         // Typing makes this field explicit, even when it ends up as shown.
         edited[i] = true;
         if (showing?.kind === 'candidate' && !sceneMoved() && !transformProblem(candidate())) show('candidate', entry.id, candidate());
@@ -2058,12 +2119,13 @@ export function mountCollaboration(container, bridge) {
       });
     });
     preview.addEventListener('click', () => {
-      if (sceneMoved()) return;
+      if (!alive() || preview.disabled || pendingReview || completed || sceneMoved()) return;
       show('candidate', entry.id, candidate());
       refreshControls();
     });
     save.addEventListener('click', async () => {
-      const input = {
+      if (!alive() || save.disabled || busy || completed) return;
+      const input = pendingReview?.body ?? {
         decision: decision.value,
         reason: reason.value,
         conflict: conflict.value,
@@ -2074,36 +2136,52 @@ export function mountCollaboration(container, bridge) {
         // Recorded only for a change informed by the photo.
         ...(photo && geometry() ? { photoReviewed: true } : {}),
         ...(voice && geometry() ? { voiceReviewed: true } : {}),
+        ...(feedbackInput() ? { feedback: feedbackInput() } : {}),
       };
-      if (geometry() && sceneMoved()) return;
-      if (photo && geometry() && photoProblemText()) return;
-      if (voice && geometry() && voiceProblemText()) return;
-      if (reason.value.length > REASON_LIMIT) {
+      if (!pendingReview && geometry() && sceneMoved()) return;
+      if (!pendingReview && photo && geometry() && photoProblemText()) return;
+      if (!pendingReview && voice && geometry() && voiceProblemText()) return;
+      if (!pendingReview && reason.value.length > REASON_LIMIT) {
         message.textContent = `Keep the note to ${REASON_LIMIT} characters or fewer.`;
         return;
       }
       // A hold sends nothing and keeps the candidate, its preview and the form.
-      const held = geometry() ? bridge.surfaceProblem?.(input.transform) ?? null : null;
+      const held = !pendingReview && geometry() ? bridge.surfaceProblem?.(input.transform) ?? null : null;
       if (held) {
         message.textContent = `${held} The saved scene is still version ${formVersion}; your candidate and decision are kept.`;
         return;
       }
-      const body = reviewAttempt.prepare(entry.id, input, () => ({ requestId: crypto.randomUUID(), ...input }));
+      pendingReview ??= { id: entry.id, body: { requestId: crypto.randomUUID(), ...input }, partLabel: input.feedback?.showTarget ? partLabel() : null };
+      const body = pendingReview.body;
       await mutate(async () => {
         const result = await postJson(`${bridge.jobUrl}/contributions/${entry.id}/review`, body);
-        if (disposed) return;
-        if (unclear(result)) {
+        if (!alive()) return;
+        if (unclear(result) || (result.ok && result.body?.contribution?.id !== entry.id)) {
           if (input.decision === 'adopt') bridge.unconfirmed();
           message.textContent = withReason(result, 'Rehere could not confirm the decision. Saving again repeats the same request.');
           return;
         }
-        reviewAttempt.settle();
+        pendingReview = null;
         if (!result.ok) {
           if (result.status === 409 && input.decision === 'adopt') bridge.conflict();
           message.textContent = `${reasonOf(result) || 'The decision could not be saved.'} Nothing was changed by this attempt.`;
           return;
         }
+        const current = result.body.contribution;
+        state = { ...state, contributions: state.contributions.map((item) => item.id === current.id ? current : item) };
+        completed = true;
         stopShowing();
+        if (['withdrawn', 'deleted'].includes(current.status) || (body.feedback && current.review?.feedback == null)) {
+          selectedId = null;
+          message.textContent = current.status === 'withdrawn'
+            ? 'The earlier decision was saved, but this recollection has since been withdrawn. Its feedback and dependent scene are not available now.'
+            : current.status === 'deleted'
+              ? 'The earlier decision was saved, but this recollection has since been deleted. Its feedback is not available now.'
+              : 'The earlier decision was saved. Its feedback is currently unavailable under the source or material access rules.';
+          return;
+        }
+        reviewForm.revision = current.revision;
+        reviewForm.status = current.status;
         if (result.body?.edit) bridge.saved(result.body.edit);
         message.textContent = {
           adopt: 'Adopted. The current scene was saved as a new version that depends on this recollection.',
@@ -2115,8 +2193,12 @@ export function mountCollaboration(container, bridge) {
     review.replaceChildren(
       el('h4', { textContent: `Review ${providerName(entry)}’s recollection` }),
       field('Decision', decision),
-      field('Your note (optional)', reason),
-      field('Possible reason for a difference', conflict, 'A label for your own review. It does not decide which account is right or set a time.'),
+      field('Your note (optional)', reason, 'Private to you. It is never copied into the contributor message.'),
+      field('Possible reason for a difference', conflict, 'A private label for your own review. It does not decide which account is right or set a time.'),
+      el('fieldset', {}, [el('legend', { textContent: 'Message to contributor (optional)' }),
+        el('p', { className: 'hint', textContent: 'Only you and this contributor can see this feedback. It describes this review, not the current scene or historical truth. Nothing is sent automatically.' }),
+        el('label', {}, [shareTarget, ' Share the reviewed object’s label with this contributor (adoption or alternative only)']),
+        field('Note for contributor (optional)', feedbackNote, 'Up to 500 characters. This is separate from your private review note.'), feedbackPreview]),
       ...(photoBox ? [photoBox] : []),
       ...(voiceBox ? [voiceBox] : []),
       candidateBox,
@@ -2124,7 +2206,9 @@ export function mountCollaboration(container, bridge) {
       note,
       el('div', { className: 'actions' }, [preview, save]),
     );
-    reviewForm = { id: entry.id, revision: entry.revision, status: entry.status, photoKey, refreshControls };
+    reviewForm = { id: entry.id, revision: entry.revision, status: entry.status, photoKey, refreshControls,
+      hideMedia() { if (photoBox) photoBox.hidden = true; if (voiceBox) voiceBox.hidden = true; photoState = 'unavailable'; voicePlayed = false; photoAck.checked = voiceAck.checked = false; } };
+
     refreshControls();
   }
 
@@ -2164,7 +2248,7 @@ export function mountCollaboration(container, bridge) {
           item.append(el('span', { className: 'hint', textContent: variant.targetId ? `Kept for ${bridge.targets.nameOf(variant.targetId)}.` : 'The object for this arrangement was not recorded.' }));
         }
         if (variant.revision?.proposalId) {
-          const inspect = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect saved memory proposal', disabled: busy || Boolean(revisionForm) || (!bridge.editor().clean && !showing) });
+          const inspect = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect saved memory proposal', disabled: busy || Boolean(pendingReview) || Boolean(revisionForm) || (!bridge.editor().clean && !showing) });
           inspect.addEventListener('click', () => {
             const parent = state.variants.find((item) => item.id === variant.revision.parentVariantId && !item.blocked);
             if (parent && !revisionForm && !busy && (bridge.editor().clean || showing)) beginRevision(parent, { memoryProposalId: variant.revision.proposalId });
@@ -2183,7 +2267,7 @@ export function mountCollaboration(container, bridge) {
         const cached = eraForms.get(variant.id);
         const form = cached?.eraRevision === variant.eraRevision ? cached.node : eraControl(variant);
         eraForms.set(variant.id, { eraRevision: variant.eraRevision, node: form });
-        const revise = el('button', { type: 'button', className: 'secondary', textContent: 'Make a revised alternative', disabled: !isShown || !showing.drawn || busy || Boolean(revisionForm) });
+        const revise = el('button', { type: 'button', className: 'secondary', textContent: 'Make a revised alternative', disabled: !isShown || !showing.drawn || busy || Boolean(pendingReview) || Boolean(revisionForm) });
         revise.addEventListener('click', () => { if (isShown && showing?.drawn && !busy && !revisionForm) beginRevision(variant); });
         item.append(view, revise, ...(!revisionForm ? [form] : []));
       }
@@ -2194,6 +2278,7 @@ export function mountCollaboration(container, bridge) {
   }
 
   async function beginRevision(parent, { memoryProposalId = null } = {}) {
+    if (disposed || busy || pendingReview) return;
     const lifetime = ++revisionGeneration;
     const mine = { parentId: parent.id, context: null, pending: null, loading: false, saving: false, unavailable: false, stale: false, preview: null, targetId: null, inputs: [], edited: [], abort: null };
     const heading = el('h4', { textContent: 'Make a revised alternative', tabIndex: -1 });
@@ -2553,13 +2638,14 @@ export function mountCollaboration(container, bridge) {
     busy = true;
     readToken += 1;
     bridge.setLocked(true);
-    reviewForm?.refreshControls();
+    if (state) render();
     try {
       await run();
     } finally {
       if (!disposed) {
         busy = false;
         bridge.setLocked(Boolean(showing));
+        if (state) render();
         refresh();
       }
     }
