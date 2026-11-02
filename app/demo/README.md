@@ -3,6 +3,55 @@
 Run these commands from the repository root. If the quickstart left you in
 `app/`, return to the repository root first with `cd ..`.
 
+## A place to revisit: Grand Canyon Lodge
+
+Grand Canyon Lodge on the North Rim was destroyed in the July 2025 Dragon Bravo
+Fire, according to the [National Park Service](https://www.nps.gov/grca/northrimstatus.htm).
+Richard Frear's July 1982 survey photograph shows the main lodge's recreation
+room looking east: rows of chairs sit beneath exposed beams and hanging lights.
+The [HABS caption index](https://tile.loc.gov/storage-services/master/pnp/habshaer/az/az0400/az0459/data/az0459cap.pdf)
+identifies it as AZ-135-A-19; the [photograph record](https://www.loc.gov/pictures/item/az0459.photos.321989p/)
+identifies the source. A [separate detail photograph](https://www.loc.gov/pictures/item/az0459.photos.321990p/)
+shows a wall light in the same room, but the captions do not establish which
+fixture it is in the wider view or how the photographs align.
+
+The following is a **proposed demonstration**, not a recorded visit or a
+person's recollection. It needs a usable scene and explicit choices at each
+step; do not substitute a successful result if a build or proposal fails.
+
+1. **Start with the photograph.** Select the recreation-room image and set its
+   source and allowed uses deliberately. Select a visible hanging light, build
+   a partial scene, and inspect its proposed outline and depth against the
+   photo. The photo is evidence; the model's depth and shape are estimates.
+   Areas the photo does not show stay unknown. If the result is incomplete or
+   unusable, show that limit instead of presenting it as the room.
+2. **Try a hypothetical change.** Enter a clearly labeled demonstration-only
+   instruction, such as "For this demonstration, move the selected light a
+   little left." This is not a historical memory. If a suitable proposal is
+   available, compare it with the saved scene and let the owner explicitly
+   approve it; otherwise leave the saved scene unchanged. Hosted planning sends
+   the text and a photo copy to a provider only after its separate consent.
+3. **Compare an alternative.** The demonstrator, using a test contributor,
+   submits a clearly labeled synthetic suggestion to place the same selected
+   light slightly to the right, with separate allowed uses. The owner reviews it
+   and saves an alternative without overwriting the current arrangement. Neither
+   suggestion establishes where the fixture was or when it moved; leave time
+   unknown. The test contributor is not a witness.
+4. **Visit a saved view.** Where the source and contribution allow sharing,
+   choose the saved arrangement and, if available, the reviewed alternative;
+   capture a starting camera and preview what visitors would see. Keep the
+   photograph, model estimate and hypothetical suggestions distinct. Explicitly
+   issue a local visitor link only after reviewing the preview; the visitor sees
+   the chosen saved snapshot.
+
+The source does not provide a visitor's memory, a personal recording, or proof
+that a particular fixture survived the fire. A real contribution and its
+permission, a usable reconstructed scene, and visual review of the resulting
+visitor view are still needed for a complete demonstration with real memories.
+The [Commons item record](https://commons.wikimedia.org/wiki/File:INTERIOR_VIEW_OF_RECREATION_ROOM_OF_MAIN_LODGE_LOOKING_EAST_-_Grand_Canyon_Lodge%2C_Main_Lodge%2C_North_Rim%2C_Grand_Canyon%2C_Coconino_County%2C_AZ_HABS_ARIZ%2C3-GRACAN%2C14A-19.tif)
+states a U.S. public-domain basis for this photograph; the HABS collection tag
+alone does not establish rights for every item or jurisdiction.
+
 ## Synthetic relation fixture
 
 This technical diagram tests whether a new sentence changes a proposed visual
