@@ -141,7 +141,7 @@ describe('owner revisions of saved alternatives', () => {
       assert.deepEqual(a.variant.edit.objects[1], { id: 'object-2', offset: [0, 0, 0], yaw: 0 }, 'the parent, not main, supplies the untargeted object');
       assert.deepEqual(child.revision, { parentVariantId: a.variant.id, targetId: 'object-1', timeMode: 'unknown' });
       assert.equal(child.targetId, null);
-      assert.equal(child.label, 'Owner revision');
+      assert.equal(child.label, 'Alternative arrangement 2 · Owner revision');
       assert.deepEqual(child.contributionIds, a.variant.contributionIds);
       assert.equal(child.parentVersion, a.variant.parentVersion);
       assert.equal(child.era.kind, 'unknown');
@@ -265,6 +265,83 @@ describe('owner revisions of saved alternatives', () => {
       await expectStatus(await owner.post(revisions(place, a.variant.id), revisionBody({ offset: [0, 0.2, 0.1], yaw: 0.2 }, { baseEraRevision: prepared.eraRevision })), 409, 'time changed');
       const exact = await expectStatus(await owner.post(revisions(place, a.variant.id), revisionBody(transform, { baseEraRevision: 2, timeMode: 'reconfirm-parent' })), 201, 'exact');
       assert.equal(exact.era.start, '1990-05-01');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('names each owner revision by the ordinal its shares and stories use, stable across blocking, deletion and restart', async () => {
+    let { app, owner, dataDir } = await workspace();
+    try {
+      const place = await scene(owner, { voice: true });
+      const { session } = await enrolledContributor(owner, app.base, place.draft.id);
+      const other = await enrolledContributor(owner, app.base, place.draft.id, 'Second contributor');
+      const named = (variant, ordinal) => assert.equal(variant.label, `Alternative arrangement ${ordinal} · Owner revision`);
+      // Candidates and revisions interleave; both count, the baseline does not.
+      const a = await recollect(owner, session, place, 'Closer to the window.', 'alternative', { offset: [0.1, 0, 0], yaw: 0 }, 1);
+      const r1Body = revisionBody({ offset: [0.2, 0, 0], yaw: 0 });
+      const r1 = await expectStatus(await owner.post(revisions(place, a.variant.id), r1Body), 201, 'r1');
+      const b = await recollect(owner, other.session, place, 'Turned toward the door.', 'alternative', { offset: [0, 0, 0], yaw: 0.5 }, 1);
+      const r2 = await expectStatus(await owner.post(revisions(place, a.variant.id), { ...r1Body, requestId: randomUUID() }), 201, 'r2 same parent and pose');
+      const rb = await expectStatus(await owner.post(revisions(place, b.variant.id), revisionBody({ offset: [0, 0, 0], yaw: 0.6 })), 201, 'rb');
+      const r3 = await expectStatus(await owner.post(revisions(place, r1.id), revisionBody({ offset: [0.2, 0.1, 0], yaw: 0 })), 201, 'r3 nested');
+      const baseline = (await view(owner, place)).variants.find((item) => item.label === 'Saved reconstruction');
+      const r4 = await expectStatus(await owner.post(revisions(place, baseline.id), revisionBody({ offset: [0, 0.1, 0], yaw: 0 })), 201, 'r4');
+      [[r1, 2], [r2, 4], [rb, 5], [r3, 6], [r4, 7]].forEach(([item, ordinal]) => named(item, ordinal));
+      assert.deepEqual(r2.edit, r1.edit);
+
+      // Reads, an exact replay and a time assertion agree; other labels are untouched.
+      const listed = new Map((await view(owner, place)).variants.map((item) => [item.id, item.label]));
+      assert.deepEqual([...listed.values()], [
+        'Saved reconstruction', a.variant.label, 'Alternative arrangement 2 · Owner revision', b.variant.label,
+        'Alternative arrangement 4 · Owner revision', 'Alternative arrangement 5 · Owner revision', 'Alternative arrangement 6 · Owner revision', 'Alternative arrangement 7 · Owner revision',
+      ]);
+      for (const candidate of [a.variant, b.variant]) assert.match(candidate.label, /'s recollection$/);
+      named(await expectStatus(await owner.post(revisions(place, a.variant.id), r1Body), 200, 'replay'), 2);
+      const era = { requestId: randomUUID(), baseRevision: 0, kind: 'exact', label: '', start: '1990-05-01', end: '1990-05-01', statement: 'The owner places this in May 1990.', relation: null, relativeToVariantId: null, confirmed: true };
+      named(await expectStatus(await owner.post(`${place.route}/variants/${r2.id}/era`, era), 200, 'era'), 4);
+
+      // The owner name begins with the unchanged saved share and story name.
+      const shared = await share(owner, place, [variantView(r2.id), variantView(r4.id)]);
+      assert.equal(shared.status, 201, JSON.stringify(shared.error));
+      assert.deepEqual(shared.preview.publicView.views.map((item) => item.label), ['Alternative arrangement 4', 'Alternative arrangement 7']);
+      const packet = JSON.stringify(shared.preview.publicView);
+      for (const leak of ['Owner revision', a.variant.id, r1.id, baseline.id]) assert.equal(packet.includes(leak), false, leak);
+      const story = await owner.post(`${place.route}/stories`, {
+        requestId: randomUUID(), voiceSourceId: place.draft.voice.sourceId, view: { kind: 'variant', version: null, variantId: r3.id, eraRevision: 0 },
+        title: 'Synthetic tone', cues: [{ startMs: 0, endMs: 900, text: 'Synthetic test tone; no speech.' }], captionConfirmed: true,
+      });
+      assert.ok([200, 201].includes(story.status), JSON.stringify(await story.json()));
+      const saved = await disk(dataDir, place);
+      assert.equal(saved.stories.items.at(-1).context.label, 'Alternative arrangement 6');
+      for (const item of saved.collaboration.variants.filter((entry) => entry.kind === 'revision')) assert.equal(item.label, 'Owner revision', 'stored labels are unchanged');
+      const records = { shares: saved.shares, stories: saved.stories };
+
+      // Blocking or deleting earlier entries keeps every later number.
+      await expectStatus(await session.post(`${place.route}/contributions/${a.id}/withdraw`, { requestId: randomUUID() }), 200, 'withdraw');
+      const impact = await expectStatus(await other.session.request(`${place.route}/contributions/${b.id}/deletion`), 200, 'deletion preview');
+      await expectStatus(await other.session.post(`${place.route}/contributions/${b.id}/delete`, { requestId: randomUUID(), impactSha256: impact.impactSha256, confirmDeletion: true }), 200, 'delete');
+      const r5Body = revisionBody({ offset: [0, 0.2, 0], yaw: 0 });
+      const r5 = await expectStatus(await owner.post(revisions(place, baseline.id), r5Body), 201, 'r5');
+      named(r5, 8);
+      const check = async () => {
+        const labels = new Map((await view(owner, place)).variants.map((item) => [item.id, item.label]));
+        for (const id of [a.variant.id, r1.id, r2.id, r3.id, b.variant.id, rb.id]) assert.equal(labels.get(id), 'Blocked reconstruction', id);
+        assert.equal(labels.get(r4.id), 'Alternative arrangement 7 · Owner revision');
+        assert.equal(labels.get(r5.id), 'Alternative arrangement 8 · Owner revision');
+      };
+      await check();
+      const stored = await disk(dataDir, place);
+      assert.equal(stored.collaboration.variants.find((item) => item.id === rb.id).label, 'Contribution removed');
+      assert.deepEqual(stored.collaboration.variants.find((item) => item.id === r4.id).edit, r4.edit, 'the stored pose is unchanged');
+
+      await app.close();
+      ({ app, owner } = await workspace(dataDir));
+      await check();
+      named(await expectStatus(await owner.post(revisions(place, baseline.id), r5Body), 200, 'replay after restart'), 8);
+      const final = await disk(dataDir, place);
+      assert.equal(final.stories.items.at(-1).context.label, records.stories.items.at(-1).context.label);
+      assert.deepEqual(final.shares.snapshots.at(-1).publicView, records.shares.snapshots.at(-1).publicView);
     } finally {
       await app.close();
     }

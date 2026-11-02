@@ -630,10 +630,13 @@ function projectEra(variant, blocked) {
 // every variant then counts as blocked.
 function projectVariant(manifest, variant, sourceBlocked) {
   const blocked = sourceBlocked || dependenciesBlocked(manifest, variant.contributionIds);
+  // An owner revision takes the ordinal its shares and stories use (shares.mjs
+  // savedView); variants are only appended or replaced in place, so it is stable.
+  const ordinal = collaborationOf(manifest).variants.filter((item) => item.kind !== 'baseline').findIndex((item) => item.id === variant.id) + 1;
   return {
     id: variant.id,
     // The label names the provider; a blocked variant shows a fixed label instead.
-    label: blocked ? 'Blocked reconstruction' : variant.label,
+    label: blocked ? 'Blocked reconstruction' : variant.kind === 'revision' ? `Alternative arrangement ${ordinal} · Owner revision` : variant.label,
     parentVersion: variant.parentVersion,
     edit: { version: variant.edit.version, ...editFields(variant.edit) },
     contributionIds: [...variant.contributionIds],
