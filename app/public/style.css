@@ -258,6 +258,9 @@ input:focus-visible, canvas:focus-visible { outline: 3px solid var(--accent); ou
 .visit-memory-summary { margin: 8px 0; padding: 8px 12px; overflow-wrap: anywhere; }
 .visit-memory-summary h3, .visit-memory-summary p { margin: 4px 0; }
 .memory-edit h4 { margin: 0 0 4px; font-size: 1rem; }
+.place-landing { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; margin: 16px 0; }
+.place-landing h4 { margin: 0 0 4px; font-size: 1rem; }
+.place-words { white-space: pre-wrap; overflow-wrap: anywhere; }
 .memory-edit > label { display: block; font-weight: 600; margin-top: 12px; }
 .memory-edit textarea { margin-top: 6px; }
 .memory-consent { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
@@ -378,6 +381,11 @@ button[aria-pressed="true"] { background: var(--accent); color: var(--accent-tex
    width. Closing the scene removes the workspace and the page narrows again. */
 @supports selector(:has(*)) {
   main:has(.scene-workspace) { max-width: 1680px; }
+  #viewer:has(.place-landing) .back { margin-top: 8px; }
+  #viewer:has(.place-landing) #viewer-title { margin-top: 12px; }
+  #viewer-space:has(.place-landing) { margin-top: 12px; padding-top: 8px; }
+  #viewer-space:has(.place-landing) > h2,
+  #viewer-space:has(.place-landing) > h2 + p { display: none; }
   main:has(.scene-workspace) > .access-area,
   main:has(.scene-workspace) #owner-app > :not(#viewer),
   main:has(.scene-workspace) #viewer > :not(#viewer-space),

@@ -143,6 +143,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   let sharesPanel = null;
   let storiesPanel = null;
   let blockedPanel = null;
+  let currentPlace = draft.place;
+  let placeHeading = null;
   // The selected object's links to regions in other photos, inside its photo
   // evidence; replaced on every object choice.
   let regionLinksPanel = null;
@@ -157,6 +159,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   // A short saved-scene reference that tells apart builds of one photo made in the same minute.
   const sceneRef = (jobId) => `Scene ${jobId.slice(0, 8)}`;
   const photoNumber = (sourceId) => draft.photos.findIndex((photo) => photo.sourceId === sourceId) + 1;
+  function showPlaceHeading() {
+    if (!placeHeading) return;
+    const place = currentPlace;
+    placeHeading.textContent = place?.unavailable === false && typeof place.name === 'string' && place.name.trim() && Number.isInteger(place.revision) && place.revision >= 0
+      ? place.name : 'A place to revisit';
+  }
 
   const status = el('p', { className: 'hint', role: 'status' });
   status.setAttribute('aria-live', 'polite');
@@ -236,6 +244,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
   function closePanel() {
     panelGeneration += 1;
+    placeHeading = null;
     if (handoff) status.textContent = '';
     handoff = null;
     readyAction.replaceChildren();
@@ -668,6 +677,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       await openObjectScene({ job, jobId, surface: surfaceResult.body, token, heading, number });
       return;
     }
+    placeHeading = heading;
+    showPlaceHeading();
 
     const viewport = el('div', { className: 'space-viewport' });
     const viewMessage = el('p', { className: 'form-message', role: 'alert' });
@@ -1045,20 +1056,97 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     });
     leaveComparison.addEventListener('click', () => comparison?.exit());
 
+    const placeWords = el('p', { className: 'place-words', textContent: 'Checking this place’s saved memory…' });
+    const fullWords = el('p', { className: 'place-words' });
+    const fullWordsDetails = el('details', { className: 'source-details', hidden: true }, [el('summary', { textContent: 'Read all the words' }), fullWords]);
+    const placeStatus = el('p', { className: 'hint', role: 'status' });
+    const placeAction = el('button', { type: 'button', textContent: 'Change from a memory' });
+    const visitAction = el('button', { type: 'button', className: 'secondary', textContent: 'Prepare a visit', hidden: true });
+    let placeSummary = { kind: 'checking' };
+    let lastWords = null;
+    const focusSection = (section, disclosure = false) => {
+      const destination = disclosure ? section.children[0]?.children[0] : section.querySelector?.('h4');
+      if (disclosure && section.children[0]) section.children[0].open = true;
+      if (!destination) return;
+      if (!disclosure) destination.setAttribute('tabindex', '-1');
+      destination.focus();
+      destination.scrollIntoView?.({ block: 'start' });
+    };
+    const originalPhoto = el('button', { type: 'button', className: 'secondary', textContent: 'See the original photo' });
+    originalPhoto.addEventListener('click', () => {
+      const materials = document.getElementById?.('viewer-materials');
+      if (!materials) {
+        placeStatus.textContent = 'The original materials are not available here.';
+        return;
+      }
+      materials.open = true;
+      materials.querySelector('summary')?.focus();
+      materials.scrollIntoView?.({ block: 'start' });
+    });
+    placeAction.addEventListener('click', () => {
+      if (placeSummary.kind === 'proposal') {
+        if (!memoryEdit?.compareFrom(placeAction)) placeStatus.textContent = 'This proposal is no longer ready to compare. Review the saved proposals below.';
+      } else focusSection(memorySection);
+    });
+    visitAction.addEventListener('click', () => focusSection(sharesSection, true));
+    const placeLanding = el('section', { className: 'place-landing', 'aria-label': 'This place' }, [
+      el('h4', { textContent: 'This place' }),
+      el('p', { className: 'hint', textContent: 'The scene begins with one photograph. Its shape and depth are estimates; a memory is someone’s account.' }),
+      placeWords,
+      fullWordsDetails,
+      el('div', { className: 'actions' }, [placeAction, originalPhoto, visitAction]),
+      placeStatus,
+    ]);
+    placeLanding.setAttribute('aria-label', 'This place');
+    const updatePlaceSummary = (summary) => {
+      placeSummary = summary;
+      placeAction.textContent = summary.kind === 'proposal' ? 'Compare this change' : 'Change from a memory';
+      const words = summary.kind === 'proposal' || summary.kind === 'saved' ? summary.text : null;
+      const label = summary.kind === 'proposal' ? 'Proposed from your words' : `Saved change, version ${summary.version}, from your words`;
+      const characters = words ? Array.from(words) : [];
+      const nextLong = characters.length > 160;
+      const changed = summary.kind !== 'checking' && words !== lastWords;
+      if (fullWordsDetails.contains(document.activeElement) && (!nextLong || changed)) placeAction.focus();
+      if (words) {
+        placeWords.textContent = `${label}: “${characters.slice(0, 160).join('')}${characters.length > 160 ? '…' : ''}”`;
+        fullWords.textContent = words;
+        fullWordsDetails.hidden = !nextLong;
+      } else {
+        fullWords.textContent = '';
+        fullWordsDetails.hidden = true;
+        placeWords.textContent = summary.kind === 'checking' ? 'Checking this place’s saved memory…'
+          : summary.kind === 'unavailable' ? 'The memory for this saved view is not available right now.'
+            : 'No saved change from a written memory for this view.';
+      }
+      if (changed) fullWordsDetails.open = false;
+      if (summary.kind !== 'checking') lastWords = words;
+      visitAction.hidden = session.saved.version <= 1;
+      placeStatus.textContent = '';
+    };
+
+    const manualEdit = el('details', { className: 'source-details' }, [
+      el('summary', { textContent: 'Move the object by hand' }),
+      el('fieldset', { className: 'space-edit' }, [
+        el('legend', { textContent: 'Move the selected object' }),
+        el('p', { className: 'hint', textContent: 'Changes are a preview until you apply and save them. Moving the object leaves an empty gap where it was; nothing is generated to fill it.' }),
+        ...controls.map(({ name, range, number }) => el('div', { className: 'space-axis' }, [el('span', { textContent: name }), range, number])),
+        editStatus,
+        editMessage,
+        el('div', { className: 'actions' }, [reload, reset, revert, save]),
+      ]),
+    ]);
+    const otherActions = el('details', { className: 'source-details' }, [
+      el('summary', { textContent: 'More ways to continue' }),
+      nextActions(memorySection, collaborationSection, sharesSection),
+    ]);
     panel.replaceChildren(
       heading,
-      nextActions(memorySection, collaborationSection, sharesSection),
       sceneWorkspace(
         [cameraActions, explore.status, photoSide.status, comparisonBar, comparisonFrame, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })],
         [
-          el('fieldset', { className: 'space-edit' }, [
-            el('legend', { textContent: 'Move the selected object' }),
-            el('p', { className: 'hint', textContent: 'Changes are a preview until you apply and save them. Moving the object leaves an empty gap where it was; nothing is generated to fill it.' }),
-            ...controls.map(({ name, range, number }) => el('div', { className: 'space-axis' }, [el('span', { textContent: name }), range, number])),
-            editStatus,
-            editMessage,
-            el('div', { className: 'actions' }, [reload, reset, revert, save]),
-          ]),
+          placeLanding,
+          manualEdit,
+          otherActions,
           memorySection,
           collaborationSection,
           storiesSection,
@@ -1083,6 +1171,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       source: sourceFor(job.sourceId),
       editor: editorFor('memory'),
       comparison: comparisonBridge,
+      onPlaceSummary: updatePlaceSummary,
       // Returns the shown facing relation for a face-anchor point, or null when
       // there is no 3D view to show it in.
       showTransform(transform, point = null) {
@@ -2181,6 +2270,11 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   loadJobs();
   if (sceneId !== null) openScene(sceneId);
   return {
+    setPlace(draftId, place) {
+      if (disposed || draftId !== draft.id) return;
+      currentPlace = place;
+      showPlaceHeading();
+    },
     dispose() {
       disposed = true;
       stopPolling();

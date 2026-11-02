@@ -890,6 +890,7 @@ function renderPlace() {
     return;
   }
   els.viewerTitle.textContent = placeLabel(view.place);
+  space?.setPlace(view.draftId, view.place);
   const nodes = [];
   if (view.place.unavailable) {
     nodes.push(node('p', { className: 'hint', textContent: 'The name of this place could not be read, so it cannot be changed right now. Its photos, writing and scenes are not affected.' }));
@@ -1102,6 +1103,7 @@ async function openSpace(draft, source, sceneId = null) {
     const durationHintMs = (sourceId) =>
       draft.voice?.sourceId === sourceId && Number.isFinite(els.viewerVoice.duration) ? Math.round(els.viewerVoice.duration * 1000) : null;
     space = module.mountSpace(els.viewerSpace, { draft, sourceFor: source, durationHintMs, sceneId, onScene });
+    if (placeView?.draftId === draft.id) space.setPlace(draft.id, placeView.place);
   } catch {
     if (generation !== spaceGeneration) return;
     const message = document.createElement('p');

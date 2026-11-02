@@ -120,6 +120,7 @@ let surfaceBody;
 let posts;
 let heldGets;
 let proposals;
+let heldProposals;
 let collaboration;
 // Every URL fetched, in order.
 let gets = [];
@@ -140,7 +141,7 @@ before(async () => {
     }
     if (url.endsWith('/surface.json')) return json(200, surfaceBody);
     if (url.endsWith('/reconstructions')) return json(200, [job]);
-    if (url.endsWith('/proposals')) return json(200, proposals);
+    if (url.endsWith('/proposals')) return heldProposals ? heldProposals.promise : json(200, proposals);
     if (url.endsWith('/collaboration')) return json(200, collaboration);
     if (url.endsWith('/stories')) return json(200, { stories: storyList });
     if (url === '/api/invitations') return json(200, []);
@@ -168,6 +169,7 @@ beforeEach(() => {
   heldGets = null;
   gets = [];
   proposals = [];
+  heldProposals = null;
   collaboration = { revision: 0, contributions: [], variants: [], blocked: false, currentVersion: 1 };
   storyList = [];
   history = [{ version: 1, offset: [0, 0, 0], yaw: 0, kind: 'initial' }];
@@ -184,11 +186,11 @@ beforeEach(() => {
   };
 });
 
-async function openScene({ sources = [] } = {}) {
+async function openScene({ sources = [], text = '', textRecord = null } = {}) {
   const container = new FakeElement('section');
-  const draft = { id: DRAFT_ID, photos: [{ name: 'photo-1.jpg', sourceId: SOURCE_ID }], sources };
+  const draft = { id: DRAFT_ID, photos: [{ name: 'photo-1.jpg', sourceId: SOURCE_ID }], sources, text, textSourceId: 'text-id' };
   const granted = { kind: 'photo', origin: { kind: 'public', reference: '' }, permissions: { place: true, model: true, share: false } };
-  const space = mountSpace(container, { draft, sourceFor: () => granted });
+  const space = mountSpace(container, { draft, sourceFor: (id) => id === 'text-id' ? textRecord : granted });
   await settle();
   const find = (predicate) => container.findAll(predicate);
   const button = (text) => find((node) => node.tag === 'button' && node.textContent === text)[0];
@@ -206,6 +208,73 @@ async function openScene({ sources = [] } = {}) {
 }
 
 const count = (entry) => globalThis.viewerLog.filter((item) => item === entry).length;
+
+describe('place landing', () => {
+  it('offers the original and a memory action without starting a write', async () => {
+    const view = await openScene();
+    const landing = view.find((node) => node.className === 'place-landing')[0];
+    assert.match(landing.textContent, /No saved change from a written memory for this view/);
+    const memory = view.find((node) => node.className === 'memory-edit' && node.children[0]?.textContent === 'Change it from a memory')[0];
+    let focused = false;
+    memory.querySelector = () => memory.children[0];
+    memory.children[0].focus = () => { focused = true; };
+    landing.findAll((node) => node.tag === 'button' && node.textContent === 'Change from a memory')[0].dispatch('click');
+    assert.equal(focused, true);
+    const materials = { open: false, querySelector: () => ({ focus() {} }), scrollIntoView() {} };
+    globalThis.document.getElementById = (id) => id === 'viewer-materials' ? materials : null;
+    landing.findAll((node) => node.tag === 'button' && node.textContent === 'See the original photo')[0].dispatch('click');
+    assert.equal(materials.open, true);
+    assert.equal(posts.length, 0);
+    delete globalThis.document.getElementById;
+    view.space.dispose();
+  });
+
+  it('does not use archive-only writing as scene context', async () => {
+    const view = await openScene({ text: 'Synthetic restricted words.', textRecord: { id: 'text-id', kind: 'text', permissions: { place: false }, policy: { stopped: false } } });
+    const landing = view.find((node) => node.className === 'place-landing')[0];
+    assert.doesNotMatch(landing.textContent, /Synthetic restricted words/);
+    assert.match(landing.textContent, /No saved change from a written memory for this view/);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('moves focus only out of a hidden disclosure and restores its open state after the same held read', async () => {
+    const words = 'A fictional sentence. '.repeat(20);
+    job.edit = { version: 2, offset: [0, 0, 0], yaw: 0 };
+    const id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    proposals = [{ id, status: 'applied', appliedVersion: 2, baseVersion: 1, statement: { kind: 'human_memory', text: words }, result: { sourceId: SOURCE_ID, targetId: 'selected-foreground', baseVersion: 1 } }];
+    history = [{ version: 1, kind: 'initial', offset: [0, 0, 0], yaw: 0 }, { version: 2, kind: 'proposal', proposalId: id, blocked: false, offset: [0, 0, 0], yaw: 0 }];
+    const view = await openScene();
+    const landing = view.find((node) => node.className === 'place-landing')[0];
+    const disclosure = landing.findAll((node) => node.tag === 'details')[0];
+    const action = landing.findAll((node) => node.tag === 'button' && node.textContent === 'Change from a memory')[0];
+    action.focus = () => { globalThis.document.activeElement = action; };
+    assert.equal(disclosure.hidden, false);
+    disclosure.open = true;
+    const x = view.axis('Left / right');
+    x.value = '0.5'; x.dispatch('input');
+    view.button('Apply and save').dispatch('click');
+    posts[0].respond(json(503, { error: 'Unknown.' }));
+    await settle();
+    heldProposals = Promise.withResolvers();
+    globalThis.document.activeElement = disclosure.children[0];
+    view.button('Load saved version').dispatch('click');
+    await settle();
+    assert.equal(disclosure.hidden, true);
+    assert.equal(globalThis.document.activeElement, action);
+    heldProposals.resolve(json(200, proposals));
+    heldProposals = null;
+    await settle();
+    assert.equal(disclosure.hidden, false);
+    assert.equal(disclosure.open, true, 'the same words retain the explicit open choice');
+    const unrelated = new FakeElement('button');
+    globalThis.document.activeElement = unrelated;
+    view.button('Load saved version').dispatch('click');
+    await settle();
+    assert.equal(globalThis.document.activeElement, unrelated, 'unrelated focus is not moved');
+    view.space.dispose();
+  });
+});
 
 describe('viewer setup failures release what was created', () => {
   it('releases the renderer and texture when the surface is malformed', async () => {

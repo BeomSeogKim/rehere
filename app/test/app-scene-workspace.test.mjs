@@ -139,7 +139,7 @@ describe('an owner scene address', () => {
     assert.equal(opens(J2), 0, 'never another scene');
     assert.deepEqual(posts(), [], 'navigation sends nothing');
     assert.equal(space().hidden, false);
-    assert.match(space().textContent, /Partial scene from photo 1/);
+    assert.match(space().textContent, /A place to revisit/);
     assert.equal(byId('viewer-materials').open, false, 'a memory with photos opens on its scene');
     assert.equal(byId('viewer-photos').findAll((node) => node.tag === 'img').length, 1, 'originals are still there');
   });
@@ -245,6 +245,52 @@ describe('an owner scene address', () => {
     await settle();
     assert.equal(space().hidden, true, 'without a scene address nothing is mounted for it');
     draft = freshDraft();
+  });
+
+  it('keeps the scene heading in sync with rename, clear and a conflicting newer name', async () => {
+    draft = { ...freshDraft(), place: { name: null, revision: 0, unavailable: false } };
+    go(`#/memories/${DRAFT}/scenes/${J1}`);
+    await settle();
+    const originalFetch = globalThis.fetch;
+    let conflict = false;
+    globalThis.fetch = async (url, options = {}) => {
+      if (url === `/api/drafts/${DRAFT}/place-name` && options.method === 'POST') {
+        const body = JSON.parse(options.body);
+        if (conflict) {
+          draft = { ...draft, place: { name: 'Other name', revision: 3, unavailable: false } };
+          return json(409, { error: 'Changed elsewhere.' });
+        }
+        draft = { ...draft, place: { name: body.name, revision: draft.place.revision + 1, unavailable: false } };
+        return json(200, { id: DRAFT, draftId: DRAFT, place: draft.place, changed: true });
+      }
+      return originalFetch(url, options);
+    };
+    const heading = () => space().findAll((node) => node.tag === 'h3')[0]?.textContent;
+    const rename = async (buttonText, value) => {
+      byId('viewer-place-name').findAll((node) => node.tag === 'button' && node.textContent === buttonText)[0].dispatch('click');
+      const input = byId('viewer-place-name').findAll((node) => node.tag === 'input')[0];
+      input.value = value;
+      input.dispatch('input');
+      byId('viewer-place-name').findAll((node) => node.tag === 'button' && node.textContent === 'Save name')[0].dispatch('click');
+      await settle();
+    };
+    try {
+      assert.equal(heading(), 'A place to revisit');
+      await rename('Name this place', 'The old shop');
+      assert.equal(heading(), 'The old shop');
+      await rename('Rename', '');
+      assert.equal(heading(), 'A place to revisit');
+      conflict = true;
+      await rename('Name this place', 'My name');
+      assert.equal(heading(), 'Other name');
+      const open = space().findAll((node) => node.tag === 'button' && node.textContent === 'Open scene' && /Scene dddddddd/.test(node.attributes['aria-label'] ?? ''))[0];
+      open.dispatch('click');
+      await settle();
+      assert.equal(heading(), 'Other name', 'reopening uses the current name, not the original draft');
+    } finally {
+      globalThis.fetch = originalFetch;
+      draft = freshDraft();
+    }
   });
 
   // Last: it ends the owner session.

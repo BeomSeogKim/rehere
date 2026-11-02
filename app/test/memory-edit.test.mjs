@@ -143,6 +143,54 @@ describe('proposal helpers', () => {
   });
 });
 
+describe('place summary', () => {
+  it('shows only the current applied version and clears words on redaction or an unconfirmed read', async () => {
+    const summaries = [];
+    const applied = proposal({ status: 'applied', appliedVersion: 2 });
+    state.proposals = [applied];
+    state.history = [
+      { version: 1, kind: 'initial', offset: [0, 0, 0], yaw: 0 },
+      { version: 2, kind: 'proposal', proposalId: PROPOSAL_ID, blocked: false, offset: [0, 0, 0], yaw: Math.PI / 4 },
+    ];
+    const ui = mount({ editor: { version: 2, offset: [0, 0, 0], yaw: Math.PI / 4, clean: true }, extra: {
+      sourceId: 'src',
+      comparison: { available: () => true, source: () => publicSource },
+      onPlaceSummary: (summary) => summaries.push(summary),
+    } });
+    await settle();
+    assert.deepEqual(summaries.at(-1), { kind: 'saved', text: 'The counter faced the window.', version: 2 });
+    state.proposals = [{ ...applied, redacted: true, statement: { ...applied.statement, text: null } }];
+    await ui.handle.refresh();
+    assert.deepEqual(summaries.at(-1), { kind: 'unavailable' });
+    state.proposals = [applied];
+    await ui.handle.refresh();
+    assert.deepEqual(summaries.at(-1), { kind: 'unavailable' }, 'a later response cannot revive redacted words');
+    state.listGet = () => lost();
+    await ui.handle.refresh();
+    assert.deepEqual(summaries.at(-1), { kind: 'unavailable' });
+    assert.equal(posts.length, 0);
+    ui.handle.dispose();
+  });
+
+  it('offers a ready proposal as unsaved and opens the existing comparison only on request', async () => {
+    const summaries = [];
+    const opened = [];
+    state.proposals = [proposal()];
+    const ui = mount({ extra: {
+      sourceId: 'src',
+      comparison: { available: () => true, source: () => publicSource, open: (value) => { opened.push(value); return true; }, close() {} },
+      onPlaceSummary: (summary) => summaries.push(summary),
+    } });
+    await settle();
+    assert.deepEqual(summaries.at(-1), { kind: 'proposal', text: 'The counter faced the window.' });
+    assert.equal(opened.length, 0);
+    assert.equal(ui.handle.compareFrom({ focus() {} }), true);
+    assert.equal(opened.length, 1);
+    assert.equal(posts.length, 0);
+    ui.handle.dispose();
+  });
+});
+
 describe('memory proposal panel', () => {
   it('offers no planning for a private or ungranted source', async () => {
     const view = mount({ source: { ...publicSource, origin: { kind: 'own', reference: '' } } });

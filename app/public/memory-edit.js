@@ -178,6 +178,7 @@ export function mountMemoryEdit(container, bridge) {
   let comparing = false;
   let comparisonView = null;
   let comparisonReadCertain = false;
+  let summaryReadFinished = false;
   let comparisonProposal = null;
   let comparisonTrigger = null;
   let frontChecked = false;
@@ -341,6 +342,23 @@ export function mountMemoryEdit(container, bridge) {
     singleProposalForScene() &&
     current.baseVersion === bridge.editor().version && bridge.editor().clean);
 
+  function placeSummary() {
+    if (!summaryReadFinished) return { kind: 'checking' };
+    if (!comparisonReadCertain || busy || unsettled()) return { kind: 'unavailable' };
+    if (comparable()) return { kind: 'proposal', text: current.statement.text };
+    const version = bridge.editor().version;
+    const entry = history.find((item) => item.version === version);
+    if (entry?.kind !== 'proposal') return { kind: 'none' };
+    const saved = proposals.find((item) => item.id === entry.proposalId);
+    if (!saved || isRedacted(saved) || saved.status !== 'applied' || saved.appliedVersion !== version ||
+      saved.baseVersion + 1 !== version || saved.result?.baseVersion !== saved.baseVersion ||
+      saved.result?.sourceId !== bridge.sourceId || saved.result?.targetId !== 'selected-foreground' ||
+      saved.statement?.kind !== 'human_memory' || !saved.statement.text.trim() || entry.blocked !== false) {
+      return { kind: 'unavailable' };
+    }
+    return { kind: 'saved', text: saved.statement.text, version };
+  }
+
   function beginComparison() {
     if (!comparable()) return;
     if (previewing) setPreview(false);
@@ -475,6 +493,7 @@ export function mountMemoryEdit(container, bridge) {
     renderChooser();
     renderReview();
     renderHistory();
+    if (bridge.onPlaceSummary) bridge.onPlaceSummary(placeSummary());
   }
 
   function renderReview() {
@@ -704,6 +723,7 @@ export function mountMemoryEdit(container, bridge) {
   // newer read replaced it (that read's own promise is latestRead).
   let latestRead = null;
   function refresh() {
+    summaryReadFinished = false;
     if (bridge.comparison) {
       comparisonReadCertain = false;
       if (comparing) endComparison();
@@ -742,6 +762,7 @@ export function mountMemoryEdit(container, bridge) {
       if (current && ACTIVE.has(current.status) && pollingId !== current.id) poll(current.id);
     }
     if (versions.ok && Array.isArray(versions.body)) history = versions.body;
+    summaryReadFinished = true;
     if (!list.ok || !versions.ok) status.textContent = 'Saved proposals or versions could not be loaded. Reload the page to try again.';
     else if (bridge.comparison && !comparisonReadCertain) status.textContent = 'The current saved version could not be confirmed. Load the saved version or reload the page.';
     else if (status.textContent === 'The current saved version could not be confirmed. Load the saved version or reload the page.') status.textContent = '';
@@ -1029,6 +1050,12 @@ export function mountMemoryEdit(container, bridge) {
   return {
     sync,
     refresh,
+    compareFrom(trigger) {
+      if (!comparable()) return false;
+      comparisonTrigger = trigger;
+      beginComparison();
+      return comparing;
+    },
     revealForObject,
     showAll,
     dispose() {
