@@ -204,6 +204,9 @@ before(async () => {
     }
     stop() {
       this.state = 'inactive';
+      const data = new Event('dataavailable');
+      data.data = new Blob(['synthetic voice'], { type: 'audio/webm' });
+      this.dispatchEvent(data);
       this.dispatchEvent(new Event('stop'));
     }
   };
@@ -249,10 +252,14 @@ const addFiles = async (...files) => {
   byId('photo-input').dispatch('change');
   await settle();
 };
+const beginSave = () => {
+  byId('draft-form').dispatch('submit');
+  button('Save with current choices')?.dispatch('click');
+};
 const save = async () => {
   const before = message();
   byId('form-message').replaceChildren();
-  byId('draft-form').dispatch('submit');
+  beginSave();
   await waitFor(() => message() !== '', `an outcome after "${before}"`);
   await settle();
 };
@@ -473,10 +480,143 @@ describe('resumable saving in the app', () => {
     await waitFor(() => /discarded/.test(message()), 'the discard');
   });
 
+  it('reviews each photo without granting uses, returns to the chosen photo, and saves the current choices', async () => {
+    await addFiles(jpeg('review-a', 'a.jpg'), jpeg('review-b', 'b.jpg'));
+    const items = () => byId('photo-list').children;
+    const boxes = (item) => item.findAll((node) => node.tag === 'input' && node.type === 'checkbox');
+    boxes(items()[1])[0].checked = true;
+    boxes(items()[1])[0].dispatch('change');
+    requests.length = 0;
+    byId('draft-form').dispatch('submit');
+    const review = byId('save-review');
+    assert.equal(review.hidden, false);
+    assert.match(review.textContent, /Before you save/);
+    assert.match(review.textContent, /public-source photo/);
+    assert.equal(intakePosts().length, 0);
+    assert.deepEqual(boxes(items()[0]).map((box) => box.checked), [false, false, false]);
+    assert.deepEqual(boxes(items()[1]).map((box) => box.checked), [true, false, false]);
+
+    const secondDetails = items()[1].findAll((node) => node.tag === 'details')[0];
+    let focused = false;
+    secondDetails.children[0].focus = () => { focused = true; };
+    button('Edit uses for photo 2').dispatch('click');
+    assert.equal(review.hidden, true);
+    assert.equal(secondDetails.open, true);
+    assert.equal(focused, true);
+    assert.deepEqual(boxes(items()[1]).map((box) => box.checked), [true, false, false]);
+
+    byId('draft-form').dispatch('submit');
+    boxes(items()[0])[0].checked = true;
+    boxes(items()[0])[0].dispatch('change');
+    button('Save with current choices').dispatch('click');
+    assert.match(message(), /choices changed/);
+    assert.equal(intakePosts().length, 0, 'a stale review does not send anything');
+    await save();
+    const saved = [...intakes.values()].at(-1);
+    assert.deepEqual(saved.metadata.photos.map((photo) => photo.permissions), [
+      { place: true, model: false, share: false },
+      { place: true, model: false, share: false },
+    ]);
+    assert.match(message(), /^Saved\./);
+  });
+
+  it('does not interrupt text-only or fully permitted photo saves', async () => {
+    byId('memory-text').value = 'A written memory';
+    byId('draft-form').dispatch('submit');
+    assert.equal(button('Save with current choices'), undefined);
+    await waitFor(() => /^Saved\./.test(message()), 'the text-only save');
+    await addFiles(jpeg('permitted', 'public.jpg'));
+    const item = byId('photo-list').children[0];
+    const origin = item.findAll((node) => node.tag === 'select')[0];
+    origin.value = 'public';
+    origin.dispatch('change');
+    for (const box of item.findAll((node) => node.tag === 'input' && node.type === 'checkbox')) {
+      box.checked = true;
+      box.dispatch('change');
+    }
+    byId('form-message').replaceChildren();
+    byId('draft-form').dispatch('submit');
+    assert.equal(button('Save with current choices'), undefined);
+    await waitFor(() => /^Saved\./.test(message()), 'the permitted photo save');
+  });
+
+  it('leaves an active recording running when the photo review is opened or dismissed', async () => {
+    await addFiles(jpeg('recording', 'recording.jpg'));
+    byId('record').dispatch('click');
+    await settle();
+    grantMic();
+    await settle();
+    byId('draft-form').dispatch('submit');
+    assert.ok(button('Save with current choices'));
+    assert.match(byId('voice-status').textContent, /^Recording/);
+    button('Keep editing').dispatch('click');
+    assert.match(byId('voice-status').textContent, /^Recording/);
+    byId('discard').dispatch('click');
+    await settle();
+    await save();
+    assert.match(message(), /^Saved\./);
+  });
+
+  it('keeps the original save-without-voice choice when microphone access arrives during review', async () => {
+    await addFiles(jpeg('late-microphone', 'late.jpg'));
+    byId('record').dispatch('click');
+    await settle();
+    assert.equal(byId('save').textContent, 'Save without voice');
+    byId('draft-form').dispatch('submit');
+    assert.ok(button('Save with current choices'));
+    button('Keep editing').dispatch('click');
+    assert.match(byId('voice-status').textContent, /Waiting for microphone/);
+    byId('draft-form').dispatch('submit');
+    grantMic();
+    await settle();
+    assert.match(byId('voice-status').textContent, /^Recording/);
+    byId('form-message').replaceChildren();
+    button('Save with current choices').dispatch('click');
+    await waitFor(() => /^Saved\./.test(message()), 'save without late recording');
+    const saved = [...intakes.values()].at(-1);
+    assert.equal(saved.metadata.voice, null);
+    assert.equal(saved.parts.some((part) => part.kind === 'voice'), false);
+  });
+
+  it('keeps the active recording out when the secondary save-without-voice action was chosen', async () => {
+    await addFiles(jpeg('without-voice', 'without.jpg'));
+    byId('record').dispatch('click');
+    await settle();
+    grantMic();
+    await settle();
+    assert.equal(byId('save').textContent, 'Stop and save');
+    assert.equal(byId('save-without-voice').hidden, false);
+    byId('save-without-voice').dispatch('click');
+    assert.match(byId('voice-status').textContent, /^Recording/);
+    byId('form-message').replaceChildren();
+    button('Save with current choices').dispatch('click');
+    await waitFor(() => /^Saved\./.test(message()), 'save without active recording');
+    const saved = [...intakes.values()].at(-1);
+    assert.equal(saved.metadata.voice, null);
+    assert.equal(saved.parts.some((part) => part.kind === 'voice'), false);
+  });
+
+  it('stops and includes the active recording when stop and save was chosen', async () => {
+    await addFiles(jpeg('with-voice', 'with.jpg'));
+    byId('record').dispatch('click');
+    await settle();
+    grantMic();
+    await settle();
+    assert.equal(byId('save').textContent, 'Stop and save');
+    byId('draft-form').dispatch('submit');
+    assert.match(byId('voice-status').textContent, /^Recording/);
+    byId('form-message').replaceChildren();
+    button('Save with current choices').dispatch('click');
+    await waitFor(() => /^Saved\./.test(message()), 'save with recording');
+    const saved = [...intakes.values()].at(-1);
+    assert.ok(saved.metadata.voice);
+    assert.equal(saved.parts.filter((part) => part.kind === 'voice').length, 1);
+  });
+
   it('aborts sending on sign-out and lets no late answer bring anything back', async () => {
     await addFiles(jpeg('fff', 'f.jpg'));
     held = {};
-    byId('draft-form').dispatch('submit');
+    beginSave();
     await waitFor(() => held.release, 'the held upload');
     assert.match(rows()[0], /Sending…/);
     button('Sign out').dispatch('click');
@@ -503,7 +643,7 @@ describe('resumable saving in the app', () => {
     await addFiles(jpeg('kkk', 'a.jpg'));
     const a = { ignoreAbort: true };
     holds.push(a);
-    byId('draft-form').dispatch('submit');
+    beginSave();
     await waitFor(() => a.release, 'A’s upload');
     assert.equal(byId('draft-form').inert, true, 'A is saving');
     button('Sign out').dispatch('click');
@@ -515,7 +655,7 @@ describe('resumable saving in the app', () => {
     await addFiles(jpeg('lll', 'b.jpg'));
     const b = {};
     holds.push(b);
-    byId('draft-form').dispatch('submit');
+    beginSave();
     await waitFor(() => b.release, 'B’s upload');
     assert.equal(byId('draft-form').inert, true, 'B is saving');
 

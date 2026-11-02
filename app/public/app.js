@@ -23,6 +23,7 @@ import {
   createSourceDetails,
   createVoiceSource,
   detailsProblem,
+  photoUseNeeds,
   renderSavedSource,
   renderPhotoUses,
   renderSourceControls,
@@ -62,6 +63,8 @@ const els = {
   voiceSource: $('voice-source'),
   message: $('form-message'),
   save: $('save'),
+  saveActions: $('save-actions'),
+  saveReview: $('save-review'),
   saveWithoutVoice: $('save-without-voice'),
   viewer: $('viewer'),
   viewerTitle: $('viewer-title'),
@@ -112,6 +115,7 @@ const stillOwner = (generation) => ownerActive && generation === sessionGenerati
 let ownerId = null;
 let intakeAbort = null;
 let intake = null;
+let reviewedPhotos = null;
 let voiceItem = null;
 let lostVoice = null;
 let textKeptInput = null;
@@ -181,7 +185,8 @@ function renderPhotos() {
       // The whole list is rebuilt together, so ids by position stay unique.
       const usesId = `photo-uses-${index + 1}`;
       const uses = renderPhotoUses(document, photo.details, usesId);
-      item.append(frame, uses.element, renderSourceControls(document, { ...photo, label: `photo ${index + 1}`, onChange: uses.refresh, describedBy: usesId }));
+      photo.controls = renderSourceControls(document, { ...photo, label: `photo ${index + 1}`, onChange: uses.refresh, describedBy: usesId });
+      item.append(frame, uses.element, photo.controls);
       return item;
     }),
   );
@@ -309,6 +314,8 @@ async function collectVoice(includeVoice) {
 }
 
 function resetForm() {
+  closeSaveReview();
+  reviewedPhotos = null;
   for (const photo of photos) URL.revokeObjectURL(photo.url);
   photos.length = 0;
   renderPhotos();
@@ -345,6 +352,99 @@ function savedNotice(id) {
   link.textContent = 'View what you saved';
   fragment.append('Saved. ', link);
   return fragment;
+}
+
+// A review applies only to these exact photos and their current source choices.
+function photoChoices() {
+  return photos.map((photo) => ({ photo, details: JSON.stringify(photo.details), file: photo.file, missing: photo.missing }));
+}
+
+function samePhotoChoices(first, second) {
+  return first?.length === second.length && first.every((item, index) =>
+    item.photo === second[index].photo && item.details === second[index].details && item.file === second[index].file && item.missing === second[index].missing);
+}
+
+function closeSaveReview() {
+  els.saveReview.hidden = true;
+  els.saveReview.replaceChildren();
+  els.saveActions.hidden = false;
+}
+
+function startSave(includeVoice) {
+  if (saving || restoring) return;
+  // An uncertain request must be reconciled before any changed plan is sent.
+  if (intake?.pending) return save(includeVoice);
+  const choices = photoChoices();
+  const limited = photos.map((photo, index) => ({ photo, index, uses: photoUseNeeds(photo.details) }))
+    .filter(({ uses }) => uses.some(({ missing }) => missing));
+  if (!limited.length || samePhotoChoices(reviewedPhotos, choices)) return save(includeVoice);
+
+  const heading = document.createElement('h2');
+  heading.textContent = 'Before you save';
+  heading.tabIndex = -1;
+  const intro = document.createElement('p');
+  intro.textContent = 'Your photos can be saved with these choices. Check what each photo can be used for later; after saving, its allowed uses can only be restricted.';
+  const list = document.createElement('ul');
+  for (const { photo, index, uses } of limited) {
+    const item = document.createElement('li');
+    const name = document.createElement('strong');
+    name.textContent = `Photo ${index + 1}`;
+    const rows = document.createElement('ul');
+    for (const { name: use, missing } of uses) {
+      const row = document.createElement('li');
+      row.textContent = missing ? `${use}: needs ${missing.join(' + ')}` : `${use}: permitted by these settings`;
+      rows.append(row);
+    }
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'secondary';
+    edit.textContent = `Edit uses for photo ${index + 1}`;
+    edit.addEventListener('click', () => {
+      if (!samePhotoChoices(choices, photoChoices())) {
+        closeSaveReview();
+        setMessage('Your photo choices changed. Press Save to review them again.');
+        els.save.focus();
+        return;
+      }
+      closeSaveReview();
+      photo.state.open = true;
+      photo.controls.open = true;
+      const summary = photo.controls.children[0];
+      summary.scrollIntoView?.({ block: 'center' });
+      summary.focus();
+    });
+    item.append(name, rows, edit);
+    list.append(item);
+  }
+  const note = document.createElement('p');
+  note.className = 'hint';
+  note.textContent = 'In this development version, hosted memory edits and visitor links require a public-source photo. Choose the source type truthfully; a public label alone does not grant any use.';
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const back = document.createElement('button');
+  back.type = 'button';
+  back.className = 'secondary';
+  back.textContent = 'Keep editing';
+  back.addEventListener('click', () => { closeSaveReview(); els.save.focus(); });
+  const proceed = document.createElement('button');
+  proceed.type = 'button';
+  proceed.textContent = 'Save with current choices';
+  proceed.addEventListener('click', () => {
+    if (!samePhotoChoices(choices, photoChoices())) {
+      closeSaveReview();
+      setMessage('Your photo choices changed. Press Save to review them again.');
+      els.save.focus();
+      return;
+    }
+    reviewedPhotos = choices;
+    closeSaveReview();
+    save(includeVoice);
+  });
+  actions.append(back, proceed);
+  els.saveReview.replaceChildren(heading, intro, list, ...(limited.some(({ uses }) => uses.some(({ missing }) => missing?.includes('public source'))) ? [note] : []), actions);
+  els.saveActions.hidden = true;
+  els.saveReview.hidden = false;
+  heading.focus();
 }
 
 async function save(includeVoice) {
@@ -1040,7 +1140,7 @@ function route() {
   }
   els.compose.hidden = memoryLink;
   els.viewer.hidden = !memoryLink;
-  if (memoryLink) recorder.leave();
+  if (memoryLink) { closeSaveReview(); recorder.leave(); }
   if (match) showDraft(match[1], '', match[2] ?? null);
   else if (memoryLink) {
     clearViewer();
@@ -1066,9 +1166,12 @@ els.stop.addEventListener('click', () => recorder.stop());
 els.discard.addEventListener('click', () => recorder.discard());
 els.form.addEventListener('submit', (event) => {
   event.preventDefault();
-  save(true);
+  const { state } = recorder.snapshot();
+  // The choice belongs to this press, even if microphone permission arrives
+  // while the photo review is open.
+  startSave(state !== 'requesting' && (['recording', 'finalizing', 'recorded'].includes(state) || Boolean(lostVoice)));
 });
-els.saveWithoutVoice.addEventListener('click', () => save(false));
+els.saveWithoutVoice.addEventListener('click', () => startSave(false));
 window.addEventListener('hashchange', route);
 
 function clearViewer() {
