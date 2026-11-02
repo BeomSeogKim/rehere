@@ -165,6 +165,10 @@ export function mountShares(container, bridge) {
   let disposed = false;
   let collaboration = null;
   let history = [];
+  let proposals = [];
+  let singlePhotoScene = false;
+  let sceneSourceId = null;
+  let memoryChoice = null;
   let stories = [];
   let storyBoxes = [];
   let camera = null;
@@ -175,6 +179,7 @@ export function mountShares(container, bridge) {
   let previewAttempt = null;
   let issueAttempt = null;
   let revokeAttempt = null;
+  let previewEpoch = 0;
   const viewIds = new Map();
   const idFor = (key) => {
     if (!viewIds.has(key)) viewIds.set(key, crypto.randomUUID());
@@ -186,6 +191,9 @@ export function mountShares(container, bridge) {
   const viewList = el('div');
   const startSelect = el('select');
   const quoteList = el('div');
+  const memoryList = el('div');
+  const memoryPermission = el('input', { type: 'checkbox', checked: false, disabled: true });
+  const memoryPermissionLabel = el('span', { textContent: ' I have permission to share these words.' });
   const storyList = el('div');
   const photoList = el('div');
   const recordingList = el('div');
@@ -216,6 +224,11 @@ export function mountShares(container, bridge) {
       el('label', { className: 'memory-consent' }, [synthetic, ' Label this as synthetic test material']),
       el('fieldset', { className: 'source-permissions' }, [el('legend', { textContent: 'Views to share' }), viewList]),
       field('Visitors see first', startSelect),
+      el('fieldset', { className: 'source-permissions' }, [
+        el('legend', { textContent: 'Words behind an approved change (optional)' }),
+        memoryList,
+        el('label', { className: 'memory-consent' }, [memoryPermission, memoryPermissionLabel]),
+      ]),
       el('fieldset', { className: 'source-permissions' }, [
         el('legend', { textContent: 'Recollections to quote (optional)' }),
         el('p', { className: 'hint', textContent: 'Quoting shows the person’s own words. Only recollections whose writers allowed both reconstruction and sharing can be quoted.' }),
@@ -261,7 +274,9 @@ export function mountShares(container, bridge) {
       .map(({ key, kind, version, variantId }) => ({ id: idFor(key), kind, version: kind === 'version' ? version : null, variantId: kind === 'variant' ? variantId : null }));
 
   // Any change after a preview discards it: issue binds to the exact preview.
-  function discardPreview(reason = '') {
+  function discardPreview(reason = '', preserveAttempt = false) {
+    previewEpoch += 1;
+    if (!preserveAttempt) previewAttempt = null;
     previewView?.dispose();
     previewView = null;
     preview = null;
@@ -270,6 +285,48 @@ export function mountShares(container, bridge) {
     previewBox.replaceChildren();
     issueBox.replaceChildren();
     if (reason) message.textContent = reason;
+  }
+
+  function renderMemoryWords() {
+    memoryChoice = null;
+    memoryPermission.checked = false;
+    memoryPermission.disabled = true;
+    memoryPermission.removeAttribute('aria-describedby');
+    memoryPermissionLabel.textContent = ' I have permission to share these words.';
+    const offered = singlePhotoScene ? selectedViews().flatMap((view) => {
+      if (view.kind !== 'version') return [];
+      const entry = history.find((item) => item.version === view.version && item.kind === 'proposal' && item.blocked === false);
+      const proposal = proposals.find((item) => item.id === entry?.proposalId && item.status === 'applied' && item.appliedVersion === view.version && !item.redacted);
+      const statement = proposal?.statement;
+      if (proposal?.baseVersion + 1 !== view.version || proposal.result?.baseVersion !== proposal.baseVersion
+        || proposal.result?.targetId !== 'selected-foreground' || proposal.result?.sourceId !== sceneSourceId
+        || !['translate', 'rotate', 'face_anchor'].includes(proposal.result?.action)
+        || !Array.isArray(entry?.offset) || JSON.stringify(proposal.result?.transform?.offset) !== JSON.stringify(entry.offset)
+        || proposal.result?.transform?.yaw !== entry.yaw || statement?.kind !== 'human_memory'
+        || typeof statement.text !== 'string' || !statement.text.trim() || !/^[0-9a-f]{64}$/.test(statement.sha256 ?? '')) return [];
+      return [{ viewId: view.id, proposalId: proposal.id, statementSha256: statement.sha256, text: statement.text, version: view.version }];
+    }) : [];
+    const choices = offered.map((item) => ({ item, box: el('input', { type: 'checkbox', checked: false }) }));
+    memoryList.replaceChildren(...(choices.length ? choices.map(({ item, box }) => {
+      const wordsId = `share-memory-words-${item.viewId}`;
+      box.setAttribute('aria-describedby', wordsId);
+      return el('div', {}, [
+        el('p', { id: wordsId, className: 'share-memory-words', textContent: `Saved version ${item.version}: “${item.text}”` }),
+        el('label', {}, [box, ` Include these words with saved version ${item.version}`]),
+      ]);
+    }) : [el('p', { className: 'hint', textContent: 'No eligible words are available for the selected views.' })]));
+    for (const { item, box } of choices) box.addEventListener('change', () => {
+      for (const other of choices) if (other.box !== box) other.box.checked = false;
+      memoryChoice = box.checked ? item : null;
+      memoryPermission.checked = false;
+      memoryPermission.disabled = !memoryChoice;
+      if (memoryChoice) memoryPermission.setAttribute('aria-describedby', `share-memory-words-${item.viewId}`);
+      else memoryPermission.removeAttribute('aria-describedby');
+      memoryPermissionLabel.textContent = memoryChoice
+        ? ` I have permission to share these words for saved version ${item.version}.`
+        : ' I have permission to share these words.';
+      discardPreview();
+    });
   }
 
   function renderStart() {
@@ -376,6 +433,7 @@ export function mountShares(container, bridge) {
         renderStories();
         renderPhotos();
         renderRecordings();
+        renderMemoryWords();
         discardPreview();
       });
     }
@@ -383,6 +441,7 @@ export function mountShares(container, bridge) {
     renderStories();
     renderPhotos();
     renderRecordings();
+    renderMemoryWords();
 
     const chosenQuotes = new Set(quoteBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id));
     const eligible = (collaboration?.contributions ?? []).filter(quotable);
@@ -414,6 +473,7 @@ export function mountShares(container, bridge) {
       ...(photoBoxes.some(({ box }) => box.checked === true) ? { evidencePhotoIds: photoBoxes.filter(({ box }) => box.checked === true).map(({ id }) => id) } : {}),
       // Optional: sent only when a recording is included, with its pinned captions.
       ...(includedRecordings().length ? { recordings: includedRecordings() } : {}),
+      ...(memoryChoice && memoryPermission.checked === true ? { memoryWords: { viewId: memoryChoice.viewId, proposalId: memoryChoice.proposalId, statementSha256: memoryChoice.statementSha256, permission: true } } : {}),
       synthetic: synthetic.checked === true,
     };
   }
@@ -446,6 +506,10 @@ export function mountShares(container, bridge) {
   }
 
   async function makePreview() {
+    if (memoryChoice && memoryPermission.checked !== true) {
+      message.textContent = 'Confirm that you have permission to share the selected words, or clear the choice.';
+      return;
+    }
     const input = candidateInput();
     const problem = previewProblem(input);
     if (problem) {
@@ -453,12 +517,14 @@ export function mountShares(container, bridge) {
       return;
     }
     if (!previewAttempt || !sameJson(previewAttempt.input, input)) previewAttempt = { input, body: { requestId: crypto.randomUUID(), ...input } };
-    discardPreview();
+    discardPreview('', true);
+    const epoch = previewEpoch;
     message.textContent = '';
     previewButton.disabled = true;
     const result = await postJson(`${bridge.sharesUrl}/previews`, previewAttempt.body);
     if (disposed) return;
     previewButton.disabled = false;
+    if (epoch !== previewEpoch) return;
     if (unclear(result)) {
       message.textContent = withReason(result, 'Rehere could not confirm the preview. Pressing Preview again repeats the same request.');
       return;
@@ -608,7 +674,8 @@ export function mountShares(container, bridge) {
 
   title.addEventListener('input', () => discardPreview());
   synthetic.addEventListener('change', () => discardPreview());
-  startSelect.addEventListener('change', () => discardPreview());
+  startSelect.addEventListener('change', () => { renderMemoryWords(); discardPreview(); });
+  memoryPermission.addEventListener('change', () => discardPreview());
   captureButton.addEventListener('click', () => {
     const captured = bridge.getCamera();
     if (!captured) {
@@ -628,10 +695,17 @@ export function mountShares(container, bridge) {
   let choicesToken = 0;
   async function loadChoices() {
     const token = ++choicesToken;
-    const [collab, versions, saved, scene] = await Promise.all([request(`${bridge.jobUrl}/collaboration`), request(`${bridge.jobUrl}/history`), request(`${bridge.jobUrl}/stories`), request(bridge.jobUrl)]);
+    if (memoryChoice && (!preview || issuedFor !== preview.id)) discardPreview('The selected words need to be reviewed again.');
+    memoryChoice = null;
+    proposals = [];
+    renderMemoryWords();
+    const [collab, versions, saved, scene, proposed] = await Promise.all([request(`${bridge.jobUrl}/collaboration`), request(`${bridge.jobUrl}/history`), request(`${bridge.jobUrl}/stories`), request(bridge.jobUrl), request(`${bridge.jobUrl}/proposals`)]);
     if (disposed || token !== choicesToken) return;
+    if (memoryChoice && (!preview || issuedFor !== preview.id)) discardPreview('The selected words need to be reviewed again.');
     // The objects a recording can be about; the whole place is always offered.
     const objects = Array.isArray(scene.body?.objects) ? scene.body.objects : null;
+    singlePhotoScene = Boolean(scene.ok && scene.body?.status === 'ready' && Array.isArray(scene.body.box) && typeof scene.body.sourceId === 'string' && !objects);
+    sceneSourceId = singlePhotoScene ? scene.body.sourceId : null;
     targets = [
       { id: 'place', label: 'This place as a whole' },
       ...(objects
@@ -642,6 +716,7 @@ export function mountShares(container, bridge) {
     ];
     collaboration = collab.ok && Array.isArray(collab.body?.variants) ? collab.body : { variants: [], contributions: [] };
     history = versions.ok && Array.isArray(versions.body) ? versions.body : [];
+    proposals = proposed.ok && Array.isArray(proposed.body) && versions.ok ? proposed.body : [];
     stories = saved.ok && Array.isArray(saved.body?.stories) ? saved.body.stories : [];
     renderChoices();
   }

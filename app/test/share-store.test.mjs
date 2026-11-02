@@ -133,6 +133,140 @@ async function shared(ctx, views, change) {
   return { preview, token, receipt };
 }
 
+async function appliedMemory(ctx) {
+  await ctx.edit(1);
+  const manifest = await ctx.reconstructions.readManifest(ctx.draftId, ctx.jobId);
+  const id = randomUUID();
+  const text = 'Fictional words about the saved placement.';
+  const statement = { id: randomUUID(), kind: 'human_memory', text, sha256: sha256(text), modelConsent: true };
+  const receipt = { ...manifest.edits[0], kind: 'proposal', proposalId: id };
+  const proposal = { id, status: 'applied', baseVersion: 1, appliedVersion: 2, statement,
+    result: { action: 'translate', targetId: 'selected-foreground', sourceId: ctx.sourceId, baseVersion: 1, transform: { offset: [...receipt.offset], yaw: receipt.yaw } } };
+  await ctx.reconstructions.update(manifest, { edits: [receipt], proposals: [proposal] });
+  return { id, statement };
+}
+
+describe('explicit sharing of an applied memory', () => {
+  it('binds authoritative words only to their saved view and needs separate permission', async () => {
+    const ctx = await setup();
+    const memory = await appliedMemory(ctx);
+    const earlier = ctx.versionView(1), changed = ctx.versionView(2);
+    const choice = { viewId: changed.id, proposalId: memory.id, statementSha256: memory.statement.sha256, permission: true };
+    const plain = await ctx.preview([earlier, changed]);
+    assert.ok(plain.publicView.views.every((view) => !Object.hasOwn(view, 'memoryWords')));
+    for (const bad of [{ ...choice, permission: false }, { ...choice, text: memory.statement.text }, { ...choice, viewId: randomUUID() }]) {
+      await assert.rejects(ctx.preview([earlier, changed], { memoryWords: bad }), status(400));
+    }
+    await assert.rejects(ctx.preview([earlier, changed], { memoryWords: { ...choice, statementSha256: '0'.repeat(64) } }),
+      (error) => status(409)(error) && error.message === 'The selected words cannot be shared with this saved view. Review the available choices.');
+    const requestId = randomUUID();
+    const preview = await ctx.preview([earlier, changed], { requestId, memoryWords: choice });
+    const reordered = { permission: true, statementSha256: choice.statementSha256, proposalId: choice.proposalId, viewId: choice.viewId };
+    assert.deepEqual(await ctx.preview([earlier, changed], { requestId, memoryWords: reordered }), preview);
+    assert.equal(preview.publicView.views[0].memoryWords, undefined);
+    assert.deepEqual(preview.publicView.views[1].memoryWords, { text: memory.statement.text });
+    assert.ok(!JSON.stringify(preview.publicView).includes(memory.id));
+    const token = visitToken();
+    const issued = await ctx.issue(preview, { token });
+    const visit = await ctx.shares.visit(token);
+    assert.deepEqual(visit.views.map((view) => view.memoryWords), [undefined, { text: memory.statement.text }]);
+    await ctx.shares.revoke(ctx.draftId, ctx.jobId, ctx.owner, issued.id, { requestId: randomUUID() });
+    await assert.rejects(ctx.shares.visit(token), unavailable);
+  });
+
+  it('keeps a permitted deterministic share when model use narrows, but stops on changed words', async () => {
+    const ctx = await setup();
+    const memory = await appliedMemory(ctx);
+    const view = ctx.versionView(2);
+    const choice = { viewId: view.id, proposalId: memory.id, statementSha256: memory.statement.sha256, permission: true };
+    const preview = await ctx.preview([view], { memoryWords: choice });
+    const token = visitToken();
+    await ctx.issue(preview, { token });
+    const { revision } = await ctx.reconstructions.sourcePolicy(ctx.draftId, ctx.sourceId, ctx.owner);
+    await ctx.reconstructions.restrictSource(ctx.draftId, ctx.sourceId, ctx.owner, { requestId: randomUUID(), baseRevision: revision,
+      permissions: { place: true, model: false, share: true }, stopUse: false });
+    assert.equal((await ctx.shares.visit(token)).views[0].memoryWords.text, memory.statement.text);
+    assert.ok(await ctx.preview([view], { memoryWords: choice }));
+    const manifest = await ctx.reconstructions.readManifest(ctx.draftId, ctx.jobId);
+    const proposal = manifest.proposals[0];
+    await ctx.reconstructions.update(manifest, { proposals: [{ ...proposal, statement: { ...proposal.statement, text: 'Changed words.' } }] });
+    await assert.rejects(ctx.shares.getPreview(ctx.draftId, ctx.jobId, ctx.owner, preview.id), status(409));
+    await assert.rejects(ctx.shares.visit(token), unavailable);
+    await assert.rejects(ctx.preview([view], { memoryWords: choice }), status(409));
+  });
+
+  it('stops an issued view when the saved receipt or source sharing permission changes', async () => {
+    for (const change of ['receipt', 'share']) {
+      const ctx = await setup();
+      const memory = await appliedMemory(ctx);
+      const view = ctx.versionView(2);
+      const choice = { viewId: view.id, proposalId: memory.id, statementSha256: memory.statement.sha256, permission: true };
+      const preview = await ctx.preview([view], { memoryWords: choice });
+      const token = visitToken();
+      await ctx.issue(preview, { token });
+      if (change === 'receipt') {
+        const manifest = await ctx.reconstructions.readManifest(ctx.draftId, ctx.jobId);
+        await ctx.reconstructions.update(manifest, { edits: [{ ...manifest.edits[0], dependencies: [randomUUID()] }] });
+      } else {
+        const { revision } = await ctx.reconstructions.sourcePolicy(ctx.draftId, ctx.sourceId, ctx.owner);
+        await ctx.reconstructions.restrictSource(ctx.draftId, ctx.sourceId, ctx.owner, { requestId: randomUUID(), baseRevision: revision,
+          permissions: { place: true, model: true, share: false }, stopUse: false });
+      }
+      await assert.rejects(ctx.shares.getPreview(ctx.draftId, ctx.jobId, ctx.owner, preview.id), (error) => error instanceof RequestError && error.status >= 400);
+      await assert.rejects(ctx.shares.visit(token), unavailable);
+    }
+  });
+
+  it('never returns the frozen words after the source proposal is removed or redacted', async () => {
+    for (const change of ['removed', 'redacted']) {
+      const ctx = await setup();
+      const memory = await appliedMemory(ctx);
+      const view = ctx.versionView(2);
+      const choice = { viewId: view.id, proposalId: memory.id, statementSha256: memory.statement.sha256, permission: true };
+      const preview = await ctx.preview([view], { memoryWords: choice });
+      const token = visitToken();
+      await ctx.issue(preview, { token });
+      const manifest = await ctx.reconstructions.readManifest(ctx.draftId, ctx.jobId);
+      await ctx.reconstructions.update(manifest, { proposals: change === 'removed' ? [] : [{ ...manifest.proposals[0], redacted: true }] });
+      await assert.rejects(ctx.shares.getPreview(ctx.draftId, ctx.jobId, ctx.owner, preview.id), status(409));
+      await assert.rejects(ctx.shares.visit(token), unavailable);
+    }
+  });
+
+  it('shares a scripted applied proposal and reopens its exact words with no model configured', async () => {
+    const ctx = await setup();
+    const text = 'Fictional memory: move the counter a little right.';
+    let calls = 0;
+    ctx.reconstructions.prepareImage = async () => jpeg(40, 30, 3);
+    ctx.reconstructions.proposalModel = async ({ sourceId, baseVersion }) => {
+      calls += 1;
+      return { ok: true, model: 'synthetic', responseId: 'synthetic', usage: null,
+        plan: { action: 'translate', targetId: 'selected-foreground', sourceId, baseVersion,
+          delta: [0.5, 0, 0], yawDelta: null, anchor: null, question: null, reason: 'Fictional test.' } };
+    };
+    const queued = await ctx.reconstructions.createProposal(ctx.draftId, ctx.jobId, { requestId: randomUUID(), baseVersion: 1, text, consent: true });
+    const ready = await waitUntil(() => ctx.reconstructions.proposal(ctx.draftId, ctx.jobId, queued.id), (item) => !['queued', 'processing'].includes(item.status));
+    assert.equal(ready.status, 'ready');
+    await ctx.reconstructions.applyProposal(ctx.draftId, ctx.jobId, ready.id, { requestId: randomUUID(), baseVersion: 1, frontConfirmed: false });
+    const view = ctx.versionView(2);
+    const choice = { viewId: view.id, proposalId: ready.id, statementSha256: ready.statement.sha256, permission: true };
+    const requestId = randomUUID();
+    const preview = await ctx.preview([view], { requestId, memoryWords: choice });
+    const token = visitToken();
+    await ctx.issue(preview, { token });
+    await ctx.reconstructions.close();
+    const reopened = open(ctx.dataDir, ctx.now);
+    assert.equal(reopened.reconstructions.proposalModel, null);
+    assert.equal((await reopened.shares.visit(token)).views[0].memoryWords.text, text);
+    const replay = await reopened.shares.createPreview(ctx.draftId, ctx.jobId, ctx.owner, {
+      requestId, title: 'Synthetic general store', views: [view], startViewId: view.id,
+      camera: { position: [0, 0.5, 1], target: [0, 0, -3] }, contributionIds: [], synthetic: true, memoryWords: choice,
+    });
+    assert.deepEqual(replay, preview);
+    assert.equal(calls, 1);
+  });
+});
+
 describe('share store previews', () => {
   it('requires the owner and rejects malformed selections', async () => {
     const ctx = await setup();

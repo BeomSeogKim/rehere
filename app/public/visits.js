@@ -147,7 +147,9 @@ function viewDetails(view, labelOf, summary = [], nameOf = objectNames(null)) {
   }
   for (const photo of view.evidence?.photos ?? []) nodes.push(el('p', { className: 'hint', textContent: `Source photo for ${photo.objectId === 'object-1' ? 'A' : 'B'}: provided by ${photo.providerLabel || 'an unnamed provider'}; ${photo.attributedCaptureDate ? `date given by them: ${photo.attributedCaptureDate}` : 'date unknown'}.` }));
   if (isComposition(view.edit)) nodes.push(el('p', { className: 'hint', textContent: 'This saved layout and relative size are owner assumptions. The two photos were not automatically registered.' }));
-  nodes.push(el('p', { className: 'hint', textContent: arrangementText(view.evidence?.arrangement) }));
+  nodes.push(el('p', { className: 'hint', textContent: view.evidence?.arrangement === 'memory' && typeof view.memoryWords?.text === 'string'
+    ? "Arrangement: the owner approved a model's proposed placement change based on these shared words. This is not verified history."
+    : arrangementText(view.evidence?.arrangement) }));
   for (const support of view.evidence?.support ?? []) {
     if (support?.kind !== 'human_recollection') continue;
     nodes.push(
@@ -328,6 +330,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     let currentId = viewRestored ? restore.viewId : manifest.startViewId;
     const viewport = el('div', { className: 'space-viewport' });
     const details = el('div', { className: 'visit-details' });
+    const memoryWords = el('section', { className: 'memory-edit visit-memory-summary', hidden: true });
+    const fullMemoryWords = el('details', { className: 'source-details visit-memory-full', hidden: true });
     const message = el('p', { className: 'hint', role: 'status' });
     const buttons = el('div', { className: 'actions space-camera' });
     const storyBox = el('div', { className: 'visit-stories' });
@@ -492,6 +496,21 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       currentId = id;
       sideStatus.textContent = '';
       const view = views.get(id);
+      memoryWords.hidden = typeof view.memoryWords?.text !== 'string';
+      fullMemoryWords.hidden = memoryWords.hidden;
+      fullMemoryWords.open = false;
+      const words = memoryWords.hidden ? '' : view.memoryWords.text;
+      const compact = Array.from(words.replace(/\s+/g, ' ').trim());
+      const excerpt = compact.length > 80 ? `${compact.slice(0, 80).join('')}…` : compact.join('');
+      memoryWords.replaceChildren(...(memoryWords.hidden ? [] : [
+        el('h3', { textContent: 'Words shared about this change' }),
+        el('p', { textContent: `Excerpt: “${excerpt}”` }),
+        el('p', { className: 'hint', textContent: 'The owner approved a model-proposed placement change based on these words. They are not verified history.' }),
+      ]));
+      fullMemoryWords.replaceChildren(...(fullMemoryWords.hidden ? [] : [
+        el('summary', { textContent: 'Read all shared words' }),
+        el('p', { textContent: words }),
+      ]));
       if (view.edit?.objects) viewer?.applyArrangement(view.edit);
       else viewer?.applyEdit(view.edit);
       details.replaceChildren(...viewDetails(view, labelOf, arrangementDifference(view, views.get(manifest.startViewId), manifest.views, objects, nameOf), nameOf));
@@ -683,6 +702,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           el('p', { className: 'hint', textContent: manifest.synthetic ? 'Synthetic test material, shared by the owner.' : 'Shared by the owner.' }),
           el('div', { className: 'actions space-camera' }, [explore.button, back, compareButton]),
           explore.status,
+          memoryWords,
           compareBar,
           stageFrame,
           message,
@@ -691,6 +711,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         ]),
         el('div', { className: 'scene-inspector' }, [
           buttons,
+          fullMemoryWords,
           ...(objects ? [objectButtons, sideButton, sideStatus, evidenceBox] : []),
           details,
           photoBox,

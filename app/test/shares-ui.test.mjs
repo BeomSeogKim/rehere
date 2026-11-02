@@ -122,6 +122,123 @@ async function previewed(ui, { webgl = true } = {}) {
   await flush();
 }
 
+describe('sharing words behind an approved main version', () => {
+  const proposalId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const sourceId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const statement = { kind: 'human_memory', text: 'Fictional words about the counter.', sha256: 'a'.repeat(64) };
+  const proposal = { id: proposalId, status: 'applied', baseVersion: 4, appliedVersion: 5, statement,
+    result: { action: 'translate', targetId: 'selected-foreground', sourceId, baseVersion: 4, transform: { offset: [1, 0, 0], yaw: 0 } } };
+  function choices() {
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, { status: 'ready', sourceId, box: [1, 1, 10, 10] }));
+    routes[`GET ${JOB_URL}/history`] = () => Promise.resolve(json(200, [{ version: 1, kind: 'initial', blocked: false },
+      { version: 5, kind: 'proposal', proposalId, offset: [1, 0, 0], yaw: 0, blocked: false }]));
+    routes[`GET ${JOB_URL}/proposals`] = () => Promise.resolve(json(200, [proposal]));
+  }
+
+  it('starts unchecked, requires a separate attestation, and clears it on view change', async () => {
+    choices();
+    const ui = await mount();
+    const include = ui.label('Include these words with saved version 5').children[0];
+    const permission = ui.label('I have permission to share these words').children[0];
+    assert.equal(include.checked, false);
+    assert.equal(permission.checked, false);
+    assert.equal(permission.disabled, true);
+    ui.tick('Include these words with saved version 5');
+    ui.title.value = 'Shop'; ui.title.dispatch('input');
+    ui.button('Use the current camera view').dispatch('click');
+    ui.button('Preview what visitors will see').dispatch('click');
+    assert.match(ui.message(), /Confirm that you have permission/);
+    assert.equal(requests.filter((item) => item.method === 'POST').length, 0);
+    ui.tick('I have permission to share these words');
+    await previewed(ui);
+    const sent = requests.find((item) => item.method === 'POST' && item.url === `${SHARES}/previews`);
+    assert.deepEqual(sent.body.memoryWords, { viewId: sent.body.views[0].id, proposalId, statementSha256: statement.sha256, permission: true });
+    assert.ok(!JSON.stringify(sent.body).includes(statement.text));
+    ui.tick('Saved version 5');
+    assert.equal(ui.find((node) => node.tag === 'button' && node.textContent === 'Issue a visitor link').length, 0);
+    assert.equal(ui.label('I have permission to share these words').children[0].checked, false);
+  });
+
+  it('does not restore words from an older late proposal read', async () => {
+    choices();
+    let answer;
+    routes[`GET ${JOB_URL}/proposals`] = () => new Promise((resolve) => { answer = resolve; });
+    const root = new FakeElement('div');
+    const panel = mountShares(root, { sharesUrl: SHARES, jobUrl: JOB_URL, editor: () => ({ version: 5 }), getCamera: () => CAMERA });
+    mounted.push(panel);
+    await flush();
+    routes[`GET ${JOB_URL}/proposals`] = () => Promise.resolve(json(200, []));
+    panel.refreshOptions();
+    await flush();
+    answer(json(200, [proposal]));
+    await flush();
+    assert.equal(root.findAll((node) => node.tag === 'label' && node.textContent.includes('Include these words with saved version 5')).length, 0);
+  });
+
+  it('cannot issue a late preview after permission is unchecked and checked again', async () => {
+    choices();
+    const ui = await mount();
+    ui.tick('Include these words with saved version 5');
+    ui.tick('I have permission to share these words');
+    ui.title.value = 'Shop'; ui.title.dispatch('input');
+    ui.button('Use the current camera view').dispatch('click');
+    let answer;
+    routes[`POST ${SHARES}/previews`] = () => new Promise((resolve) => { answer = resolve; });
+    ui.button('Preview what visitors will see').dispatch('click');
+    await flush();
+    ui.tick('I have permission to share these words');
+    ui.tick('I have permission to share these words');
+    answer(json(200, { id: 'p1', digest: 'd1', expiresAt: new Date(Date.now() + 900_000).toISOString() }));
+    await flush();
+    assert.equal(ui.find((node) => node.tag === 'button' && node.textContent === 'Issue a visitor link').length, 0);
+    assert.equal(ui.button('Preview what visitors will see').disabled, false);
+  });
+
+  it('offers no words when the proposal read is redacted or fails', async () => {
+    for (const response of [json(200, [{ ...proposal, redacted: true }]), json(503, {})]) {
+      choices();
+      routes[`GET ${JOB_URL}/proposals`] = () => Promise.resolve(response);
+      const ui = await mount();
+      assert.equal(ui.find((node) => node.tag === 'label' && node.textContent.includes('Include these words with saved version 5')).length, 0);
+    }
+  });
+
+  it('names each selected version distinctly and associates its exact words with its checkbox', async () => {
+    choices();
+    const otherId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    const otherWords = 'Fictional words for the earlier placement.';
+    routes[`GET ${JOB_URL}/history`] = () => Promise.resolve(json(200, [
+      { version: 4, kind: 'proposal', proposalId: otherId, offset: [0.5, 0, 0], yaw: 0, blocked: false },
+      { version: 5, kind: 'proposal', proposalId, offset: [1, 0, 0], yaw: 0, blocked: false },
+    ]));
+    routes[`GET ${JOB_URL}/proposals`] = () => Promise.resolve(json(200, [proposal, {
+      ...proposal, id: otherId, baseVersion: 3, appliedVersion: 4, statement: { ...statement, text: otherWords },
+      result: { ...proposal.result, baseVersion: 3, transform: { offset: [0.5, 0, 0], yaw: 0 } },
+    }]));
+    const ui = await mount();
+    ui.tick('Saved version 4');
+    const labels = [4, 5].map((version) => ui.label(`Include these words with saved version ${version}`));
+    assert.notEqual(labels[0].textContent, labels[1].textContent);
+    const ids = labels.map((label) => label.children[0].attributes['aria-describedby']);
+    assert.ok(ids.every(Boolean));
+    assert.notEqual(ids[0], ids[1]);
+    for (const [index, expected] of [otherWords, statement.text].entries()) {
+      const described = ui.find((node) => node.id === ids[index]);
+      assert.equal(described.length, 1);
+      assert.ok(described[0].textContent.includes(expected));
+      assert.ok(described[0].textContent.includes(`Saved version ${index === 0 ? 4 : 5}`));
+    }
+    ui.tick('Include these words with saved version 4');
+    let attestation = ui.label('I have permission to share these words for saved version 4');
+    assert.equal(attestation.children[0].attributes['aria-describedby'], ids[0]);
+    ui.tick('I have permission to share these words for saved version 4');
+    ui.tick('Include these words with saved version 5');
+    attestation = ui.label('I have permission to share these words for saved version 5');
+    assert.equal(attestation.children[0].checked, false);
+    assert.equal(attestation.children[0].attributes['aria-describedby'], ids[1]);
+  });
+});
+
 describe('sharing helpers', () => {
   it('offers only recollections whose writers allowed reconstruction and sharing', () => {
     assert.equal(quotable(contribution()), true);

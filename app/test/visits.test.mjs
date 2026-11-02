@@ -136,6 +136,58 @@ function open(src) {
 const count = (entry) => globalThis.viewerLog.filter((item) => item === entry).length;
 
 describe('visitor screen', () => {
+  it('shows shared words only beside their selected saved view and keeps the camera', async () => {
+    const data = manifest();
+    data.views[1].evidence.arrangement = 'memory';
+    data.views[1].memoryWords = { text: 'Fictional words about the counter.' };
+    const v = open(source({ manifest: async () => data }));
+    await flush();
+    assert.doesNotMatch(v.container.textContent, /Fictional words about the counter/);
+    v.button('Mina’s recollection').dispatch('click');
+    assert.match(v.container.textContent, /Words shared about this change/);
+    assert.match(v.container.textContent, /Fictional words about the counter/);
+    assert.doesNotMatch(v.container.textContent, /memory's words are not included/);
+    assert.deepEqual(currentCamera(), CAMERA);
+    v.button('Saved scene').dispatch('click');
+    assert.doesNotMatch(v.container.textContent, /Fictional words about the counter/);
+    assert.deepEqual(currentCamera(), CAMERA);
+    v.view.dispose();
+  });
+  it('clears shared words when a later access check fails', async () => {
+    const data = manifest();
+    data.views[0].evidence.arrangement = 'memory';
+    data.views[0].memoryWords = { text: 'Fictional words about the counter.' };
+    let allowed = true;
+    const v = open(source({ manifest: async () => data, check: async () => allowed }));
+    await flush();
+    assert.match(v.container.textContent, /Fictional words about the counter/);
+    allowed = false;
+    mock.timers.tick(HEARTBEAT_MS);
+    await flush();
+    assert.equal(v.states.at(-1), 'unavailable');
+    assert.doesNotMatch(v.container.textContent, /Fictional words about the counter/);
+    v.view.dispose();
+  });
+  it('keeps a long multiline statement compact by the scene while preserving its exact full text', async () => {
+    const data = manifest();
+    const text = `${'x'.repeat(1950)}\nA second synthetic line.`;
+    assert.ok(text.length <= 2000);
+    data.views[0].evidence.arrangement = 'memory';
+    data.views[0].memoryWords = { text };
+    const v = open(source({ manifest: async () => data }));
+    await flush();
+    const stage = v.find((node) => node.className === 'scene-stage')[0];
+    const compact = v.find((node) => node.className?.includes('visit-memory-summary'))[0];
+    const full = v.find((node) => node.className?.includes('visit-memory-full'))[0];
+    assert.equal(compact.parent, stage);
+    assert.ok(compact.textContent.length < 400);
+    assert.match(compact.textContent, /Excerpt:/);
+    assert.equal(full.tag, 'details');
+    assert.equal(full.open, false);
+    assert.equal(full.children.find((node) => node.tag === 'p').textContent, text);
+    assert.notEqual(full.parent, stage, 'expanded text cannot grow the stage');
+    v.view.dispose();
+  });
   it('loads the start view’s assets, checks access once more, then shows the scene from the saved camera', async () => {
     const src = source();
     const v = open(src);

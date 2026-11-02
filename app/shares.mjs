@@ -98,7 +98,7 @@ const uniqueIds = (values, max) => Array.isArray(values) && values.length <= max
 // storyIds and evidencePhotoIds are optional so earlier callers keep working;
 // absent means none.
 function parsePreview(body) {
-  const optional = ['storyIds', 'evidencePhotoIds', 'recordings'].filter((key) => body !== null && typeof body === 'object' && Object.hasOwn(body, key));
+  const optional = ['storyIds', 'evidencePhotoIds', 'recordings', 'memoryWords'].filter((key) => body !== null && typeof body === 'object' && Object.hasOwn(body, key));
   if (!exactKeys(body, [...PREVIEW_KEYS, ...optional])) throw fail(400, UNREADABLE);
   const views = parseViews(body.views);
   const camera = parseCamera(body.camera);
@@ -110,9 +110,17 @@ function parsePreview(body) {
     && uniqueIds(quotes, SHARE_LIMITS.quotes) && uniqueIds(storyIds, SHARE_LIMITS.stories) && uniqueIds(evidencePhotoIds, SHARE_LIMITS.contributorPhotos);
   if (!valid) throw fail(400, UNREADABLE);
   const recordings = parseRecordings(body.recordings ?? [], views);
+  if (optional.includes('memoryWords')) {
+    const words = body.memoryWords;
+    if (!exactKeys(words, ['viewId', 'proposalId', 'statementSha256', 'permission']) || !isId(words.viewId) || !isId(words.proposalId)
+      || typeof words.statementSha256 !== 'string' || !SHA.test(words.statementSha256) || words.permission !== true
+      || !views.some((view) => view.id === words.viewId && view.kind === 'version')) throw fail(400, UNREADABLE);
+  }
   return {
     requestId: body.requestId, title: body.title, views, startViewId: body.startViewId, camera, contributionIds: [...quotes], synthetic: body.synthetic, storyIds: [...storyIds],
     evidencePhotoIds: [...evidencePhotoIds], recordings,
+    ...(optional.includes('memoryWords') && { memoryWords: { viewId: body.memoryWords.viewId, proposalId: body.memoryWords.proposalId,
+      statementSha256: body.memoryWords.statementSha256, permission: true } }),
   };
 }
 
@@ -361,12 +369,47 @@ export class ShareStore {
         if (variant.eraRevision !== view.eraRevision) return 'era';
       }
     }
+    if (frozen.memoryWords && !(await this.#memoryWords(manifest, frozen.memoryWords, frozen.views))) return 'changed';
     // Selected recorded stories: the story itself, its voice, photo and
     // dependencies under current share rules, and its pinned playback file.
     for (const pinned of frozen.stories ?? []) {
       if (await this.stories.shareIssue(manifest, pinned)) return 'story';
     }
     return null;
+  }
+
+  // Resolve only the exact applied main-version receipt. The owner projection
+  // rechecks current place use and withdrawn dependencies without requiring a
+  // new model-processing grant for a deterministic share.
+  async #memoryWords(manifest, selection, views) {
+    if (Array.isArray(manifest.objects) || isComposition(manifest)) return null;
+    const view = views.find((item) => item.id === selection.viewId && item.kind === 'version');
+    if (!view || (selection.version !== undefined && selection.version !== view.version)) return null;
+    const receipts = manifest.edits.filter((item) => item.version === view.version);
+    const proposals = (manifest.proposals ?? []).filter((item) => item.id === selection.proposalId && !item.scope);
+    if (receipts.length !== 1 || proposals.length !== 1) return null;
+    const [receipt] = receipts;
+    const [proposal] = proposals;
+    if (receipt.kind !== 'proposal' || receipt.proposalId !== proposal.id || proposal.status !== 'applied'
+      || proposal.appliedVersion !== view.version || receipt.baseVersion !== proposal.baseVersion
+      || proposal.baseVersion + 1 !== view.version || proposal.result?.targetId !== 'selected-foreground'
+      || !['translate', 'rotate', 'face_anchor'].includes(proposal.result?.action)
+      || proposal.result?.sourceId !== manifest.sourceId || proposal.result?.baseVersion !== proposal.baseVersion
+      || !Array.isArray(receipt.offset) || JSON.stringify(proposal.result?.transform?.offset) !== JSON.stringify(receipt.offset)
+      || proposal.result?.transform?.yaw !== receipt.yaw) return null;
+    const projected = await this.reconstructions.projectProposal(manifest, proposal);
+    const statement = projected?.statement;
+    if (projected?.redacted === true || statement?.kind !== 'human_memory' || !isId(statement.id) || typeof statement.text !== 'string' || !statement.text.trim() || typeof statement.sha256 !== 'string'
+      || statement.sha256 !== selection.statementSha256 || sha256(statement.text) !== statement.sha256) return null;
+    const saved = savedView(manifest, view);
+    if (!saved) return null;
+    const editSha256 = sha256(JSON.stringify(saved.edit));
+    const receiptSha256 = sha256(JSON.stringify(receipt));
+    if (selection.editSha256 !== undefined && selection.editSha256 !== editSha256) return null;
+    if (selection.receiptSha256 !== undefined && selection.receiptSha256 !== receiptSha256) return null;
+    if (selection.statementId !== undefined && selection.statementId !== statement.id) return null;
+    return { text: statement.text, pinned: { viewId: view.id, version: view.version, proposalId: proposal.id,
+      statementId: statement.id, statementSha256: statement.sha256, editSha256, receiptSha256 } };
   }
 
   // Each shared file must still match both the manifest record and the frozen
@@ -412,6 +455,9 @@ export class ShareStore {
     });
     const dependencyReason = this.#contributionIssue(manifest, selected.flatMap((item) => item.dependencies));
     if (dependencyReason) this.#throwReason(dependencyReason);
+
+    const memoryWords = request.memoryWords && await this.#memoryWords(manifest, request.memoryWords, request.views);
+    if (request.memoryWords && !memoryWords) throw fail(409, 'The selected words cannot be shared with this saved view. Review the available choices.');
 
     const contributions = contributionsOf(manifest);
     const quotes = request.contributionIds.map((id) => {
@@ -467,6 +513,7 @@ export class ShareStore {
         id: view.id,
         label,
         edit: structuredClone(edit),
+        ...(memoryWords && view.id === request.memoryWords.viewId && { memoryWords: { text: memoryWords.text } }),
         era: publicEra,
         evidence: {
           arrangement: arrangementOrigin(manifest, view),
@@ -512,6 +559,7 @@ export class ShareStore {
       views: selected.map(({ view, dependencies, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision })),
       quotes: quotes.map((item) => ({ contributionId: item.id, textSha256: item.textSha256 })),
       stories: pinnedStories,
+      ...(memoryWords && { memoryWords: memoryWords.pinned }),
       ...(frozenPhotos.length > 0 && { contributorPhotos: frozenPhotos }),
       ...(pinnedRecordings.length > 0 && { recordings: pinnedRecordings }),
     };
