@@ -46,6 +46,7 @@ const STATIC_FILES = new Map([
   ['/composition-description.js', ['composition-description.js', 'text/javascript; charset=utf-8']],
   ['/composition-editor.js', ['composition-editor.js', 'text/javascript; charset=utf-8']],
   ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
+  ['/alternative-memory.js', ['alternative-memory.js', 'text/javascript; charset=utf-8']],
   ['/access-ui.js', ['access-ui.js', 'text/javascript; charset=utf-8']],
   ['/collaboration.js', ['collaboration.js', 'text/javascript; charset=utf-8']],
   ['/visits.js', ['visits.js', 'text/javascript; charset=utf-8']],
@@ -154,6 +155,7 @@ const CONTRIBUTION_PHOTO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]
 const CONTRIBUTION_BUNDLE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/bundle$/;
 const ERA_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/era$/;
 const REVISION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/(revisions|revision-context)$/;
+const VARIANT_PROPOSAL_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/proposals(?:\/([^/]+)(?:\/(cancel|apply))?)?$/;
 const NOT_FOUND = 'This scene could not be found.';
 const SHARES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares$/;
 const PREVIEWS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews$/;
@@ -643,6 +645,42 @@ export function createAppServer({
       const body = strictBody(await readJsonBody(req), ['requestId', 'baseEraRevision', 'transform', 'timeMode', 'confirmed']);
       const { created, variant } = await collaboration.revision(draftId, jobId, current, parentId, body);
       sendJson(res, created ? 201 : 200, variant);
+      return;
+    }
+    const variantProposalMatch = VARIANT_PROPOSAL_PATH.exec(pathname);
+    if (variantProposalMatch) {
+      const [, draftId, jobId, parentId, proposalId, action] = variantProposalMatch;
+      // Owner-only, decided before any ID, method or body is examined.
+      const current = await requireScope(draftId);
+      if (current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
+      // The collection is read or posted to, one proposal is read, and its actions are posted.
+      const allowed = !proposalId ? reading || req.method === 'POST' : action ? req.method === 'POST' : reading;
+      if (!allowed) throw new RequestError(405, 'Method not allowed.');
+      if (![draftId, jobId].every((id) => UUID.test(id))) throw new RequestError(404, NOT_FOUND);
+      if (!UUID.test(parentId)) throw new RequestError(404, 'This version could not be found.');
+      if (proposalId !== undefined && !UUID.test(proposalId)) throw new RequestError(404, 'This proposal could not be found.');
+      if (!proposalId && reading) {
+        sendJson(res, 200, await collaboration.variantProposals(draftId, jobId, current, parentId));
+        return;
+      }
+      if (!proposalId) {
+        const body = strictBody(await readJsonBody(req), ['requestId', 'baseEraRevision', 'targetId', 'timeMode', 'text', 'consent']);
+        const { created, proposal } = await collaboration.createVariantProposal(draftId, jobId, current, parentId, body);
+        sendJson(res, created ? 202 : 200, proposal);
+        return;
+      }
+      if (!action) {
+        sendJson(res, 200, await collaboration.variantProposal(draftId, jobId, current, parentId, proposalId));
+        return;
+      }
+      if (action === 'cancel') {
+        const body = strictBody(await readJsonBody(req), ['requestId']);
+        sendJson(res, 200, await collaboration.cancelVariantProposal(draftId, jobId, current, parentId, proposalId, body));
+        return;
+      }
+      const body = strictBody(await readJsonBody(req), ['requestId', 'baseEraRevision', 'frontConfirmed', 'confirmed']);
+      const { created, proposal, variant } = await collaboration.applyVariantProposal(draftId, jobId, current, parentId, proposalId, body);
+      sendJson(res, created ? 201 : 200, { proposal, variant });
       return;
     }
     const sceneCollaboration = SCENE_COLLABORATION_PATH.exec(pathname);

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { DraftStore } from '../drafts.mjs';
-import { anchorYaw, validatePlan } from '../memory-proposals.mjs';
+import { COMPOSITION_VARIANT_PLAN_KEYS, VARIANT_PLAN_KEYS, anchorYaw, validatePlan, wrapYaw } from '../memory-proposals.mjs';
 import { ReconstructionStore } from '../reconstructions.mjs';
 import { ownerFetch as fetch, startOwnerServer } from './auth-helper.mjs';
 
@@ -440,6 +440,53 @@ describe('proposal plan validation', () => {
       assert.match(checked.code, /^[a-z_A-Z]+$/);
       assert.equal(typeof checked.error, 'string');
     }
+  });
+
+  it('binds a plan for a saved alternative to its exact identity and time revision, never a main version', () => {
+    const surface = surfaceFor('s', PHOTO, jpeg(40, 30, 1));
+    const alternative = { parentVariantId: randomUUID(), baseEraRevision: 2 };
+    const context = { sourceId: 's', saved: { offset: [0.1, 0, 0], yaw: 0 }, surface, alternative };
+    const scopedPlan = (change = {}) => {
+      const { baseVersion, ...rest } = plan({ sourceId: 's', ...change });
+      return { ...rest, parentVariantId: alternative.parentVariantId, baseEraRevision: alternative.baseEraRevision, ...change };
+    };
+    const ok = validatePlan(scopedPlan(), context);
+    assert.deepEqual(ok.result.transform, { offset: [0.6, 0, -0.25], yaw: 0 }, 'derived from the parent pose');
+    const clarify = { action: 'clarify', targetId: null, delta: null, question: 'Which side?' };
+    assert.equal(validatePlan(scopedPlan(clarify), context).result.question, 'Which side?');
+    const cases = [
+      [scopedPlan({ parentVariantId: randomUUID() }), 'parent_variant_id'],
+      [scopedPlan({ baseEraRevision: 1 }), 'base_era_revision'],
+      [scopedPlan({ ...clarify, baseEraRevision: 3 }), 'base_era_revision'],
+      [{ ...scopedPlan(), baseVersion: 1 }, 'plan_keys'],
+      [plan({ sourceId: 's' }), 'plan_keys'],
+    ];
+    for (const [candidate, code] of cases) assert.equal(validatePlan(candidate, context).code, code, JSON.stringify(candidate));
+    // Without an alternative the legacy keys and version binding are unchanged.
+    assert.equal(validatePlan(scopedPlan(), { ...context, alternative: undefined, baseVersion: 1 }).code, 'plan_keys');
+    assert.equal(validatePlan(plan({ sourceId: 's' }), { ...context, alternative: undefined, baseVersion: 1 }).error, undefined);
+    assert.deepEqual(Object.keys(scopedPlan()).sort(), [...VARIANT_PLAN_KEYS].sort());
+    assert.deepEqual(COMPOSITION_VARIANT_PLAN_KEYS, ['action', 'targetId', 'sourceIds', 'parentVariantId', 'baseEraRevision', 'delta', 'yawDelta', 'faceObjectId', 'question', 'reason']);
+    assert.deepEqual(VARIANT_PLAN_KEYS, ['action', 'targetId', 'sourceId', 'parentVariantId', 'baseEraRevision', 'delta', 'yawDelta', 'anchor', 'question', 'reason']);
+  });
+
+  it('keeps the exact saved yaw for a whole number of full turns only for a saved alternative', () => {
+    const surface = surfaceFor('s', PHOTO, jpeg(40, 30, 1));
+    const alternative = { parentVariantId: randomUUID(), baseEraRevision: 0 };
+    const saved = { offset: [0.1, 0, 0], yaw: 0.3 };
+    const rotate = (yawDelta) => {
+      const { baseVersion, ...rest } = plan({ sourceId: 's', action: 'rotate', delta: null, yawDelta });
+      return { ...rest, ...alternative };
+    };
+    for (const yawDelta of [2 * Math.PI, -2 * Math.PI, 4 * Math.PI, 0]) {
+      assert.deepEqual(validatePlan(rotate(yawDelta), { sourceId: 's', saved, surface, alternative }).result.transform, { offset: [0.1, 0, 0], yaw: 0.3 }, String(yawDelta));
+    }
+    // A real turn, however small, still turns.
+    assert.notEqual(validatePlan(rotate(1e-9), { sourceId: 's', saved, surface, alternative }).result.transform.yaw, 0.3);
+    // Main plans keep their exact previous arithmetic.
+    const legacy = validatePlan(plan({ sourceId: 's', action: 'rotate', delta: null, yawDelta: 2 * Math.PI }), { sourceId: 's', baseVersion: 1, saved, surface });
+    assert.equal(legacy.result.transform.yaw, wrapYaw(0.3 + 2 * Math.PI));
+    assert.notEqual(legacy.result.transform.yaw, 0.3);
   });
 
   it('logs only the category of a rejected plan and keeps the browser message fixed', async () => {

@@ -5,7 +5,9 @@ import {
   OBJECT_IDS, arrangementOf, assertObjectsConfirmed, assertRelationship, isTwoObject, withTarget,
 } from './arrangements.mjs';
 import { RequestError } from './drafts.mjs';
-import { ACTIVE_PROPOSAL } from './memory-proposals.mjs';
+import {
+  ACTIVE_PROPOSAL, TARGET_ID, newProposal, parseCancelRequest, parseVariantApplyRequest, parseVariantProposalRequest, staleVariantProposals,
+} from './memory-proposals.mjs';
 import {
   PHOTO_BUSY, PHOTO_PREPARE_FAILED, PLAYBACK_NAME, REVIEW_NAME, VOICE_ORIGINAL_NAMES, contributionsDir, parsePhotoFacts, photoAttested, photoDir,
   readPlayback, readReviewPhoto, reviewJpegInfo,
@@ -37,6 +39,7 @@ const CONTRIBUTION_NOT_FOUND = 'This contribution could not be found.';
 const NOT_ALLOWED = 'This action is not allowed.';
 const REUSED = 'This request was already used with different values.';
 const VARIANT_NOT_FOUND = 'This version of the scene could not be found.';
+const PROPOSAL_NOT_FOUND = 'This proposal could not be found.';
 
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -107,11 +110,11 @@ function deletionScope(manifest, contribution) {
   return {
     variants,
     versions: (manifest.edits ?? []).filter((edit) => (edit.dependencies ?? []).includes(id)).map((edit) => edit.version),
-    proposals: (manifest.proposals ?? []).filter((proposal) => versionDependencies(manifest, proposal.baseVersion).includes(id)),
+    proposals: (manifest.proposals ?? []).filter((proposal) => (proposalDependencies(manifest, proposal) ?? []).includes(id)),
     stories: (manifest.stories?.items ?? []).filter((story) => (story.context?.dependencies ?? []).includes(id)),
     previews: shares.previews.filter((preview) => shareReferences(preview.frozen, id)),
     snapshots: shares.snapshots.filter((snapshot) => shareReferences(snapshot.frozen, id)),
-    receipts: collaboration.receipts.filter((receipt) => receipt.contributionId === id || receipt.target === id || variantIds.has(receipt.target)),
+    receipts: collaboration.receipts.filter((receipt) => receipt.contributionId === id || receipt.target === id || variantIds.has(receipt.target) || variantIds.has(receipt.variantId)),
   };
 }
 
@@ -249,6 +252,8 @@ const UNAVAILABLE_MATERIAL = 'A photo or recording in this contribution is not a
 export const BUNDLE_BUSY = 'Another recording or photo is being prepared. Nothing was started for this request. Try again in a moment.';
 const SHUTTING_DOWN = 'The app is shutting down. Try again later.';
 const SOURCE_STOPPED_MESSAGE = 'The owner stopped using this photo or turned off its place use, so no version of this scene can be changed.';
+const PUBLIC_ONLY_MESSAGE = 'During development, a model result can be saved only while every photo of the scene is marked as public material.';
+const MODEL_STOPPED_MESSAGE = 'Model processing is turned off for a photo in this scene, so this proposal cannot be saved. You can still place the object manually.';
 
 export const REDACTED_PROPOSAL_MESSAGE = 'This proposal was made from a saved version that depends on a withdrawn contribution, so its content is no longer shown.';
 const UNAVAILABLE_PROPOSAL_MESSAGE = 'This proposal was made from a saved version that depends on a contributor photo that is not available right now, so its content is not shown.';
@@ -257,13 +262,57 @@ const UNAVAILABLE_PROPOSAL_MESSAGE = 'This proposal was made from a saved versio
 // made from a version with a withdrawn dependency carries that memory in its
 // message and plan, so only audit metadata is shown and it cannot be previewed
 // or applied. The full record stays on disk.
+// A proposal for a saved alternative also carries, when ready, the whole
+// arrangement it would save; that candidate is derived here, never stored.
 export function projectProposal(manifest, proposal) {
-  const issue = dependencyIssue(manifest, versionDependencies(manifest, proposal.baseVersion));
-  if (!issue) return proposal;
+  const dependencies = proposalDependencies(manifest, proposal);
+  const issue = dependencies === null ? 'unavailable' : dependencyIssue(manifest, dependencies);
+  if (!issue) return proposal.scope ? { ...proposal, candidate: proposalCandidate(manifest, proposal) } : proposal;
   return {
     ...proposal, statement: { ...proposal.statement, text: null }, result: null, question: null,
     status: 'stale', error: issue === 'unavailable' ? UNAVAILABLE_PROPOSAL_MESSAGE : REDACTED_PROPOSAL_MESSAGE, redacted: true,
+    ...(proposal.scope && { candidate: null }),
   };
+}
+
+// The contributions a proposal derives from: those of the main version it was
+// made for, or those of its parent alternative. A missing parent is null
+// (unavailable), never an empty set.
+export function proposalDependencies(manifest, proposal) {
+  if (!proposal.scope) return versionDependencies(manifest, proposal.baseVersion);
+  const parent = collaborationOf(manifest).variants.find((item) => item.id === proposal.scope.parentVariantId);
+  return parent ? [...parent.contributionIds] : null;
+}
+
+// What a proposal is checked against at every step: the main version and its
+// dependencies, or the parent alternative's own arrangement and dependencies
+// at its pinned time revision. A missing or unreadable parent is null.
+export function proposalBinding(manifest, proposal) {
+  if (!proposal.scope) {
+    return { dependencies: currentDependencies(manifest), stale: manifest.edit.version !== proposal.baseVersion, arrangement: editFields(manifest.edit) };
+  }
+  const parent = collaborationOf(manifest).variants.find((item) => item.id === proposal.scope.parentVariantId);
+  if (!parent || !REVISABLE_KINDS.has(parent.kind)) return null;
+  try {
+    return { dependencies: [...parent.contributionIds], stale: parent.eraRevision !== proposal.scope.baseEraRevision, arrangement: parentArrangement(manifest, parent) };
+  } catch {
+    return null;
+  }
+}
+
+// The whole arrangement a change to one object gives: only that object moves,
+// and a composition keeps the base's exact scale.
+export function variantFields(manifest, base, targetId, pose) {
+  if (!isTwoObject(manifest)) return { offset: [...pose.offset], yaw: pose.yaw };
+  if (!isComposition(manifest)) return withTarget(base, targetId, pose);
+  return withTarget(base, targetId, { ...copyPose(base.objects.find((item) => item.id === targetId)), ...pose });
+}
+
+function proposalCandidate(manifest, proposal) {
+  if (proposal.status !== 'ready' || !proposal.result?.transform) return null;
+  const binding = proposalBinding(manifest, proposal);
+  if (!binding || binding.stale) return null;
+  return { version: null, ...variantFields(manifest, binding.arrangement, proposal.targetId, proposal.result.transform) };
 }
 
 export const MODEL_BLOCKED_MESSAGE = 'This scene includes a contribution that was not shared for model processing, so the hosted model cannot be used on it. Manual editing is still available.';
@@ -458,7 +507,7 @@ function parentArrangement(manifest, variant) {
 // quaternion and its negation are the same orientation, and so are the yaw
 // endpoints -PI and PI. Stored values are never rewritten.
 const sameYaw = (item) => ({ ...item, yaw: item.yaw === -Math.PI ? Math.PI : item.yaw });
-const sameArrangement = (a, b) => {
+export const sameArrangement = (a, b) => {
   const canonical = (fields) => {
     if (isComposition(fields)) return { ...fields, objects: fields.objects.map((item) => ({ id: item.id, ...canonicalPose(item) })) };
     return Array.isArray(fields.objects) ? { ...fields, objects: fields.objects.map(sameYaw) } : sameYaw(fields);
@@ -648,7 +697,10 @@ function projectVariant(manifest, variant, sourceBlocked) {
     targetId: variantTarget(manifest, variant),
     // Only owner revisions carry their opaque lineage; it names no words or sources.
     ...(variant.kind === 'revision' && {
-      revision: { parentVariantId: variant.revision.parentVariantId, targetId: variant.revision.targetId, timeMode: variant.revision.timeMode },
+      revision: {
+        parentVariantId: variant.revision.parentVariantId, targetId: variant.revision.targetId, timeMode: variant.revision.timeMode,
+        ...(variant.revision.proposalId && { proposalId: variant.revision.proposalId }),
+      },
     }),
   };
 }
@@ -1190,7 +1242,8 @@ export class CollaborationStore {
     const current = currentDependencies(manifest).includes(id);
     // Every dependent proposal's live model call is stopped, even when its
     // stored status is no longer active; only active ones change status here.
-    const aborts = (manifest.proposals ?? []).filter((proposal) => current || affected.has(proposal.id)).map((proposal) => proposal.id);
+    // A proposal for a saved alternative depends only on its parent, never on main.
+    const aborts = (manifest.proposals ?? []).filter((proposal) => (current && !proposal.scope) || affected.has(proposal.id)).map((proposal) => proposal.id);
     const failing = (manifest.proposals ?? []).filter((proposal) => ACTIVE_PROPOSAL.has(proposal.status) && aborts.includes(proposal.id)).map((proposal) => proposal.id);
     if (manifest.proposals) {
       changes.proposals = manifest.proposals.map((proposal) => {
@@ -1432,7 +1485,9 @@ export class CollaborationStore {
       // call is aborted even if an edit already made it stale. Data already
       // sent cannot be recalled, but nothing further is sent or offered.
       const current = currentDependencies(manifest).includes(contributionId);
-      const dependsHere = (item) => current || versionDependencies(manifest, item.baseVersion).includes(contributionId);
+      // A proposal for a saved alternative depends only on its parent, never on main.
+      const dependsHere = (item) => (item.scope ? (proposalDependencies(manifest, item) ?? []).includes(contributionId)
+        : current || versionDependencies(manifest, item.baseVersion).includes(contributionId));
       const proposals = manifest.proposals ?? [];
       const affected = proposals.filter((item) => ACTIVE_PROPOSAL.has(item.status) && dependsHere(item)).map((item) => item.id);
       const active = proposals.find((item) => item.id === this.reconstructions.activeProposal?.id);
@@ -1470,10 +1525,15 @@ export class CollaborationStore {
       const { requestId, baseRevision, ...era } = request;
       const assertion = { id: randomUUID(), requestId, ...era, assertedBy: principal.id, assertedAt: new Date().toISOString() };
       const updated = { ...variant, eraAssertions: [...variant.eraAssertions, assertion], eraRevision: variant.eraRevision + 1 };
-      const { next, write } = this.#save(manifest, {
+      const { next } = this.#save(manifest, {
         ...collaboration, variants: collaboration.variants.map((item) => (item.id === variantId ? updated : item)),
       }, { requestId, action: 'era', principalId: principal.id, target: variantId, digest: digest(request) });
-      const stored = await write();
+      // Open proposals for this arrangement were asked about its earlier time;
+      // they become stale in the same write and are never sent or saved.
+      const proposals = manifest.proposals ?? [];
+      const staled = staleVariantProposals(proposals, variantId, assertion.assertedAt);
+      const changed = staled.some((item, index) => item !== proposals[index]);
+      const stored = await this.reconstructions.update(manifest, { collaboration: next, ...(changed && { proposals: staled }) });
       return projectVariant(stored, next.variants.find((item) => item.id === variantId), false);
     });
   }
@@ -1530,59 +1590,200 @@ export class CollaborationStore {
       if (!parent) throw fail(404, VARIANT_NOT_FOUND);
       await this.#revisable(manifest, parent);
       if (request.baseEraRevision !== parent.eraRevision) throw fail(409, 'The time for this arrangement changed. Review it again before saving the revision.');
-      if (collaboration.variants.filter((item) => item.kind === 'revision').length >= COLLABORATION_LIMITS.revisions) {
-        throw fail(409, `This scene already holds ${COLLABORATION_LIMITS.revisions} owner revisions, the most it can keep. Nothing was saved.`);
-      }
-      const now = new Date().toISOString();
-      const eraAssertions = [];
-      if (request.timeMode === 'reconfirm-parent') {
-        const latest = parent.eraAssertions.at(-1);
-        if (!latest || latest.kind === 'unknown') throw fail(400, 'The selected arrangement has no confirmed time to confirm again. Keep the time unknown instead.');
-        // A relation is kept exactly or the confirmation is refused; it is never dropped.
-        if (latest.relativeToVariantId !== null) {
-          const other = collaboration.variants.find((item) => item.id === latest.relativeToVariantId);
-          if (!other || dependenciesBlocked(manifest, other.contributionIds)) {
-            throw fail(409, 'The arrangement this time is relative to is not available now, so the time cannot be confirmed again. Keep the time unknown instead.');
-          }
-        }
-        const { kind, label, start, end, statement, relation, relativeToVariantId } = latest;
-        eraAssertions.push({ id: randomUUID(), requestId: request.requestId, kind, label, start, end, statement, relation, relativeToVariantId, confirmed: true, assertedBy: principal.id, assertedAt: now });
-      }
-      const base = parentArrangement(manifest, parent);
-      const targetId = request.transform.targetId ?? null;
-      let fields;
-      if (isTwoObject(manifest)) {
-        // Only the named object changes; a composition keeps the parent's exact scale.
-        const transform = isComposition(manifest) ? { ...copyPose(base.objects.find((item) => item.id === targetId)), ...request.transform.pose } : request.transform;
-        fields = withTarget(base, targetId, transform);
-      } else {
-        fields = { offset: [...request.transform.offset], yaw: request.transform.yaw };
-      }
-      if (sameArrangement(fields, base)) throw fail(409, 'This revision does not change the selected arrangement. Nothing was saved.');
-      if (isTwoObject(manifest)) {
-        // The parent's own rule and the actual named surfaces gate the child.
-        assertRelationship(manifest, fields);
-        await this.reconstructions.assertVisibleArrangement(manifest, fields);
-      }
-      const child = {
-        id: randomUUID(),
-        kind: 'revision',
-        label: 'Owner revision',
-        revision: { parentVariantId: parent.id, parentEraRevision: parent.eraRevision, targetId, timeMode: request.timeMode },
-        parentVersion: parent.parentVersion,
-        edit: { version: null, ...fields },
-        contributionIds: [...parent.contributionIds],
-        createdAt: now,
-        createdBy: principal.id,
-        eraAssertions,
-        eraRevision: eraAssertions.length,
-      };
+      const child = await this.#revisionChild(manifest, collaboration, parent, {
+        requestId: request.requestId, targetId: request.transform.targetId ?? null,
+        pose: isComposition(manifest) ? request.transform.pose : request.transform, timeMode: request.timeMode,
+      }, principal);
       const { write } = this.#save(manifest, { ...collaboration, variants: [...collaboration.variants, child] }, {
         requestId: request.requestId, action: 'revision', principalId: principal.id, target: parentId, digest: digest(request), variantId: child.id,
       });
       if (this.reconstructions.closed) throw fail(503, SHUTTING_DOWN);
       const stored = await write();
       return { created: true, variant: projectVariant(stored, child, false) };
+    });
+  }
+
+  #revisionCapacity(collaboration) {
+    if (collaboration.variants.filter((item) => item.kind === 'revision').length >= COLLABORATION_LIMITS.revisions) {
+      throw fail(409, `This scene already holds ${COLLABORATION_LIMITS.revisions} owner revisions, the most it can keep. Nothing was saved.`);
+    }
+  }
+
+  // The parent's latest time, when it can be confirmed again exactly: a
+  // relation is kept or the confirmation is refused; it is never dropped.
+  #reconfirmable(manifest, collaboration, parent) {
+    const latest = parent.eraAssertions.at(-1);
+    if (!latest || latest.kind === 'unknown') throw fail(400, 'The selected arrangement has no confirmed time to confirm again. Keep the time unknown instead.');
+    if (latest.relativeToVariantId !== null) {
+      const other = collaboration.variants.find((item) => item.id === latest.relativeToVariantId);
+      if (!other || dependenciesBlocked(manifest, other.contributionIds)) {
+        throw fail(409, 'The arrangement this time is relative to is not available now, so the time cannot be confirmed again. Keep the time unknown instead.');
+      }
+    }
+    return latest;
+  }
+
+  // Callers hold the mutex and have checked the parent and its time revision.
+  // The immutable child changes one object of the parent's whole arrangement,
+  // keeps its contribution dependencies in order and must pass the parent's
+  // rule and the actual named surfaces. Its time is unknown, or a new owner
+  // confirmation of the parent's latest assertion; never inherited.
+  async #revisionChild(manifest, collaboration, parent, { requestId, targetId, pose, timeMode, proposalId = null }, principal) {
+    this.#revisionCapacity(collaboration);
+    const now = new Date().toISOString();
+    const eraAssertions = [];
+    if (timeMode === 'reconfirm-parent') {
+      const { kind, label, start, end, statement, relation, relativeToVariantId } = this.#reconfirmable(manifest, collaboration, parent);
+      eraAssertions.push({ id: randomUUID(), requestId, kind, label, start, end, statement, relation, relativeToVariantId, confirmed: true, assertedBy: principal.id, assertedAt: now });
+    }
+    const base = parentArrangement(manifest, parent);
+    const fields = variantFields(manifest, base, targetId, pose);
+    if (sameArrangement(fields, base)) throw fail(409, 'This revision does not change the selected arrangement. Nothing was saved.');
+    if (isTwoObject(manifest)) {
+      assertRelationship(manifest, fields);
+      await this.reconstructions.assertVisibleArrangement(manifest, fields);
+    }
+    return {
+      id: randomUUID(),
+      kind: 'revision',
+      label: 'Owner revision',
+      revision: { parentVariantId: parent.id, parentEraRevision: parent.eraRevision, targetId, timeMode, ...(proposalId && { proposalId }) },
+      parentVersion: parent.parentVersion,
+      edit: { version: null, ...fields },
+      contributionIds: [...parent.contributionIds],
+      createdAt: now,
+      createdBy: principal.id,
+      eraAssertions,
+      eraRevision: eraAssertions.length,
+    };
+  }
+
+  // Asks the model about one object of a selected saved alternative. The
+  // proposal is bound to the parent, its time revision and the owner's time
+  // choice; main is never read for its pose or its dependencies. An exact
+  // replay returns the same proposal before any busy check.
+  async createVariantProposal(draftId, jobId, principal, parentId, body) {
+    this.#owner(principal, draftId);
+    await this.reconstructions.recover();
+    const accepted = await this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const twoObjects = isTwoObject(manifest);
+      const request = parseVariantProposalRequest(body, twoObjects ? OBJECT_IDS : [TARGET_ID]);
+      const proposals = manifest.proposals ?? [];
+      const existing = proposals.find((item) => item.requestId === request.requestId);
+      if (existing) {
+        const same = existing.scope?.parentVariantId === parentId && existing.scope.baseEraRevision === request.baseEraRevision
+          && existing.scope.timeMode === request.timeMode && existing.targetId === request.targetId && existing.statement.text === request.text;
+        if (!same) throw fail(409, 'This proposal request was already used with a different message, arrangement or time.');
+        return { replay: true, proposal: existing };
+      }
+      const collaboration = collaborationOf(manifest);
+      const parent = collaboration.variants.find((item) => item.id === parentId);
+      if (!parent) throw fail(404, VARIANT_NOT_FOUND);
+      await this.#revisable(manifest, parent);
+      if (request.baseEraRevision !== parent.eraRevision) throw fail(409, 'The time for this arrangement changed. Review it again before asking for a proposal.');
+      // Nothing is sent for a proposal that could never be saved.
+      this.#revisionCapacity(collaboration);
+      if (request.timeMode === 'reconfirm-parent') this.#reconfirmable(manifest, collaboration, parent);
+      const base = parentArrangement(manifest, parent);
+      if (dependencyIssue(manifest, parent.contributionIds, 'model')) throw fail(403, MODEL_BLOCKED_MESSAGE);
+      let original = null;
+      let photos = null;
+      if (isComposition(manifest)) {
+        photos = await this.reconstructions.assertSceneSources(manifest, 'model');
+        if (photos.some(({ source }) => source.origin?.kind !== 'public')) throw fail(403, 'Only public photos can be sent to the hosted model.');
+      } else {
+        original = await this.reconstructions.verifiedOriginal(draftId, manifest.sourceId, 'model');
+        if (original.source.origin?.kind !== 'public') throw fail(403, 'During development, only photos marked as public material can be sent to the hosted model.');
+      }
+      if (!this.reconstructions.proposalModel) throw fail(503, 'Memory-based editing with the hosted model is not set up on this computer.');
+      if (this.reconstructions.closed) throw fail(503, SHUTTING_DOWN);
+      if (this.reconstructions.activeProposal) throw fail(409, 'Another proposal is being prepared right now. Try again when it finishes.');
+      const proposal = newProposal({
+        id: randomUUID(), statementId: randomUUID(), now: new Date().toISOString(), requestId: request.requestId, text: request.text, targetId: request.targetId,
+        scope: { kind: 'variant', parentVariantId: parent.id, baseEraRevision: parent.eraRevision, timeMode: request.timeMode },
+      });
+      const dispatch = this.reconstructions.proposalDispatch(manifest, request.targetId, base, { original, photos });
+      return { ...(await this.reconstructions.beginProposal(manifest, proposals, proposal, dispatch)), manifest };
+    });
+    if (accepted.replay) return { created: false, proposal: await this.reconstructions.projectProposal(await this.#scene(draftId, jobId), accepted.proposal) };
+    this.reconstructions.launchProposal(draftId, jobId, accepted);
+    return { created: true, proposal: await this.reconstructions.projectProposal(accepted.manifest, accepted.proposal) };
+  }
+
+  // One saved alternative's own proposals, newest first; never main's.
+  async variantProposals(draftId, jobId, principal, parentId) {
+    this.#owner(principal, draftId);
+    await this.reconstructions.recover();
+    const manifest = await this.#scene(draftId, jobId);
+    if (!collaborationOf(manifest).variants.some((item) => item.id === parentId)) throw fail(404, VARIANT_NOT_FOUND);
+    const scoped = (manifest.proposals ?? []).filter((item) => item.scope?.parentVariantId === parentId).reverse();
+    return this.reconstructions.projectProposals(manifest, scoped);
+  }
+
+  async variantProposal(draftId, jobId, principal, parentId, proposalId) {
+    const found = (await this.variantProposals(draftId, jobId, principal, parentId)).find((item) => item.id === proposalId);
+    if (!found) throw fail(404, PROPOSAL_NOT_FOUND);
+    return found;
+  }
+
+  async cancelVariantProposal(draftId, jobId, principal, parentId, proposalId, body) {
+    this.#owner(principal, draftId);
+    parseCancelRequest(body);
+    return this.reconstructions.cancelProposal(draftId, jobId, proposalId, parentId);
+  }
+
+  // Saves a ready proposal's stored result as a new immutable child of its
+  // parent, in one manifest write with the proposal's applied state and the
+  // replay receipt. An exact committed replay needs only the child's current
+  // place use, files and dependencies: it resolves a lost response after a
+  // later time change or model-off without creating anything.
+  async applyVariantProposal(draftId, jobId, principal, parentId, proposalId, body) {
+    this.#owner(principal, draftId);
+    const request = parseVariantApplyRequest(body);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const proposals = manifest.proposals ?? [];
+      const proposal = proposals.find((item) => item.id === proposalId && item.scope?.parentVariantId === parentId);
+      if (!proposal) throw fail(404, PROPOSAL_NOT_FOUND);
+      const collaboration = collaborationOf(manifest);
+      const replay = this.#receipt(collaboration, request, 'proposal-revision', principal.id, proposalId);
+      if (replay) {
+        const child = collaboration.variants.find((item) => item.id === replay.variantId && item.kind === 'revision');
+        if (!child) throw fail(409, REVISION_UNREADABLE);
+        await this.#revisable(manifest, child);
+        return { created: false, proposal: await this.reconstructions.projectProposal(manifest, proposal), variant: projectVariant(manifest, child, false) };
+      }
+      if (proposal.status === 'applied') throw fail(409, 'This proposal was already saved as a new alternative.');
+      const parent = collaboration.variants.find((item) => item.id === parentId);
+      if (!parent) throw fail(404, VARIANT_NOT_FOUND);
+      await this.#revisable(manifest, parent);
+      if (proposal.status === 'stale' || (proposal.status === 'ready' && proposal.scope.baseEraRevision !== parent.eraRevision)) {
+        throw fail(409, 'The time for this arrangement changed after this proposal was made. Ask for a new proposal.');
+      }
+      if (proposal.status !== 'ready') throw fail(409, 'Only a ready proposal can be saved.');
+      if (request.baseEraRevision !== parent.eraRevision) throw fail(409, 'The time for this arrangement changed. Review it again before saving the revision.');
+      if (['face_anchor', 'face_object'].includes(proposal.result.action) && request.frontConfirmed !== true) {
+        throw fail(409, 'Confirm that the visible side of the object is its front before saving this turn.');
+      }
+      // Saving a model result is new model use: every scene photo and inherited contribution must still allow it.
+      if (!(await this.reconstructions.sceneSourceUses(manifest)).model) throw fail(403, MODEL_STOPPED_MESSAGE);
+      if (dependencyIssue(manifest, parent.contributionIds, 'model')) throw fail(403, MODEL_BLOCKED_MESSAGE);
+      // Every stored scene photo must still be recorded as public material.
+      const photos = await this.reconstructions.assertSceneSources(manifest, 'model');
+      if (photos.some(({ source }) => source.origin?.kind !== 'public')) throw fail(403, PUBLIC_ONLY_MESSAGE);
+      const child = await this.#revisionChild(manifest, collaboration, parent, {
+        requestId: request.requestId, targetId: isTwoObject(manifest) ? proposal.targetId : null, pose: proposal.result.transform,
+        timeMode: proposal.scope.timeMode, proposalId,
+      }, principal);
+      const applied = { ...proposal, status: 'applied', appliedVariantId: child.id, updatedAt: child.createdAt };
+      const { next } = this.#save(manifest, { ...collaboration, variants: [...collaboration.variants, child] }, {
+        requestId: request.requestId, action: 'proposal-revision', principalId: principal.id, target: proposalId, digest: digest(request), variantId: child.id,
+      });
+      if (this.reconstructions.closed) throw fail(503, SHUTTING_DOWN);
+      const stored = await this.reconstructions.update(manifest, { collaboration: next, proposals: proposals.map((item) => (item.id === proposalId ? applied : item)) });
+      return { created: true, proposal: await this.reconstructions.projectProposal(stored, applied), variant: projectVariant(stored, child, false) };
     });
   }
 }

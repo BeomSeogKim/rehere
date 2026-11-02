@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
-import { BudgetLedger, INSTRUCTIONS, MAX_OUTPUT_TOKENS, OUTPUT_USD, INPUT_USD, PLAN_SCHEMA, createMetaModel, metaModelFromEnv } from '../meta-model.mjs';
+import { BudgetLedger, COMPOSITION_PLAN_SCHEMA, INSTRUCTIONS, MAX_OUTPUT_TOKENS, OUTPUT_USD, INPUT_USD, PLAN_SCHEMA, createMetaModel, metaModelFromEnv, requestBody } from '../meta-model.mjs';
 
 const KEY = 'test-key-not-real-0123456789';
 const IMAGE = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
@@ -249,5 +249,126 @@ describe('Meta proposal model admission', () => {
     assert.ok(fetch.calls[0].url.endsWith('/responses/input_tokens'));
     const { entries } = JSON.parse(await readFile(book.file, 'utf8'));
     assert.deepEqual(entries.map(({ state, estimatedUsd }) => [state, estimatedUsd]), [['settled', 0]]);
+  });
+});
+
+describe('Meta planning for a selected saved alternative', () => {
+  const legacyBody = JSON.stringify(requestBody(input()));
+  const legacySchemas = JSON.stringify([PLAN_SCHEMA, COMPOSITION_PLAN_SCHEMA]);
+  const parentId = '00000000-0000-4000-8000-000000000010';
+  const alternative = { parentVariantId: parentId, baseEraRevision: 2 };
+  const source2 = '00000000-0000-4000-8000-000000000002';
+  const scoped = (change = {}) => input({ baseVersion: undefined, saved: { offset: [0.3, -0.1, 0.2], yaw: 0.4 }, alternative, ...change });
+  const scopedAnswer = { action: 'rotate', targetId: 'selected-foreground', sourceId: SOURCE, ...alternative, delta: null, yawDelta: 0.2, anchor: null, question: null, reason: 'Turn the selected photographed side.' };
+  const answer = (plan) => completed({ output: [message({ content: [{ type: 'output_text', text: JSON.stringify(plan) }] })] });
+  const bindingOf = (body) => JSON.parse(body.input[0].content[0].text);
+  const assertScope = (body) => {
+    const context = bindingOf(body);
+    assert.equal(context.parentVariantId, parentId);
+    assert.equal(context.baseEraRevision, 2);
+    assert.equal(Object.hasOwn(context, 'baseVersion'), false);
+    const schema = body.text.format.schema;
+    assert.equal(schema.additionalProperties, false);
+    assert.deepEqual([...schema.required].sort(), Object.keys(schema.properties).sort());
+    assert.equal(schema.required.includes('baseVersion'), false);
+    assert.equal(Object.hasOwn(schema.properties, 'baseVersion'), false);
+    assert.ok(schema.required.includes('parentVariantId') && schema.required.includes('baseEraRevision'));
+    assert.doesNotMatch(body.instructions, /baseVersion|current reconstruction only/);
+    assert.match(body.instructions, /parentVariantId/);
+    assert.match(body.instructions, /baseEraRevision/);
+    assert.match(body.instructions, /clarif/i);
+    return context;
+  };
+
+  it('counts and generates against the exact parent identity and saved pose, without a main version', async () => {
+    const fetch = fakeFetch({ generation: answer(scopedAnswer) });
+    const result = await createMetaModel({ apiKey: KEY, ledger: await ledger(), fetch })(scoped());
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.plan, scopedAnswer);
+    assert.equal(fetch.calls.length, 2);
+    const [count, generation] = fetch.calls;
+    for (const key of ['input', 'instructions', 'model', 'text']) assert.deepEqual(generation.body[key], count.body[key]);
+    const context = assertScope(generation.body);
+    assert.deepEqual(context.savedOffset, [0.3, -0.1, 0.2]);
+    assert.equal(context.savedYaw, 0.4);
+    assert.equal(context.sourceId, SOURCE);
+    assert.equal(context.memory, scoped().text);
+    assert.equal(generation.body.store, false);
+    assert.equal(generation.body.max_output_tokens, MAX_OUTPUT_TOKENS);
+    assert.equal(Object.hasOwn(generation.body, 'tools'), false);
+  });
+
+  it('retains the other parent object and its rule in a one-photo alternative context', () => {
+    const objects = [
+      { id: 'object-1', label: 'First object', box: [10, 20, 80, 160], offset: [-0.2, 0.1, 0], yaw: 0.3 },
+      { id: 'object-2', label: 'Second object', box: [210, 40, 320, 240], offset: [0.3, -0.1, 0.2], yaw: 0.4 },
+    ];
+    const relationship = { kind: 'left_of', leftId: 'object-1', rightId: 'object-2', frame: 'original-photo' };
+    const context = assertScope(requestBody(scoped({ targetId: 'object-2', objects, relationship })));
+    assert.deepEqual(context.objects, objects);
+    assert.deepEqual(context.relationship, relationship);
+    assert.equal(context.targetId, 'object-2');
+  });
+
+  it('uses both original pixel boxes and exact parent quaternion, scale and frame through the composition adapter', async () => {
+    const objects = [
+      { id: 'object-1', label: 'First object', sourceId: SOURCE, box: [10, 20, 80, 160], pose: { position: [-0.3, 0.2, -0.1], quaternion: [0.1, 0, 0, Math.sqrt(0.99)], scale: 1.3 } },
+      { id: 'object-2', label: 'Second object', sourceId: source2, box: [200, 100, 500, 380], pose: { position: [0.4, -0.1, 0.2], quaternion: [0, 0.2, 0, Math.sqrt(0.96)], scale: 0.7 } },
+    ];
+    const arrangement = { frame: 'owner-composition', objects: objects.map(({ id, pose }) => ({ id, ...pose })), relationship: null };
+    const sourceIds = [SOURCE, source2];
+    const plan = { action: 'translate', targetId: 'object-2', sourceIds, ...alternative, delta: [0, 0.1, 0], yawDelta: null, faceObjectId: null, question: null, reason: 'Move the selected object upward.' };
+    const fetch = fakeFetch({ generation: answer(plan) });
+    const { COMPOSITION_REPRESENTATION } = await import('../public/composition-scene.js');
+    const result = await createMetaModel({ apiKey: KEY, ledger: await ledger(), fetch })(scoped({
+      representation: COMPOSITION_REPRESENTATION, sourceId: undefined, image: undefined, selection: undefined,
+      images: objects.map((object) => ({ sourceId: object.sourceId, image: IMAGE, selection: [...object.box] })),
+      sourceIds, objects, arrangement, targetId: 'object-2', saved: objects[1].pose, relationship: null,
+    }));
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.plan, plan);
+    assert.equal(fetch.calls.length, 2);
+    const [count, generation] = fetch.calls;
+    for (const key of ['input', 'instructions', 'model', 'text']) assert.deepEqual(generation.body[key], count.body[key]);
+    const context = assertScope(generation.body);
+    assert.deepEqual(context.sourceIds, sourceIds);
+    assert.deepEqual(context.objects, objects);
+    assert.deepEqual(context.arrangement, arrangement);
+    assert.deepEqual(context.savedPose, objects[1].pose);
+    assert.equal(Object.hasOwn(context.arrangement, 'version'), false);
+    const content = generation.body.input[0].content;
+    assert.equal(content.length, 5);
+    assert.match(content[1].text, /\[10,20,80,160\]/);
+    assert.match(content[3].text, /\[200,100,500,380\]/);
+    assert.equal(content[2].image_url, `data:image/jpeg;base64,${IMAGE.toString('base64')}`);
+    assert.equal(content[4].image_url, content[2].image_url);
+  });
+
+  it('rejects malformed or mixed scope bindings before token counting or reserving', async () => {
+    const cases = [
+      { alternative: { parentVariantId: 'not-an-id', baseEraRevision: 2 } },
+      { alternative: { ...alternative, baseEraRevision: -1 } },
+      { alternative: { ...alternative, baseEraRevision: 0.5 } },
+      { alternative: { ...alternative, baseEraRevision: '2' } },
+      { alternative: { ...alternative, unrelated: true } },
+      { alternative: { parentVariantId: parentId } },
+      { alternative: [] },
+      { baseVersion: 3 },
+    ];
+    const book = await ledger();
+    const fetch = fakeFetch();
+    const model = createMetaModel({ apiKey: KEY, ledger: book, fetch });
+    for (const change of cases) await assert.rejects(model(scoped(change)), /alternative.*context.*invalid/i);
+    assert.equal(fetch.calls.length, 0);
+    assert.deepEqual(await book.totals(), { requests: 0, chargedUsd: 0 });
+    assert.equal(bindingOf(requestBody(scoped({ alternative: { ...alternative, baseEraRevision: 0 } }))).baseEraRevision, 0);
+  });
+
+  it('does not mutate legacy schemas or request serialization while constructing a scoped request', () => {
+    assert.equal(JSON.stringify(requestBody(input())), legacyBody);
+    assert.equal(JSON.stringify([PLAN_SCHEMA, COMPOSITION_PLAN_SCHEMA]), legacySchemas);
+    requestBody(scoped());
+    assert.equal(JSON.stringify(requestBody(input())), legacyBody);
+    assert.equal(JSON.stringify([PLAN_SCHEMA, COMPOSITION_PLAN_SCHEMA]), legacySchemas);
   });
 });

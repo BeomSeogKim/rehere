@@ -8,7 +8,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { attestPhotos, contributionsDir } from './contribution-photos.mjs';
 import { cleanupContributionFiles, removeManifestTemps, safeJobDirectory } from './contribution-deletion-files.mjs';
 import {
-  assertSceneUsable, issueMessage, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, usageBlocked, versionDependencies,
+  assertSceneUsable, issueMessage, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, proposalBinding, sameArrangement,
+  usageBlocked, variantFields, versionDependencies,
 } from './collaboration.mjs';
 import { LIMITS, RequestError } from './drafts.mjs';
 import {
@@ -573,14 +574,14 @@ function checkObjectSurface(surface, summary, expected) {
 
 // Arguments the model adapter receives for a two-object scene: the selected
 // target, both objects with their labels, boxes and saved transforms, and the rule.
-function modelContext(manifest, targetId) {
+function modelContext(manifest, targetId, arrangement = manifest.edit) {
   return {
     targetId,
     objects: manifest.objects.map(({ id, label, box }) => {
-      const saved = manifest.edit.objects.find((item) => item.id === id);
+      const saved = arrangement.objects.find((item) => item.id === id);
       return { id, label, box: [...box], offset: [...saved.offset], yaw: saved.yaw };
     }),
-    relationship: manifest.edit.relationship ? { ...manifest.edit.relationship } : null,
+    relationship: arrangement.relationship ? { ...arrangement.relationship } : null,
   };
 }
 
@@ -1576,7 +1577,8 @@ export class ReconstructionStore {
   async proposals(draftId, jobId) {
     await this.recover();
     const manifest = await this.editableScene(draftId, jobId);
-    return this.projectProposals(manifest, [...(manifest.proposals ?? [])].reverse());
+    // Proposals for a saved alternative are listed only under that alternative.
+    return this.projectProposals(manifest, (manifest.proposals ?? []).filter((item) => !item.scope).reverse());
   }
 
   // Every proposal leaving the server: a photo without place use hides the
@@ -1585,6 +1587,7 @@ export class ReconstructionStore {
     const { place } = await this.sceneSourceUses(manifest);
     return proposals.map((item) => (place ? projectProposal(manifest, item) : {
       ...item, statement: { ...item.statement, text: null }, result: null, question: null, status: 'stale', error: SOURCE_REDACTED_PROPOSAL, redacted: true,
+      ...(item.scope && { candidate: null }),
     }));
   }
 
@@ -1639,28 +1642,61 @@ export class ReconstructionStore {
       if (!this.proposalModel) throw new RequestError(503, 'Memory-based editing with the hosted model is not set up on this computer.');
       if (this.closed) throw new RequestError(503, 'The app is shutting down. Try again later.');
       if (this.activeProposal) throw new RequestError(409, 'Another proposal is being prepared right now. Try again when it finishes.');
-      const now = new Date().toISOString();
-      const proposal = newProposal({ id: randomUUID(), statementId: randomUUID(), now, ...request, targetId: request.targetId ?? null });
-      const stored = await this.update(manifest, { proposals: [...proposals, proposal] });
-      // close() may have started while the record was being written; never start a call after it.
-      if (this.closed) {
-        const interrupted = { ...proposal, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
-        await this.update(stored, { proposals: [...proposals, interrupted] });
-        return { proposal: interrupted, start: false };
-      }
-      this.activeProposal = { id: proposal.id, draftId, jobId, sourceId: manifest.sourceId, controller: new AbortController(), done: null };
-      // For two objects the model sees the selected object's box and transform,
-      // plus the whole arrangement as context; it may change only that object.
-      const target = twoObjects ? manifest.objects.find((item) => item.id === request.targetId) : null;
-      const box = target ? target.box : manifest.box;
-      const [x1, y1, x2, y2] = box;
-      const selection = [x1 / size.width, y1 / size.height, x2 / size.width, y2 / size.height];
-      const targetSaved = target && manifest.edit.objects.find((item) => item.id === target.id);
-      const saved = targetSaved ? { offset: [...targetSaved.offset], yaw: targetSaved.yaw } : manifest.edit;
-      return { proposal, start: true, imagePath, selection, box, sourceId: manifest.sourceId, saved, context: twoObjects ? modelContext(manifest, request.targetId) : null };
+      const proposal = newProposal({ id: randomUUID(), statementId: randomUUID(), now: new Date().toISOString(), ...request, targetId: request.targetId ?? null });
+      return this.beginProposal(manifest, proposals, proposal, this.proposalDispatch(manifest, request.targetId, manifest.edit, { original: { imagePath, size } }));
     });
-    if (accepted.start) this.activeProposal.done = this.runProposal(draftId, jobId, accepted);
+    this.launchProposal(draftId, jobId, accepted);
     return accepted.proposal;
+  }
+
+  // Writes a new queued proposal and takes the single model slot. Callers hold
+  // the mutex and have checked the request; close() may have started while
+  // the record was being written, and then no call is ever started.
+  async beginProposal(manifest, proposals, proposal, dispatch) {
+    const stored = await this.update(manifest, { proposals: [...proposals, proposal] });
+    if (this.closed) {
+      const interrupted = { ...proposal, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
+      await this.update(stored, { proposals: [...proposals, interrupted] });
+      return { proposal: interrupted, start: false };
+    }
+    this.activeProposal = {
+      id: proposal.id, draftId: manifest.draftId, jobId: manifest.id, ...(dispatch.photos ? { sourceIds: dispatch.context.sourceIds } : { sourceId: dispatch.sourceId }),
+      controller: new AbortController(), done: null,
+    };
+    return { proposal, start: true, ...dispatch };
+  }
+
+  launchProposal(draftId, jobId, accepted) {
+    if (accepted.start) this.activeProposal.done = this.runProposal(draftId, jobId, accepted);
+  }
+
+  // What the model is sent about one object of a whole saved arrangement (main
+  // or a saved alternative): the selected photo region, or both ordered photos
+  // with their raw boxes, and the arrangement as context. It may change only
+  // that object. `original` or `photos` were admitted by the caller.
+  proposalDispatch(manifest, targetId, arrangement, { original = null, photos = null }) {
+    if (photos) {
+      const sourceIds = geometrySources(manifest).map(({ sourceId }) => sourceId);
+      const objects = manifest.objects.map(({ id, label, sourceId, box }) => ({ id, label, sourceId, box: [...box], pose: copyPose(arrangement.objects.find((item) => item.id === id)) }));
+      return {
+        photos: photos.map((photo, index) => ({ ...photo, box: objects[index].box })), saved: copyPose(arrangement.objects.find((item) => item.id === targetId)),
+        context: {
+          representation: COMPOSITION_REPRESENTATION, sourceIds, targetId, objects,
+          // A saved alternative has no main version, and none is invented for it.
+          arrangement: { ...(arrangement.version !== undefined && { version: arrangement.version }), ...arrangementOf(arrangement) },
+          relationship: arrangement.relationship && { ...arrangement.relationship },
+        },
+      };
+    }
+    const twoObjects = isTwoObject(manifest);
+    const target = twoObjects ? manifest.objects.find((item) => item.id === targetId) : null;
+    const box = target ? target.box : manifest.box;
+    const { imagePath, size } = original;
+    const [x1, y1, x2, y2] = box;
+    const selection = [x1 / size.width, y1 / size.height, x2 / size.width, y2 / size.height];
+    const targetSaved = target && arrangement.objects.find((item) => item.id === target.id);
+    const saved = targetSaved ? { offset: [...targetSaved.offset], yaw: targetSaved.yaw } : arrangement;
+    return { imagePath, selection, box, sourceId: manifest.sourceId, saved, context: twoObjects ? modelContext(manifest, targetId, arrangement) : null };
   }
 
   async #compositionProposal(manifest, request, proposals) {
@@ -1674,17 +1710,7 @@ export class ReconstructionStore {
     if (this.closed) throw new RequestError(503, 'The app is shutting down.');
     if (this.activeProposal) throw new RequestError(409, 'Another proposal is being prepared right now.');
     const proposal = newProposal({ id: randomUUID(), statementId: randomUUID(), now: new Date().toISOString(), ...request });
-    const stored = await this.update(manifest, { proposals: [...proposals, proposal] });
-    if (this.closed) {
-      const interrupted = { ...proposal, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
-      await this.update(stored, { proposals: [...proposals, interrupted] });
-      return { proposal: interrupted, start: false };
-    }
-    const sourceIds = geometrySources(manifest).map(({ sourceId }) => sourceId);
-    this.activeProposal = { id: proposal.id, draftId: manifest.draftId, jobId: manifest.id, sourceIds, controller: new AbortController(), done: null };
-    const objects = manifest.objects.map(({ id, label, sourceId, box }) => ({ id, label, sourceId, box: [...box], pose: copyPose(manifest.edit.objects.find((item) => item.id === id)) }));
-    return { proposal, start: true, photos: photos.map((photo, index) => ({ ...photo, box: objects[index].box })), saved: copyPose(manifest.edit.objects.find((item) => item.id === request.targetId)),
-      context: { representation: COMPOSITION_REPRESENTATION, sourceIds, targetId: request.targetId, objects, arrangement: { version: manifest.edit.version, ...arrangementOf(manifest.edit) }, relationship: manifest.edit.relationship && { ...manifest.edit.relationship } } };
+    return this.beginProposal(manifest, proposals, proposal, this.proposalDispatch(manifest, request.targetId, manifest.edit, { photos }));
   }
 
   // Applies `change(proposal, manifest)` under the caller's mutex slot and
@@ -1709,18 +1735,40 @@ export class ReconstructionStore {
     const finish = (changes) => this.serialize(() => this.changeProposal(draftId, jobId, proposal.id, (current) => (current.status === 'processing' ? changes : null)));
     try {
       const modelAllowed = async () => {
-        if (!photos) return this.sourceUses(draftId, sourceId).then((uses) => uses.model);
+        if (!photos) {
+          const { model } = await this.sourceUses(draftId, sourceId);
+          // A proposal for a saved alternative sends only public material, checked at every outbound step.
+          if (!model || !proposal.scope) return model;
+          const draft = await this.drafts.get(draftId);
+          return draft?.sources?.find((item) => item.id === sourceId)?.origin?.kind === 'public';
+        }
         try {
           const scene = await this.editableScene(draftId, jobId);
           const originals = await this.assertSceneSources(scene, 'model');
           return originals.every(({ source }) => source.origin?.kind === 'public');
         } catch { return false; }
       };
+      // A proposal for a saved alternative also needs, at every check, the
+      // finished scene and the exact bytes of every original and derived file.
+      const intact = async () => {
+        if (!proposal.scope) return true;
+        try {
+          const scene = await this.editableScene(draftId, jobId);
+          await this.assertSceneFiles(scene);
+          return scene.status === 'ready';
+        } catch { return false; }
+      };
+      // Dependencies of what the proposal is bound to: main, or its parent alternative.
+      const bindingIssue = (manifest, current) => {
+        const binding = proposalBinding(manifest, current);
+        return binding ? dependencyIssue(manifest, binding.dependencies, 'model') : 'unavailable';
+      };
       // Grants are checked again at dispatch: a withdrawal may have arrived since creation.
-      const started = await this.serialize(async () => { const allowed = await modelAllowed(); return this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
+      const started = await this.serialize(async () => { const allowed = await modelAllowed(); const whole = await intact(); return this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
         if (current.status !== 'queued') return null;
         if (!allowed) return { status: 'failed', error: PROPOSAL_MESSAGES.restricted };
-        const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
+        if (!whole) return { status: 'failed', error: PROPOSAL_MESSAGES.scene };
+        const issue = bindingIssue(manifest, current);
         if (issue) return { status: 'failed', error: issueMessage(issue) };
         return { status: 'processing' };
       }); });
@@ -1733,11 +1781,14 @@ export class ReconstructionStore {
         if (photos) {
           images = [];
           for (const photo of photos) {
-            if (!(await modelAllowed()) || signal.aborted || this.closed) throw new Error('Source unavailable');
+            if (!(await modelAllowed()) || !(await intact()) || signal.aborted || this.closed) throw new Error('Source unavailable');
             images.push({ sourceId: photo.source.id, image: await this.prepareImage({ imagePath: photo.imagePath, box: photo.box, signal }),
               selection: [...photo.box] });
           }
-        } else image = await this.prepareImage({ imagePath, box, signal });
+        } else {
+          if (!(await intact())) throw new Error('Scene unavailable');
+          image = await this.prepareImage({ imagePath, box, signal });
+        }
       } catch (error) {
         console.error(`proposal ${proposal.id} image preparation failed: ${String(error?.message ?? 'error').slice(0, 300)}`);
         await finish(signal.aborted ? { status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted } : { status: 'failed', error: PROPOSAL_MESSAGES.image });
@@ -1759,7 +1810,11 @@ export class ReconstructionStore {
           await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted }));
           return null;
         }
-        const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
+        if (!(await intact())) {
+          await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: PROPOSAL_MESSAGES.scene }));
+          return null;
+        }
+        const issue = bindingIssue(manifest, current);
         if (issue) {
           await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: issueMessage(issue) }));
           return null;
@@ -1767,18 +1822,21 @@ export class ReconstructionStore {
         // Each outbound request the model makes is admitted here, under the
         // same mutex as restrictions, withdrawals and cancellations.
         const admit = (start) => this.serialize(async () => {
-          if (signal.aborted || this.closed || !(await modelAllowed())) return null;
+          if (signal.aborted || this.closed || !(await modelAllowed()) || !(await intact())) return null;
           const scene = await this.editableScene(draftId, jobId);
           const now = (scene.proposals ?? []).find((item) => item.id === proposal.id);
-          if (now?.status !== 'processing' || dependencyIssue(scene, currentDependencies(scene), 'model')) return null;
+          if (now?.status !== 'processing' || bindingIssue(scene, now)) return null;
           if (photos) await this.compositionAssets(scene);
           return { value: start() };
         });
-        return { call: this.proposalModel({ text: proposal.statement.text, ...(photos ? { images } : { image, selection, sourceId }), baseVersion: proposal.baseVersion, saved, signal, admit, ...context }) };
+        // A saved alternative is named by its ID and time revision; it has no main version.
+        const binding = proposal.scope
+          ? { alternative: { parentVariantId: proposal.scope.parentVariantId, baseEraRevision: proposal.scope.baseEraRevision } } : { baseVersion: proposal.baseVersion };
+        return { call: this.proposalModel({ text: proposal.statement.text, ...(photos ? { images } : { image, selection, sourceId }), ...binding, saved, signal, admit, ...context }) };
       });
       if (!dispatched) return;
       const outcome = await dispatched.call;
-      await this.serialize(async () => { const allowed = await modelAllowed(); return this.changeProposal(draftId, jobId, proposal.id, async (current, manifest) => {
+      await this.serialize(async () => { const allowed = await modelAllowed(); const whole = await intact(); return this.changeProposal(draftId, jobId, proposal.id, async (current, manifest) => {
         const record = { model: outcome?.model ?? null, usage: outcome?.usage ?? null, responseId: outcome?.responseId ?? null };
         // A canceled or stale proposal keeps its status; only what was spent is recorded.
         if (current.status !== 'processing') return record;
@@ -1786,16 +1844,22 @@ export class ReconstructionStore {
         if (!allowed) return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.restricted };
         // Still processing after an abort means shutdown: a late success is not offered.
         if (signal.aborted || this.closed) return { ...record, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted };
-        if (manifest.edit.version !== current.baseVersion) return { ...record, status: 'stale' };
-        const issue = dependencyIssue(manifest, currentDependencies(manifest), 'model');
+        if (!whole) return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.scene };
+        const binding = proposalBinding(manifest, current);
+        if (!binding) return { ...record, status: 'failed', error: issueMessage('unavailable') };
+        if (binding.stale) return { ...record, status: 'stale' };
+        const issue = dependencyIssue(manifest, binding.dependencies, 'model');
         if (issue) return { ...record, status: 'failed', error: issueMessage(issue) };
         if (!outcome?.ok) {
           return { ...record, status: 'failed', error: PROPOSAL_MESSAGES[outcome?.reason] ?? PROPOSAL_MESSAGES.provider };
         }
         const twoObjects = isTwoObject(manifest);
-        const targetSaved = twoObjects ? manifest.edit.objects.find((item) => item.id === current.targetId) : manifest.edit;
+        const base = binding.arrangement;
+        const targetSaved = twoObjects ? base.objects.find((item) => item.id === current.targetId) : base;
         const checked = validatePlan(outcome.plan, {
-          ...(photos ? { sourceIds: context.sourceIds, arrangement: manifest.edit } : { sourceId }), baseVersion: current.baseVersion, saved: targetSaved, surface, ...(twoObjects && { targetId: current.targetId }),
+          ...(photos ? { sourceIds: context.sourceIds, arrangement: base } : { sourceId }),
+          ...(current.scope ? { alternative: { parentVariantId: current.scope.parentVariantId, baseEraRevision: current.scope.baseEraRevision } } : { baseVersion: current.baseVersion }),
+          saved: targetSaved, surface, ...(twoObjects && { targetId: current.targetId }),
         });
         if (checked.error) {
           console.error(`proposal ${current.id} plan rejected: ${checked.code}`);
@@ -1803,9 +1867,15 @@ export class ReconstructionStore {
         }
         const { result } = checked;
         if (result.action === 'clarify') return { ...record, status: 'clarify', result, question: result.question };
-        // The candidate is merged into the whole arrangement and must keep its rule.
+        // The candidate is the whole bound arrangement with one object changed.
+        const arrangement = variantFields(manifest, base, current.targetId, result.transform);
+        // A scoped result that changes nothing is never offered.
+        if (current.scope && sameArrangement(arrangement, base)) {
+          console.error(`proposal ${current.id} plan rejected: unchanged`);
+          return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.unchanged };
+        }
+        // It must keep the arrangement's rule.
         if (twoObjects) {
-          const arrangement = withTarget(arrangementOf(manifest.edit), current.targetId, result.transform);
           if (!checkRelationship(arrangement, objectPivots(manifest)).ok) {
             console.error(`proposal ${current.id} plan rejected: relationship`);
             return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.relationship };
@@ -1835,10 +1905,13 @@ export class ReconstructionStore {
     }
   }
 
-  async cancelProposal(draftId, jobId, proposalId) {
+  // `parentVariantId` names the saved alternative a scoped proposal belongs
+  // to; main routes pass null and never reach a scoped proposal.
+  async cancelProposal(draftId, jobId, proposalId, parentVariantId = null) {
     await this.recover();
     return this.serialize(async () => {
       const proposal = await this.changeProposal(draftId, jobId, proposalId, (current) => {
+        if ((current.scope?.parentVariantId ?? null) !== parentVariantId) throw new RequestError(404, 'This proposal could not be found.');
         if (current.status === 'canceled') return null;
         if (!['queued', 'processing', 'ready', 'clarify'].includes(current.status)) {
           throw new RequestError(409, 'This proposal has already finished and cannot be canceled.');
@@ -1856,7 +1929,7 @@ export class ReconstructionStore {
       const manifest = await this.editableScene(draftId, jobId);
       if (isComposition(manifest)) await this.assertSceneSources(manifest);
       const proposals = manifest.proposals ?? [];
-      const proposal = proposals.find((item) => item.id === proposalId);
+      const proposal = proposals.find((item) => item.id === proposalId && !item.scope);
       if (!proposal) throw new RequestError(404, 'This proposal could not be found.');
       const previous = manifest.edits.find((item) => item.requestId === request.requestId);
       if (previous) {

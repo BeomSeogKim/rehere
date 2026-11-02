@@ -214,6 +214,73 @@ when confirming the relation and selecting it for sharing; later withdrawal
 of that referenced alternative does not currently invalidate the child's
 local time assertion or a local story context automatically.
 
+## Revise an alternative from a remembered instruction
+
+Inside **Make a revised alternative**, choose **Remembered instruction**
+instead of manual placement. Choose the object and the new alternative's time,
+write a complete instruction and explicitly consent to model processing.
+Planning uses that selected parent's saved arrangement, not an unsaved manual
+preview or the current main scene. Reviewing a stored proposal shows its own
+object and time choice; it is never retargeted by newer controls.
+
+The hosted planner needs current model permission for every geometry source
+and inherited contribution, in addition to place use. Source photographs must
+be marked as public material during development. The request contains the
+owner's new instruction, permitted photo selections and the parent's named
+object poses and relationship. Parent time wording, contributor statements
+and recordings are not automatically sent. Dates written in the instruction
+do not change the selected unknown or explicitly re-confirmed time.
+
+A clarification creates no child. Answer it with a complete revised
+instruction and a new request; no conversation is automatically uploaded.
+A ready result must preserve the parent's other objects, rule, coordinate
+frame and relative scale, pass the visible-surface checks and be previewed in
+3D before saving. A facing action also needs an aligned direction guide and
+explicit confirmation of the photographed side. A full turn with no final
+pose change is refused rather than saved as a new arrangement.
+
+Approval stores the validated result as one immutable child, together with
+the proposal's applied state and request receipt. The client cannot substitute
+a different transform. Main, parent, originals and previous stories or
+snapshots stay unchanged. Main advancing does not change this plan's target;
+a changed parent time requires a new review. Source restrictions, withdrawal,
+deletion and shutdown stop further dispatch and prevent late results from
+being offered or saved.
+
+An uncertain create, cancel or save keeps its exact request. New previews and
+first saves stay paused until that action is resolved. A committed save's
+exact retry returns the same child even after a later parent-time change or
+model-off, provided its current place use, files and dependencies remain
+usable. New saves still require model permission. A created child can be
+viewed under place use after model processing is turned off. Reloaded applied
+proposals open their existing child rather than offer another save.
+
+All routes extend `/api/drafts/<id>/reconstructions/<job>` and require the owner:
+
+| Request | Purpose |
+|---|---|
+| `POST /variants/<parent>/proposals` | Plan with `requestId`, `baseEraRevision`, `targetId`, `timeMode`, `text` and `consent: true` |
+| `GET /variants/<parent>/proposals` | Inspect this parent's stored proposals |
+| `GET /variants/<parent>/proposals/<proposal>` | Read one scoped proposal |
+| `POST /variants/<parent>/proposals/<proposal>/cancel` | Cancel using `requestId` |
+| `POST /variants/<parent>/proposals/<proposal>/apply` | Save with `requestId`, `baseEraRevision`, `frontConfirmed` and `confirmed: true` |
+
+The single-foreground target is `selected-foreground`; two-object scenes use
+`object-1` or `object-2`. New plans return 202 and exact replays return 200.
+The model echoes `parentVariantId` and `baseEraRevision`, including for
+clarifications; there is no main `baseVersion`. A ready owner response includes
+the full parent-based `candidate` with `version: null`. Apply returns
+`{proposal, variant}` with 201, or 200 for the same committed child. Reusing an
+applied proposal for another child is refused. Main and alternative proposal
+routes do not accept each other's records.
+
+Only model-assisted children add `revision.proposalId` to their owner
+metadata, with an action to inspect the saved instruction. New visitor
+snapshots identify their arrangement origin as memory-assisted; manual
+revisions retain the manual origin. Neither the private proposal identifier
+nor its instruction is automatically copied into visitor packets. Existing
+packets are not rewritten.
+
 ## Grants and withdrawal
 
 Every spatial change inherits its supporting contribution IDs. Place permission

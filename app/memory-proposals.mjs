@@ -10,8 +10,17 @@ export const ACTIONS = Object.freeze(['translate', 'rotate', 'face_anchor', 'cla
 export const PLAN_KEYS = Object.freeze(['action', 'targetId', 'sourceId', 'baseVersion', 'delta', 'yawDelta', 'anchor', 'question', 'reason']);
 export const COMPOSITION_ACTIONS = Object.freeze(['translate', 'rotate', 'face_object', 'clarify']);
 export const COMPOSITION_PLAN_KEYS = Object.freeze(['action', 'targetId', 'sourceIds', 'baseVersion', 'delta', 'yawDelta', 'faceObjectId', 'question', 'reason']);
+// A plan for a selected saved alternative echoes that alternative and its time
+// revision in place of the main version.
+export const VARIANT_PLAN_KEYS = Object.freeze(['action', 'targetId', 'sourceId', 'parentVariantId', 'baseEraRevision', 'delta', 'yawDelta', 'anchor', 'question', 'reason']);
+export const COMPOSITION_VARIANT_PLAN_KEYS = Object.freeze(['action', 'targetId', 'sourceIds', 'parentVariantId', 'baseEraRevision', 'delta', 'yawDelta', 'faceObjectId', 'question', 'reason']);
 export const TEXT_LIMIT = 2000;
 const OFFSET_LIMIT = 2;
+const FULL_TURN = 2 * Math.PI;
+// For a saved alternative, a turn by an exact whole number of full turns is no
+// turn at all: the saved pose is kept as it is, without the floating-point
+// noise adding a full turn would leave. Plans for main are unaffected.
+const noTurn = (alternative, yawDelta) => alternative !== null && yawDelta % FULL_TURN === 0;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // Plain text only: no control characters other than tab and newline.
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/;
@@ -39,6 +48,8 @@ export const PROPOSAL_MESSAGES = {
   restricted: 'The owner turned off model processing or stopped using this photo, so no proposal is offered. A model request that was already sent may still count toward usage.',
   relationship: 'This change would break the relationship preserved for this arrangement. Nothing was changed. Keep that relationship or explicitly change it before trying again.',
   facing: 'The objects do not give a supported facing direction. Nothing was changed. Choose another position or direction.',
+  unchanged: 'The proposed change would leave the selected arrangement as it is, so nothing is offered to save.',
+  scene: 'The saved scene or its photos could not be verified, so no proposal is offered.',
 };
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -67,6 +78,27 @@ export function parseProposalRequest(body, { targetIds = null } = {}) {
   return request;
 }
 
+const TIME_MODES = ['unknown', 'reconfirm-parent'];
+
+// A memory proposal for one object of a selected saved alternative. The time
+// mode is the owner's own choice; the model never chooses a time.
+export function parseVariantProposalRequest(body, targetIds) {
+  const request = readable(body, ['requestId', 'baseEraRevision', 'targetId', 'timeMode', 'text', 'consent'],
+    ({ requestId, baseEraRevision, targetId, timeMode, text, consent }) =>
+      isRequestId(requestId) && Number.isInteger(baseEraRevision) && baseEraRevision >= 0 && targetIds.includes(targetId)
+      && TIME_MODES.includes(timeMode) && typeof text === 'string' && text.trim() !== '' && Array.from(text).length <= TEXT_LIMIT
+      && typeof consent === 'boolean');
+  if (request.consent !== true) throw new RequestError(403, 'Sending the photo and message to the model needs explicit consent.');
+  return request;
+}
+
+export function parseVariantApplyRequest(body) {
+  const request = readable(body, ['requestId', 'baseEraRevision', 'frontConfirmed', 'confirmed'], ({ requestId, baseEraRevision, frontConfirmed, confirmed }) =>
+    isRequestId(requestId) && Number.isInteger(baseEraRevision) && baseEraRevision >= 0 && typeof frontConfirmed === 'boolean' && typeof confirmed === 'boolean');
+  if (request.confirmed !== true) throw new RequestError(400, 'Confirm that you want to save this change as a new alternative.');
+  return request;
+}
+
 export const parseCancelRequest = (body) => readable(body, ['requestId'], ({ requestId }) => isRequestId(requestId));
 
 export const parseApplyRequest = (body) =>
@@ -78,11 +110,13 @@ export const parseUndoRequest = (body, { twoObjects = false } = {}) =>
     isRequestId(requestId) && isVersion(baseVersion) && isVersion(targetVersion)
     && (!twoObjects || typeof ruleChangeConfirmed === 'boolean'));
 
-export function newProposal({ id, requestId, baseVersion, text, statementId, now, targetId = null }) {
+// A main proposal is bound to a main version; a scoped one only to its
+// `scope` ({ kind: 'variant', parentVariantId, baseEraRevision, timeMode }).
+export function newProposal({ id, requestId, baseVersion, text, statementId, now, targetId = null, scope = null }) {
   return {
     id,
     requestId,
-    baseVersion,
+    ...(scope ? { scope: { ...scope } } : { baseVersion }),
     ...(targetId !== null && { targetId }),
     statement: { id: statementId, kind: 'human_memory', text, sha256: createHash('sha256').update(text, 'utf8').digest('hex'), modelConsent: true },
     createdAt: now,
@@ -94,14 +128,20 @@ export function newProposal({ id, requestId, baseVersion, text, statementId, now
     model: null,
     usage: null,
     responseId: null,
-    appliedVersion: null,
+    ...(scope ? { appliedVariantId: null } : { appliedVersion: null }),
   };
 }
 
 // Marks every unapplied proposal made for an older version as stale. A model
 // call still in flight keeps running; its late result is recorded but stays stale.
+// Proposals scoped to a saved alternative never follow the main version.
 export function staleProposals(proposals, version, now) {
-  return proposals.map((item) => (OPEN_PROPOSAL.has(item.status) && item.baseVersion < version ? { ...item, status: 'stale', updatedAt: now } : item));
+  return proposals.map((item) => (!item.scope && OPEN_PROPOSAL.has(item.status) && item.baseVersion < version ? { ...item, status: 'stale', updatedAt: now } : item));
+}
+
+// A new time assertion on a saved alternative makes its open scoped proposals stale.
+export function staleVariantProposals(proposals, parentVariantId, now) {
+  return proposals.map((item) => (item.scope?.parentVariantId === parentVariantId && OPEN_PROPOSAL.has(item.status) ? { ...item, status: 'stale', updatedAt: now } : item));
 }
 
 // Version 1 is the unedited build; every later version has a stored receipt.
@@ -180,19 +220,28 @@ export function anchorYaw(surface, [u, v], offset, targetId = TARGET_ID) {
 const plain = (value, max) => typeof value === 'string' && value.length <= max && !CONTROL.test(value);
 const filled = (value, max) => plain(value, max) && value.trim() !== '';
 
+// The plan must echo exactly what it was asked about: the main version, or the
+// selected alternative and its time revision. Returns a fixed code or null.
+function bindingProblem(plan, baseVersion, alternative) {
+  if (!alternative) return plan.baseVersion === baseVersion ? null : 'base_version';
+  if (plan.parentVariantId !== alternative.parentVariantId) return 'parent_variant_id';
+  return plan.baseEraRevision === alternative.baseEraRevision ? null : 'base_era_revision';
+}
+
 // Checks a parsed model plan against the scene it was asked about and derives
 // the absolute transform from the saved one. Returns { result } or
 // { error, code }: error is the fixed browser message, code a fixed category
 // for operator logs that never contains model, human or provider text.
 export function validatePlan(plan, context) {
   if (context.surface?.schema_version === 3) return validateCompositionPlan(plan, context);
-  const { sourceId, baseVersion, saved, surface, targetId: expectedTargetId = TARGET_ID } = context;
+  const { sourceId, baseVersion, saved, surface, targetId: expectedTargetId = TARGET_ID, alternative = null } = context;
   const reject = (code, error = PROPOSAL_MESSAGES.invalid) => ({ error, code });
-  if (!exactKeys(plan, PLAN_KEYS)) return reject('plan_keys');
+  if (!exactKeys(plan, alternative ? VARIANT_PLAN_KEYS : PLAN_KEYS)) return reject('plan_keys');
   if (!ACTIONS.includes(plan.action)) return reject('action');
   const { action, targetId, delta, yawDelta, anchor, question, reason } = plan;
   if (plan.sourceId !== sourceId) return reject('source_id');
-  if (plan.baseVersion !== baseVersion) return reject('base_version');
+  const binding = bindingProblem(plan, baseVersion, alternative);
+  if (binding) return reject(binding);
   if (!plain(reason, 400)) return reject('reason');
   if (surface?.schema_version === 2 && !surface.objects.some((item) => item.id === expectedTargetId)) return reject('context_target_id');
   // The first field, in fixed order, that must be null for this action but is not.
@@ -219,6 +268,7 @@ export function validatePlan(plan, context) {
     const field = extra(['delta', 'anchor']);
     if (field) return reject(`rotate_${field}_not_null`);
     if (!finite(yawDelta)) return reject('rotate_yaw_delta');
+    if (noTurn(alternative, yawDelta)) return result({ offset: [...saved.offset], yaw: saved.yaw });
     return result({ offset: [...saved.offset], yaw: wrapYaw(saved.yaw + yawDelta) });
   }
   const field = extra(['delta', 'yawDelta']);
@@ -232,13 +282,14 @@ export function validatePlan(plan, context) {
   return result({ offset: [...saved.offset], yaw });
 }
 
-export function validateCompositionPlan(plan, { sourceIds, baseVersion, saved, surface, targetId, arrangement }) {
+export function validateCompositionPlan(plan, { sourceIds, baseVersion, saved, surface, targetId, arrangement, alternative = null }) {
   const reject = (code, error = PROPOSAL_MESSAGES.invalid) => ({ error, code });
-  if (!exactKeys(plan, COMPOSITION_PLAN_KEYS)) return reject('composition_plan_keys');
+  if (!exactKeys(plan, alternative ? COMPOSITION_VARIANT_PLAN_KEYS : COMPOSITION_PLAN_KEYS)) return reject('composition_plan_keys');
   if (!COMPOSITION_ACTIONS.includes(plan.action)) return reject('composition_action');
   if (!Array.isArray(sourceIds) || sourceIds.length !== 2 || new Set(sourceIds).size !== 2 || !sourceIds.every(isRequestId)
     || !Array.isArray(plan.sourceIds) || plan.sourceIds.length !== 2 || !plan.sourceIds.every((id, index) => id === sourceIds[index])) return reject('composition_source_ids');
-  if (plan.baseVersion !== baseVersion) return reject('base_version');
+  const binding = bindingProblem(plan, baseVersion, alternative);
+  if (binding) return reject(binding);
   if (!plain(plan.reason, 400)) return reject('reason');
   const ids = surface?.components?.map((item) => item.id);
   if (!Array.isArray(ids) || ids.length !== 2 || !['object-1', 'object-2'].every((id) => ids.includes(id)) || !ids.includes(targetId)
@@ -270,6 +321,7 @@ export function validateCompositionPlan(plan, { sourceIds, baseVersion, saved, s
     const field = extra(['delta', 'faceObjectId']);
     if (field) return reject(`rotate_${field}_not_null`);
     if (!finite(plan.yawDelta)) return reject('rotate_yaw_delta');
+    if (noTurn(alternative, plan.yawDelta)) return result(copyPose(saved));
     return result(rotatePoseYaw(saved, plan.yawDelta));
   }
   const field = extra(['delta', 'yawDelta']);

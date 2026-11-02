@@ -812,6 +812,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       // New alternatives or recollections change story and sharing choices.
       onChanged: () => { sharesPanel?.refreshOptions(); storiesPanel?.refresh(); },
       editor: editorFor('collaboration'),
+      memorySources: [sourceFor(job.sourceId)],
+      memoryTextureUrl: assetUrl(jobId, 'texture.jpg'),
+      revisionGuide: (transform, point) => viewer?.showGuide(transform, point) ?? null,
       // True only when the 3D view actually drew the transform.
       showTransform(transform) {
         proposalPreview = transform;
@@ -1828,6 +1831,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         // New alternatives or recollections change story and sharing choices.
         onChanged: () => { sharesPanel?.refreshOptions(); storiesPanel?.refresh(); },
         editor: editorFor('collaboration'),
+        memoryTextureUrl: composition ? null : texture,
+        memorySources: composition ? (job.sourceBindings ?? []).map((binding) => sourceFor(binding.sourceId)) : [sourceFor(job.sourceId)],
+        revisionGuide: (transform, point, targetId) => viewer?.showGuide(transform, point, targetId) ?? null,
         targets,
         showTransform(transform) {
           proposalPreview = asArrangement(transform);

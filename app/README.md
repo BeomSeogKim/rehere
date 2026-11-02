@@ -364,6 +364,13 @@ earlier saved position creates a new version and preserves intervening history,
 statements and originals. Provider failure produces an explicit failed state;
 there is no prerecorded or local keyword-parser substitute for a model call.
 
+The main planner edits the current saved version. To plan from a particular
+saved alternative instead, show it and choose **Make a revised alternative**
+then **Remembered instruction**. Its plan uses that parent's arrangement and
+explicit time choice; approval creates a new child without overwriting main
+or parent. See [alternative memory proposals](COLLABORATION.md#revise-an-alternative-from-a-remembered-instruction)
+for model grants, scoped recovery and preview requirements.
+
 A collapsed "Saved proposals" list shows every stored proposal with its
 target, request time (or "time unknown"), status and the start of its
 statement. Reviewing one is local: nothing is sent, planned or previewed, and

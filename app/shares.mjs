@@ -250,8 +250,8 @@ export function arrangementOrigin(manifest, view) {
     if (view.kind === 'version') return versionOrigin(manifest, view.version);
     const variant = variantsOf(manifest).find((item) => item.id === view.variantId);
     if (variant?.kind === 'candidate') return 'alternative';
-    // An owner revision's own change was made by hand, never by a contributor.
-    if (variant?.kind === 'revision') return 'manual';
+    // An owner revision saved from a model proposal is a memory change; one the owner placed by hand is manual.
+    if (variant?.kind === 'revision') return variant.revision?.proposalId ? 'memory' : 'manual';
     if (variant?.kind !== 'baseline') return 'unknown';
     // A baseline counts as its parent version only when it is exactly that
     // version: the same number, transforms and rule.
