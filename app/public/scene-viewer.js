@@ -74,7 +74,9 @@ export async function createViewer(viewport, surface, textureUrl, label, { onDra
 async function setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, isReleased, fullObject) {
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    // A full object clears to transparent, so a CSS hatch behind the canvas
+    // marks pixels the scene does not draw; other scenes stay opaque.
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: Boolean(fullObject) });
   } catch {
     throw new Error('webgl');
   }
@@ -159,7 +161,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       mesh.material.dispose();
     }
   });
-  objects.scene.background = new THREE.Color(0x161b20);
+  objects.scene.background = fullObject ? null : new THREE.Color(0x161b20);
 
   // The vertical field of view follows from the horizontal one and the photo's
   // aspect, as the surface builder computes it.
@@ -213,6 +215,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   const canvas = renderer.domElement;
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', label);
+  canvas.classList.toggle('full-object-unknown', Boolean(fullObject));
   viewport.append(canvas);
 
   const controls = new OrbitControls(camera, canvas);

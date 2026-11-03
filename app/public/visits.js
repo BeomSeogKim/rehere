@@ -89,7 +89,7 @@ function eraText(era, labelOf) {
 // Shown beside the scene for every view, so it stays in sight while scrolling.
 const SCENE_NOTE = 'Shape and depth: a model estimate from this one photo, not a measurement. Areas the photo did not show are left empty.';
 const COMPOSITION_NOTE = 'Two photographed surfaces, placed by the owner. Position, orientation and relative scale are assumptions, not measurements or automatic photo alignment. Each photo’s depth remains a model estimate. Unseen areas stay empty.';
-const FULL_OBJECT_NOTE = 'The room and the object are estimates from one photo, not measurements. The object’s unseen sides were not photographed and its front is not known. Areas the photo did not show are left empty.';
+const FULL_OBJECT_NOTE = 'The room and the object are estimates from one photo, not measurements. The object’s unseen sides were not photographed and its front is not known. In the 3D view, hatching marks background hidden by the object and gaps in the room estimate; it is not a reconstructed surface.';
 const FULL_OBJECT = 'source-photo-full-object-v1';
 const MAX_OBJECT_BYTES = 128 * 1024 * 1024;
 const MAX_OUTLINE_BYTES = 32 * 1024 * 1024;

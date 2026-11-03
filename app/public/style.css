@@ -244,6 +244,8 @@ input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px 
 
 .space-viewport { height: min(60vh, 520px); min-height: 280px; border-radius: var(--radius); overflow: hidden; background: #161b20; }
 .space-viewport canvas { display: block; touch-action: none; }
+/* On the canvas, not the viewport, so photo-framing margins stay plain. */
+.space-viewport canvas.full-object-unknown { background-color: #161b20; background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.18) 0 2px, transparent 2px 10px); }
 .space-camera { justify-content: flex-start; margin-bottom: 8px; }
 .space-camera[hidden] { display: none; }
 .space-edit { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; margin: 16px 0; }

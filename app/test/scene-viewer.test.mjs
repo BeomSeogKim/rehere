@@ -177,6 +177,7 @@ describe('photo framing', () => {
       const scale = Math.min(viewportSize[0] / source[0], viewportSize[1] / source[1]);
       const [fitWidth, fitHeight] = [source[0] * scale, source[1] * scale];
       const [rendered, canvas] = [rendererState().size, viewport.children.at(-1)];
+      assert.equal(canvas.classList.contains('full-object-unknown'), false, 'only a full object uses the unknown hatch');
       close(rendered[0], fitWidth, 'canvas width');
       close(rendered[1], fitHeight, 'canvas height');
       close(Number.parseFloat(canvas.style.marginLeft), (viewportSize[0] - fitWidth) / 2, 'left offset');

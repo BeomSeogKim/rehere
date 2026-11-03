@@ -93,7 +93,7 @@ function photographedSideControls() {
 }
 
 const OBJECT_PHOTO_LABEL = 'Photo · The drawn line outlines the selected object; it is not part of the photo.';
-const OBJECT_ESTIMATE_LABEL = 'Estimated shape · Dark areas are unknown: where the selected object covered the photo, and gaps in the estimated room.';
+const OBJECT_ESTIMATE_LABEL = 'Estimated shape · Hatching marks background hidden by the selected object and gaps in the room estimate.';
 const SCENE_NOTE = 'A partial scene from one photo. Only surfaces visible in the photo exist: dark gaps, hidden areas and the backs of objects are unknown and left empty. Depth is a relative model estimate, not a measurement.';
 
 function el(tag, { onclick, ...props } = {}, children = []) {
@@ -1783,7 +1783,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       ...(savedFullObject ? [el('p', { textContent: 'Memory changes to this estimated object are saved as separate alternatives under “Compare saved scenes”. Start one from the current scene; the current scene itself stays unchanged.' })] : [nextActions(memorySection, collaborationSection, sharesSection)]),
     ]);
     const workspace = sceneWorkspace(
-        [cameraActions, explore.status, photoSide.status, comparisonBar, objectReviewHeading, objectReviewLabel, comparisonFrame, objectReview, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: savedFullObject ? 'The room and object are estimates from the photo. The object’s unseen sides were not photographed; empty areas remain unknown.' : SCENE_NOTE })],
+        [cameraActions, explore.status, photoSide.status, comparisonBar, objectReviewHeading, objectReviewLabel, comparisonFrame, objectReview, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: savedFullObject ? 'The room and object are estimates from the photo. The object’s unseen sides were not photographed. In the 3D view, hatching marks background hidden by the object and gaps in the room estimate; it is not a reconstructed surface.' : SCENE_NOTE })],
         [
           placeLanding,
           ...(!savedFullObject ? [objectSection] : []),

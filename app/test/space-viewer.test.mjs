@@ -588,7 +588,7 @@ describe('source-bound full object owner flow', () => {
     assert.equal(photo.hidden, true);
     assert.equal(mask.hidden, true);
     assert.equal(stroke.hidden, true, 'the stroke is not drawn over the estimate');
-    assert.ok(view.find((node) => node.textContent === 'Estimated shape · Dark areas are unknown: where the selected object covered the photo, and gaps in the estimated room.').length);
+    assert.ok(view.find((node) => node.textContent === 'Estimated shape · Hatching marks background hidden by the selected object and gaps in the room estimate.').length);
     assert.equal(views[0].interactive, true);
     assert.deepEqual(views[0].options, { focus: false }, 'restoring exploration does not steal focus');
     assert.equal(view.button('Use this estimate at the photo position').disabled, false);
@@ -802,7 +802,9 @@ describe('full object viewer asset checks', () => {
         assert.equal(count('texture.dispose'), 1, `${failure} releases the texture`);
       }
       mode = 'valid';
-      const viewer = await rawCreateViewer(new FakeElement('div'), surface(), '/texture', 'Test', { fullObject: binding });
+      const holder = new FakeElement('div');
+      const viewer = await rawCreateViewer(holder, surface(), '/texture', 'Test', { fullObject: binding });
+      assert.equal(holder.children.at(-1).classList.contains('full-object-unknown'), true, 'undrawn pixels show the unknown hatch');
       assert.deepEqual(new Uint8Array(await viewer.outlineMaskBlob().arrayBuffer()), new Uint8Array(maskBytes), 'the photo overlay uses the checked mask bytes');
       viewer.dispose();
       assert.equal(viewer.outlineMaskBlob(), null);
