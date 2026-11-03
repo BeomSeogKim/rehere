@@ -50,9 +50,13 @@ python app/spatial/full_object.py --validate-outline "$OUTLINE" \
 ```
 
 The outline path is absolute. PNG bytes are capped at 32 MiB and dimensions at
-32 million pixels. A complete, single-frame, opaque binary grayscale, RGB or
-RGBA PNG is required; palette and 16-bit PNGs are unsupported. RGB channels
-must agree. Empty/full masks reject. Success prints one JSON receipt with
+32 million pixels. A complete, single-frame PNG must decode to opaque pixels
+with equal RGB channels at 0 or 255. Admitted formats are grayscale 1/2/4/8-bit,
+RGB or RGBA 8/16-bit, and grayscale with alpha 16-bit, including Adam7
+interlace. Admitted 16-bit samples use their high byte before binary
+validation. Palette, 16-bit grayscale and 8-bit grayscale with alpha are
+refused. Any transparent or nonbinary decoded pixel rejects, as do empty/full
+masks. Success prints one JSON receipt with
 `width`, `height`, `maskSha256`, exclusive `bounds`, `selectedPixels`,
 `gridWidth`, `gridHeight` and strictly ascending `coveredGridIndices`.
 Grid dimensions are at least two with at most 262144 nodes. Grid node `(i,j)`

@@ -17,7 +17,8 @@ local depth estimation and SAM2 segmentation. People can inspect model
 proposals, explore the visible surfaces, preview foreground changes and save
 versioned transforms. A scene can also hold exactly two named objects, each
 moved separately, with one explicit left/right rule from the original
-viewpoint; this is not collision checking or a full room. A separately
+viewpoint, with bounded overlap checks between named visible surfaces.
+These do not establish whole-room or movement-path clearance. A separately
 enabled Meta planner connects written
 memories to bounded changes with explicit approval and preserved version
 history. Unseen areas remain empty. Local owner sessions, scoped contributor
@@ -28,8 +29,9 @@ selected arrangements and permitted writing behind revocable local links.
 Owners can narrow imported source uses or stop dependent use without rewriting
 originals; current restrictions also govern existing snapshots.
 Imported recordings can be attached to exact saved arrangements with
-human-supplied captions and explicitly included in visitor snapshots. Photo or
-voice contributions, multi-view alignment and hosted operation remain absent.
+human-supplied captions and explicitly included in visitor snapshots.
+Scoped contributors can submit photos and recordings for owner review.
+Multi-view alignment and hosted operation remain absent.
 
 The production deployment stack is not selected.
 
