@@ -193,6 +193,28 @@ describe('source details controls', () => {
     assert.equal(byType(root, 'date')[0].value, '1999-07-04');
   });
 
+  it('says an empty date stays unknown, and only shows or hides that line', () => {
+    const EMPTY = 'No date entered; it will be saved as unknown.';
+    const details = createSourceDetails();
+    const root = renderSourceControls(fakeDocument, { details, state: {}, label: 'photo 1' });
+    const [date] = byType(root, 'date');
+    const [status] = root.findAll((node) => node.textContent === EMPTY);
+    assert.equal(status.hidden, false, 'shown while nothing is entered');
+    assert.equal(date.attributes['aria-describedby'], `${date.id}-hint ${status.id}`, 'the existing hint stays linked first');
+    assert.equal(toSourceInput(details).dates.capturedOn, null);
+    date.value = '1999-07-04';
+    date.fire('input');
+    assert.equal(status.hidden, true, 'hidden once a date is chosen');
+    assert.equal(toSourceInput(details).dates.capturedOn, '1999-07-04', 'the chosen date is kept as entered');
+    date.value = '';
+    date.fire('change');
+    assert.equal(status.hidden, false, 'shown again after clearing');
+    date.fire('input');
+    assert.equal(toSourceInput(details).dates.capturedOn, null, 'a cleared date is saved as unknown');
+    const filled = renderSourceControls(fakeDocument, { details: { ...createSourceDetails(), capturedOn: '2001-01-01' }, state: {}, label: 'photo 2' });
+    assert.equal(filled.findAll((node) => node.textContent === EMPTY)[0].hidden, true, 'hidden for an existing date');
+  });
+
   it('labels the file timestamp as file metadata only for files', () => {
     const withFile = renderSourceControls(fakeDocument, {
       details: createSourceDetails(),

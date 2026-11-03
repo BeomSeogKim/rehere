@@ -248,6 +248,22 @@ export function renderSourceControls(doc, { details, state, label, file = null, 
   captured.addEventListener('input', () => {
     details.capturedOn = captured.value;
   });
+  // Some browsers draw an empty date input with a placeholder date, so an
+  // empty input also says plainly that the date stays unknown. It only shows
+  // or hides this line; the value is never set or inferred.
+  const dateEmpty = doc.createElement('p');
+  dateEmpty.className = 'hint';
+  dateEmpty.textContent = 'No date entered; it will be saved as unknown.';
+  const showDateEmpty = () => { dateEmpty.hidden = Boolean(captured.value); };
+  captured.addEventListener('input', showDateEmpty);
+  captured.addEventListener('change', showDateEmpty);
+  showDateEmpty();
+  const withDateEmpty = (wrap) => {
+    dateEmpty.id = `${captured.id}-empty`;
+    captured.setAttribute('aria-describedby', `${captured.id}-hint ${dateEmpty.id}`);
+    wrap.append(dateEmpty);
+    return wrap;
+  };
 
   root.append(
     summary,
@@ -256,7 +272,7 @@ export function renderSourceControls(doc, { details, state, label, file = null, 
     field(doc, 'Source type', origin),
     field(doc, 'Reference', textInput(doc, details, 'reference', refresh), 'A link or note about where it came from.'),
     permissions,
-    field(doc, 'Date taken', captured, 'Leave blank if unknown.'),
+    withDateEmpty(field(doc, 'Date taken', captured, 'Leave blank if unknown.')),
     field(doc, 'Approximate period', textInput(doc, details, 'estimatedPeriod', refresh), 'For example, summer 1998. Leave blank if unknown.'),
   );
 

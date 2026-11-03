@@ -205,6 +205,9 @@ audio { width: 100%; margin-top: 12px; }
 .source-details dl { margin: 8px 0 0; display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); gap: 4px 12px; }
 .source-details dt { color: var(--muted); }
 .source-details dd { margin: 0; overflow-wrap: anywhere; }
+/* A saved photo card is too narrow for two columns: each label sits above its value. */
+#viewer-photos .source-details dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
+#viewer-photos .source-details dd { margin-bottom: 6px; }
 input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
 .space { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
