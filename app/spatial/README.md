@@ -32,6 +32,90 @@ Recording checks separately need FFmpeg.
 This recipe enables owner photo checking, not reconstruction or every
 contributor/model image helper. For those, use the full environment below.
 
+## Full-object estimate worker
+
+`full_object.py` is a separate offline worker for a confirmed full-source
+outline and a one-photo, one-object legacy parent surface. It does not check
+permissions, publish jobs, or grant permission to run a model. The caller owns
+source grants, immutable inputs, no-network process isolation, timeout, memory
+supervision and atomic publication. Missing runtime or mismatched pins fail
+without downloads or retries. Development tests use synthetic geometry only.
+
+Pillow alone is sufficient for the model-free validator:
+
+```sh
+python app/spatial/full_object.py --validate-outline "$OUTLINE" \
+  --width "$WIDTH" --height "$HEIGHT" \
+  --grid-width "$GRID_WIDTH" --grid-height "$GRID_HEIGHT"
+```
+
+The outline path is absolute. PNG bytes are capped at 32 MiB and dimensions at
+32 million pixels. A complete, single-frame, opaque binary grayscale, RGB or
+RGBA PNG is required; palette and 16-bit PNGs are unsupported. RGB channels
+must agree. Empty/full masks reject. Success prints one JSON receipt with
+`width`, `height`, `maskSha256`, exclusive `bounds`, `selectedPixels`,
+`gridWidth`, `gridHeight` and strictly ascending `coveredGridIndices`.
+Grid dimensions are at least two with at most 262144 nodes. Grid node `(i,j)`
+maps to source pixel `floor(i*(W-1)/(GW-1)+.5)`,
+`floor(j*(H-1)/(GH-1)+.5)`. An empty grid selection is valid validation output
+but cannot produce an object. No source pixels leave the validator.
+
+The separately admitted build command is:
+
+```sh
+python app/spatial/full_object.py --image "$ORIGINAL" --mask "$OUTLINE" \
+  --parent-surface "$PARENT_SURFACE" --output "$EMPTY_OUTPUT_DIRECTORY"
+```
+
+Only `object.glb` and `object.json` are written into an existing empty output
+directory. The receipt binds actual source, outline, parent and GLB hashes.
+Inputs are rehashed before output. A successful worker is still an estimate,
+not verified object identity, visual quality or historical geometry; the
+application must independently validate and publish the result.
+
+The exact foreground crop includes the maximum selected row and column.
+Padding centres it in a square with floor-half on the leading side, then uses
+`int(squareSize/.85)` with the same remainder placement. Binary alpha is
+composited against `.5` gray, truncated to byte 127; no morphology or mask
+inference is performed. The pinned model performs its own input resize.
+
+Model loading is lazy. An already provisioned compatible CPU environment must
+include PyTorch, NumPy, Pillow, OmegaConf, Transformers, Trimesh, the pinned
+TripoSR dependencies and its compiled CPU torchmcubes extension. The photo
+worker requirements are not a substitute for that separate environment.
+Configure `FULL_OBJECT_TRIPOSR_SOURCE`, `FULL_OBJECT_MODEL_DIR` and
+`FULL_OBJECT_DINO_CONFIG` to existing local files/directories. No private
+machine paths belong in source. The worker verifies the source files at
+TripoSR commit `107cefdc244c39106fa830359024f6a2f1c78871`, model revision
+`5b521936b01fbe1890f6f9baed0254ab6351c04a`, checkpoint/config hashes and DINO
+config revision `f205d5d8e640a89a2b8ef0369670dfc37cc07fc2` against embedded
+hashes before loading and after extraction. Extra Python source in the
+TripoSR package rejects. Its only DINO hub lookup resolves to the pinned
+local config. Offline flags and forced weights-only loading are set before
+model imports, the unsafe override is removed, and `torch.load` explicitly
+uses `weights_only=True`. There is no unsafe fallback. Inference uses CPU
+FP32, four intra-op threads and one inter-op thread, one guarded top-level
+forward, chunk 8192 and extraction resolution 256.
+
+The GLB contains one internal triangle mesh and linear vertex colours, with
+no images, URIs, extensions, animation, skins or morphs, capped at 128 MiB.
+No additional sRGB transfer is applied to the extractor's colours. Bounds
+and pivot are computed from persisted float32 positions. Parent-grid depth
+uses the ordinary median of all mask-covered node depths. Missing support
+rejects. The exclusive outline bbox centre and height set estimated position
+and uniform scale using the parent horizontal FOV. The model's +Z-up frame
+maps by `(x,y,z) -> (y,z,x)`, quaternion `[-.5,-.5,-.5,.5]`. The child uses
+`scale * R(vertex-modelPivot)` inside a group at `initial.position + offset`;
+camera-Y yaw belongs to that group. Position components must be within
+`[-10,10]` and scale within `[.05,5]`, inclusive; outside values reject without
+clamping. These support limits do not establish physical validity or a floor
+contact. Source-camera placement is nonmetric and has no claimed physical front.
+
+Exit codes are 0 success, 2 unsupported input, 3 unavailable runtime,
+4 unusable geometry/unsupported pose bounds and 5 output failure. Failures
+have fixed public messages and no success JSON. Run the focused no-model
+tests from `app/spatial` with `python -B -m unittest test_full_object`.
+
 ## Reconstruction setup
 
 Run from the repository root. If the photo-checking environment already

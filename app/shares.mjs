@@ -221,6 +221,7 @@ export function savedView(manifest, view) {
     if (!Number.isInteger(view.version) || view.version < 1 || view.version > manifest.edit.version) return null;
     const edit = view.version === 1 ? initialEdit(manifest) : manifest.edits.find((item) => item.version === view.version);
     if (!edit) return null;
+    if (edit.fullObject) throw fail(409, 'Sharing this full-object version is not available yet.');
     return {
       edit: editFields(manifest, edit), dependencies: versionDependencies(manifest, view.version), era: null, eraRevision: null,
       label: `Saved version ${view.version}`,
@@ -229,6 +230,9 @@ export function savedView(manifest, view) {
   const variants = variantsOf(manifest);
   const variant = variants.find((item) => item.id === view.variantId);
   if (!variant) return null;
+  if (variant.edit?.fullObject || manifest.edits.some((item) => item.version === variant.parentVersion && item.fullObject)) {
+    throw fail(409, 'Sharing this full-object version is not available yet.');
+  }
   const label = variant.kind === 'baseline' ? 'Saved reconstruction' : `Alternative arrangement ${variants.filter((item) => item.kind !== 'baseline').indexOf(variant) + 1}`;
   return {
     edit: editFields(manifest, variant.edit), dependencies: [...variant.contributionIds],

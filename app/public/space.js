@@ -117,6 +117,17 @@ const postJson = (url, payload) =>
 
 const serverError = (result, fallback) => (typeof result.body?.error === 'string' ? result.body.error : fallback);
 
+function fullObjectViewerBinding(jobUrl, binding) {
+  if (!binding || typeof binding.buildId !== 'string' || typeof binding.outlineId !== 'string'
+      || !/^[a-f0-9]{64}$/.test(binding.sha256) || !/^[a-f0-9]{64}$/.test(binding.outlineSha256)
+      || binding.asset !== 'object.glb' || !binding.initial) throw new Error('full-object');
+  return {
+    ...binding,
+    maskUrl: `${jobUrl}/full-object/outlines/${encodeURIComponent(binding.outlineId)}/mask.png`,
+    assetUrl: `${jobUrl}/full-object/builds/${encodeURIComponent(binding.buildId)}/assets/object.glb`,
+  };
+}
+
 // Mounts partial-scene building and viewing for one saved memory. Every request
 // is bound to this draft; dispose() stops polling and releases the 3D view so
 // nothing from this memory updates the screen after navigation.
@@ -144,6 +155,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   let storiesPanel = null;
   let blockedPanel = null;
   let inspection = null;
+  let objectEditor = null;
+  let objectPreview = null;
+  let objectStageCleanup = null;
+  let objectTimer = null;
   let currentPlace = draft.place;
   let placeHeading = null;
   // The selected object's links to regions in other photos, inside its photo
@@ -248,6 +263,14 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     placeHeading = null;
     inspection?.dispose();
     inspection = null;
+    objectEditor?.dispose();
+    objectEditor = null;
+    objectStageCleanup?.();
+    objectStageCleanup = null;
+    objectPreview?.dispose();
+    objectPreview = null;
+    if (objectTimer !== null) clearTimeout(objectTimer);
+    objectTimer = null;
     if (handoff) status.textContent = '';
     handoff = null;
     readyAction.replaceChildren();
@@ -801,6 +824,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const photoSide = photographedSideControls();
     const side = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect from the side' });
     const explore = createExploreToggle();
+    const savedFullObject = job.edit?.fullObject ?? null;
     const session = createEditSession(job.edit, () => crypto.randomUUID());
     const axes = [
       ['Left / right', OFFSET_LIMIT, 0.01],
@@ -867,7 +891,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
             : session.uncertain
               ? `Rehere could not confirm whether your last change was saved; the saved position may be newer than version ${version}. Load the saved version to check${dirty ? ', or apply and save again' : ''}.`
               : locked
-                ? `Manual changes are paused while a memory proposal is shown or saved. The saved position is version ${version}.`
+                ? `Manual changes are paused while another change is being reviewed or saved. The saved position is version ${version}.`
                 : dirty
                   ? `Preview only. Not saved yet; the saved position is version ${version}.`
                   : `Saved, version ${version}.`;
@@ -967,6 +991,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         openScene(jobId);
         return;
       }
+      if (JSON.stringify(latest.body.edit.fullObject ?? null) !== JSON.stringify(savedFullObject)) {
+        openScene(jobId);
+        return;
+      }
       session.replaceSaved(latest.body.edit);
       conflict = false;
       typing = null;
@@ -1013,6 +1041,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const comparisonBox = el('div', { className: 'box-overlay', hidden: true });
     comparisonBox.setAttribute('aria-hidden', 'true');
     const comparisonFrame = el('div', { className: 'visit-compare-frame memory-comparison-frame' }, [viewport, comparisonPhoto, comparisonBox]);
+    const objectReviewHeading = el('h3', { textContent: 'Review the estimated shape', tabIndex: -1, hidden: true });
+    const objectReviewLabel = el('p', { className: 'hint', hidden: true });
+    const objectReview = el('div', { className: 'object-review', hidden: true });
+    let objectInspector = null;
     const comparisonWords = el('p', { className: 'memory-comparison-words', tabIndex: 0 });
     const comparisonAction = el('p');
     const comparisonStatus = el('p', { className: 'hint', role: 'status' });
@@ -1168,7 +1200,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const fullWords = el('p', { className: 'place-words' });
     const fullWordsDetails = el('details', { className: 'source-details', hidden: true }, [el('summary', { textContent: 'Read all the words' }), fullWords]);
     const placeStatus = el('p', { className: 'hint', role: 'status' });
-    const placeAction = el('button', { type: 'button', textContent: 'Change from a memory' });
+    const placeAction = el('button', { type: 'button', className: 'secondary', textContent: 'Change from a memory' });
+    const improveObject = el('button', { type: 'button', textContent: 'Explore an estimated shape' });
     const visitAction = el('button', { type: 'button', className: 'secondary', textContent: 'Prepare a visit', hidden: true });
     let placeSummary = { kind: 'checking' };
     let lastWords = null;
@@ -1197,7 +1230,12 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       } else focusSection(memorySection);
     });
     visitAction.addEventListener('click', () => focusSection(sharesSection, true));
-    inspection = inspectObject({
+    improveObject.addEventListener('click', () => {
+      objectSection.open = true;
+      startObjectOutline();
+      objectSection.scrollIntoView?.({ block: 'start' });
+    });
+    inspection = savedFullObject ? null : inspectObject({
       job, jobId, token, depth: true,
       state: () => ({ target: 'selected-foreground', version: session.saved.version, ready: !session.uncertain && !conflict && !saving && !reloading }),
       describe: () => ({
@@ -1212,10 +1250,17 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       el('p', { className: 'hint', textContent: 'The scene begins with one photograph. Its shape and depth are estimates; a memory is someone’s account.' }),
       placeWords,
       fullWordsDetails,
-      el('div', { className: 'actions' }, [placeAction, inspection.trigger, originalPhoto, visitAction]),
+      ...(!savedFullObject ? [el('p', { className: 'hint', textContent: 'Check the object in the photo, then review an estimated shape.' })] : []),
+      el('div', { className: 'actions' }, [...(!savedFullObject ? [improveObject] : []), placeAction, ...(inspection ? [inspection.trigger] : []), originalPhoto, visitAction]),
       placeStatus,
     ]);
     placeLanding.setAttribute('aria-label', 'This place');
+    if (savedFullObject) {
+      placeWords.textContent = 'This object is an estimate from the photo. Its hidden sides were not photographed.';
+      placeAction.hidden = true;
+      visitAction.hidden = true;
+      photoSide.button.hidden = true;
+    }
     const updatePlaceSummary = (summary) => {
       placeSummary = summary;
       placeAction.textContent = summary.kind === 'proposal' ? 'Compare this change' : 'Change from a memory';
@@ -1238,9 +1283,480 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       }
       if (changed) fullWordsDetails.open = false;
       if (summary.kind !== 'checking') lastWords = words;
-      visitAction.hidden = session.saved.version <= 1;
+      visitAction.hidden = Boolean(savedFullObject) || session.saved.version <= 1;
       placeStatus.textContent = '';
     };
+
+    // This path starts from the already source-bound, single-object scene.
+    // The parent remains the source of truth for grants, version and bytes.
+    const objectSection = el('details', { className: 'source-details' });
+    const objectSummary = el('summary', { textContent: 'Make this object viewable from more sides' });
+    const objectStatus = el('p', { className: 'hint', role: 'status' });
+    const objectStatusHome = el('div', {}, [objectStatus]);
+    const objectWork = el('div');
+    const objectLists = el('div');
+    const recoveryChoice = el('div', { className: 'actions' });
+    const outlineButton = el('button', { type: 'button', className: 'secondary', textContent: 'Check and refine the outline' });
+    const recoveryButton = el('button', { type: 'button', className: 'secondary', textContent: 'Find saved outlines and shapes' });
+    const objectRoot = `${base}/${jobId}/full-object`;
+    const parentHash = job.derivedAssets?.find((asset) => asset.name === 'surface.json')?.sha256;
+    const sourceHash = surfaceResult.body?.source?.sha256;
+    const [sourceWidth, sourceHeight] = surfaceResult.body?.source?.image_size ?? [];
+    let objectOutline = null;
+    let outlineAttempt = null;
+    let outlinePending = false;
+    let buildAttempt = null;
+    let useAttempt = null;
+    let useBuildId = null;
+    let previewGeneration = 0;
+    let objectPollGeneration = 0;
+    let objectBusy = false;
+    let missingOutlineId = null;
+    let objectStage = null;
+    const knownOutlines = new Map();
+    const objectCurrent = () => !disposed && token === panelGeneration;
+    const validHash = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+    const parentReady = () => validHash(parentHash) && validHash(sourceHash)
+      && surfaceResult.body?.source?.source_id === job.sourceId
+      && Number.isSafeInteger(sourceWidth) && Number.isSafeInteger(sourceHeight)
+      && sourceWidth > 0 && sourceHeight > 0 && sourceWidth * sourceHeight <= 32_000_000;
+    const validOutline = (value) => typeof value?.outlineId === 'string' && value.sourceId === job.sourceId
+      && value.sourceSha256 === sourceHash && validHash(value.maskSha256) && value.confirmed === true
+      && value.width === sourceWidth && value.height === sourceHeight && validHash(value.parentSurfaceSha256)
+      && Number.isInteger(value.baseVersion) && value.baseVersion >= 1;
+    const cleanObjectParent = () => !saving && !reloading && !conflict && !session.uncertain
+      && !session.isDirty() && invalid.size === 0 && lockedBy.size === 0;
+    const unlockObject = () => { lockedBy.delete('object'); showEdit(); };
+    const restoreObjectStage = () => {
+      if (!objectStage) return;
+      const wasInteractive = objectStage.wasInteractive;
+      objectStage.cleanup();
+      objectStage.holder.remove(); objectStage.photo.remove(); objectStage.mask.remove();
+      objectStage = null;
+      comparisonFrame.classList.toggle('is-photo', false);
+      comparisonFrame.classList.toggle('is-object-review', false);
+      objectStatus.remove(); objectStatusHome.append(objectStatus);
+      objectReview.replaceChildren(); objectReview.hidden = true;
+      objectReviewHeading.hidden = objectReviewLabel.hidden = true;
+      if (objectInspector) objectInspector.hidden = false;
+      viewport.hidden = !viewer;
+      cameraActions.hidden = explore.status.hidden = photoSide.status.hidden = !viewer;
+      if (viewer && wasInteractive) viewer.setInteractive(true, { focus: false });
+      explore.attach(viewer);
+    };
+    const closeObjectWork = () => {
+      previewGeneration += 1;
+      objectPollGeneration += 1;
+      objectEditor?.dispose(); objectEditor = null;
+      objectPreview?.dispose(); objectPreview = null;
+      restoreObjectStage();
+      if (objectTimer !== null) clearTimeout(objectTimer);
+      objectTimer = null;
+      objectWork.replaceChildren();
+      recoveryChoice.replaceChildren();
+      unlockObject();
+    };
+    const putOutline = async (payload) => {
+      if (!objectCurrent()) return false;
+      if (!outlineAttempt || outlineAttempt.hash !== payload.maskSha256) {
+        outlineAttempt = { id: crypto.randomUUID(), hash: payload.maskSha256 };
+      }
+      const attempt = outlineAttempt;
+      outlinePending = true;
+      recoveryChoice.replaceChildren();
+      const result = await request(`${objectRoot}/outlines/${attempt.id}`, {
+        method: 'PUT', headers: {
+          'Content-Type': 'image/png', 'X-Source-Id': job.sourceId, 'X-Source-SHA256': sourceHash,
+          'X-Mask-SHA256': payload.maskSha256, 'X-Image-Width': String(sourceWidth), 'X-Image-Height': String(sourceHeight),
+          'X-Crop-XYXY': payload.crop.join(','), 'X-Outline-Confirmed': 'true',
+          'X-Parent-Surface-SHA256': parentHash, 'X-Base-Version': String(session.saved.version),
+        }, body: payload.mask,
+      });
+      outlinePending = false;
+      if (!objectCurrent() || outlineAttempt !== attempt) return false;
+      const value = result.body;
+      if (result.ok && validOutline(value) && value.outlineId === attempt.id && value.maskSha256 === payload.maskSha256
+          && value.baseVersion === session.saved.version && value.parentSurfaceSha256 === parentHash) {
+        objectOutline = value;
+        knownOutlines.set(value.outlineId, value);
+        outlineAttempt = null;
+        objectStatus.textContent = 'Outline saved. You can now request an estimated object.';
+        showOutlineActions();
+        return true;
+      }
+      objectStatus.textContent = result.status === 0 || result.status >= 500 || result.ok
+        ? 'The outline save could not be confirmed. Retry the unchanged outline or find saved outlines before starting over.'
+        : serverError(result, 'The outline could not be saved. Your drawing is still here.');
+      if ([400, 401, 403, 404, 409, 413, 422].includes(result.status)) outlineAttempt = null;
+      return false;
+    };
+    function showOutlineActions() {
+      const hadFocus = objectWork.contains(document.activeElement);
+      const create = el('button', { type: 'button', textContent: 'Create estimated shape' });
+      const change = el('button', { type: 'button', className: 'secondary', textContent: 'Change the outline' });
+      const blocked = buildBlockedReason(sourceFor(job.sourceId)) || (job.modelBlocked ? 'This photo cannot currently be used to create the shape.' : null);
+      create.disabled = Boolean(blocked);
+      create.addEventListener('click', () => startObjectBuild());
+      change.addEventListener('click', () => startObjectOutline(objectOutline));
+      objectWork.replaceChildren(el('p', { className: 'hint', textContent: 'Creating the shape takes processing time. Unseen sides and colour are estimates; check the result before using it.' }),
+        ...(blocked ? [el('p', { className: 'hint', textContent: blocked })] : []), el('div', { className: 'actions' }, [create, change]));
+      objectEditor?.dispose(); objectEditor = null;
+      unlockObject();
+      if (hadFocus) create.focus();
+    }
+    async function startObjectOutline(existing = null) {
+      if (!objectCurrent()) return;
+      if (objectBusy) { objectStatus.textContent = 'Wait for the current request to finish.'; return; }
+      if (buildAttempt || useAttempt || outlineAttempt) {
+        objectStatus.textContent = 'An earlier request has an unconfirmed outcome. Retry it or check saved outlines and shapes first.'; return;
+      }
+      if (lockedBy.has('object')) {
+        objectStatus.textContent = 'Leave the current outline or review before opening another.'; return;
+      }
+      if (!parentReady() || !cleanObjectParent()) {
+        objectStatus.textContent = 'Load the current saved scene and finish or revert any unsaved changes before outlining.';
+        return;
+      }
+      closeObjectWork();
+      lockedBy.add('object'); showEdit();
+      objectStatus.textContent = 'Opening the photo copy and outline…';
+      const holder = el('div', { hidden: true });
+      const cancelLoading = el('button', { type: 'button', className: 'secondary', textContent: 'Cancel opening the outline' });
+      cancelLoading.addEventListener('click', () => { closeObjectWork(); objectStatus.textContent = 'The outline was not changed.'; improveObject.focus(); });
+      objectWork.replaceChildren(cancelLoading, holder);
+      const opening = previewGeneration;
+      let photoVerified = false;
+      let photoCheck = 0;
+      const checkPhoto = async (event) => {
+        if (event.target?.tagName?.toLowerCase() !== 'img') return;
+        const check = ++photoCheck;
+        const current = await request(`${base}/${jobId}`, { cache: 'no-store' });
+        if (!objectCurrent() || opening !== previewGeneration || check !== photoCheck) return;
+        if (!current.ok || current.body?.usageBlocked || current.body?.sourceId !== job.sourceId
+            || current.body?.sourceSha256 !== sourceHash || current.body?.edit?.version !== session.saved.version) {
+          closeObjectWork(); objectStatus.textContent = 'The photo or saved scene is no longer available for this outline.'; return;
+        }
+        photoVerified = event.type === 'load';
+        holder.hidden = false;
+        cancelLoading.remove();
+        objectStatus.textContent = photoVerified ? '' : 'The photo copy could not be shown. The saved scene is unchanged.';
+        if (photoVerified && (document.activeElement === outlineButton || document.activeElement === improveObject)) holder.querySelector?.('h3')?.focus();
+      };
+      holder.addEventListener('load', checkPhoto, true);
+      holder.addEventListener('error', checkPhoto, true);
+      try {
+        const { mountObjectOutlineEditor } = await import('./object-outline-editor.js');
+        const current = await request(`${base}/${jobId}`, { cache: 'no-store' });
+        if (!objectCurrent() || opening !== previewGeneration) return;
+        if (!current.ok || current.body?.usageBlocked || current.body?.sourceId !== job.sourceId
+            || current.body?.sourceSha256 !== sourceHash || current.body?.edit?.version !== session.saved.version) throw new Error('changed');
+        objectEditor = mountObjectOutlineEditor(holder, {
+          source: { url: assetUrl(jobId, 'texture.jpg'), width: sourceWidth, height: sourceHeight, sha256: sourceHash },
+          initialMaskUrl: existing ? `${objectRoot}/outlines/${encodeURIComponent(existing.outlineId)}/mask.png` : assetUrl(jobId, 'mask.png'),
+          onConfirm: (payload) => photoVerified ? putOutline(payload) : false,
+          onCancel: () => { closeObjectWork(); objectStatus.textContent = outlineAttempt ? 'The outline save could not be confirmed. Check saved outlines before starting another.' : existing ? 'No new outline was saved. Your earlier saved outline is still available.' : 'No outline was saved.'; outlineButton.focus(); },
+        });
+      } catch {
+        if (!objectCurrent()) return;
+        closeObjectWork(); objectStatus.textContent = 'The outline editor could not be opened. The saved scene is unchanged.';
+      }
+    }
+    async function startObjectBuild() {
+      if (!objectCurrent() || objectBusy || !objectOutline || !cleanObjectParent()) return;
+      if (objectOutline.baseVersion !== session.saved.version || objectOutline.parentSurfaceSha256 !== parentHash) {
+        objectStatus.textContent = 'This outline belongs to an older saved scene. Check and confirm an outline for the current version.'; return;
+      }
+      const blocked = buildBlockedReason(sourceFor(job.sourceId));
+      if (blocked || job.modelBlocked) { objectStatus.textContent = blocked || 'This photo cannot currently be used for model processing.'; return; }
+      buildAttempt ??= { requestId: crypto.randomUUID(), sourceId: job.sourceId, sourceSha256: sourceHash, outlineId: objectOutline.outlineId, outlineSha256: objectOutline.maskSha256 };
+      objectBusy = true; objectStatus.textContent = 'Requesting the estimated shape…';
+      const result = await postJson(`${objectRoot}/builds`, buildAttempt);
+      if (!objectCurrent()) return;
+      objectBusy = false;
+      if (result.ok && result.body?.id === buildAttempt.requestId) {
+        buildAttempt = null; showObjectBuild(result.body); return;
+      }
+      if (result.status === 0 || result.status >= 500 || result.ok) {
+        objectStatus.textContent = 'The request could not be confirmed. Press Create estimated shape again to repeat it, or find saved shapes.';
+      } else { objectStatus.textContent = serverError(result, 'The shape could not be created.'); buildAttempt = null; }
+    }
+    function showObjectBuild(build) {
+      if (!objectCurrent()) return;
+      if (lockedBy.has('object')) { objectStatus.textContent = 'Leave the current outline or review before opening a saved shape.'; return; }
+      const poll = ++objectPollGeneration;
+      if (objectTimer !== null) clearTimeout(objectTimer);
+      objectTimer = null;
+      if (build.sourceId !== job.sourceId || build.sourceSha256 !== sourceHash) {
+        objectStatus.textContent = 'This shape belongs to another photo and cannot be shown here.'; return;
+      }
+      objectStatus.textContent = build.status === 'ready' ? 'The estimated object is ready to review.'
+        : build.status === 'queued' || build.status === 'processing' ? 'The object is being prepared. You can keep working or return to it later.'
+          : build.error || 'The shape could not be created. The saved scene is unchanged.';
+      if (build.status === 'ready' && build.object) {
+        const outline = knownOutlines.get(build.outlineId);
+        if (!outline || outline.maskSha256 !== build.outlineSha256 || outline.baseVersion !== session.saved.version || outline.parentSurfaceSha256 !== parentHash) {
+          objectWork.replaceChildren();
+          objectStatus.textContent = 'This shape belongs to an older or unavailable outline. Check saved outlines for the current version.'; return;
+        }
+        const preview = el('button', { type: 'button', textContent: 'Review the estimated object' });
+        preview.addEventListener('click', () => previewObject(build));
+        objectWork.replaceChildren(preview);
+      } else if (build.status === 'queued' || build.status === 'processing') {
+        objectWork.replaceChildren();
+        objectTimer = setTimeout(async () => {
+          const result = await request(`${objectRoot}/builds/${encodeURIComponent(build.id)}`, { cache: 'no-store' });
+          if (!objectCurrent() || poll !== objectPollGeneration) return;
+          if (result.ok && result.body?.id === build.id) showObjectBuild(result.body);
+          else objectStatus.textContent = 'The status is unavailable. Find saved shapes to check it again.';
+        }, POLL_MS);
+      }
+    }
+    async function previewObject(build) {
+      if (useAttempt && useBuildId !== build.id) {
+        objectStatus.textContent = 'A previous save has an unconfirmed outcome. Return to that object or load the saved scene to check.'; return;
+      }
+      if (!objectCurrent()) return;
+      if (objectBusy) { objectStatus.textContent = 'Wait for the current request to finish.'; return; }
+      if (!cleanObjectParent()) {
+        objectStatus.textContent = 'Finish or revert unsaved changes before reviewing this object.'; return;
+      }
+      closeObjectWork(); lockedBy.add('object'); showEdit();
+      const generation = ++previewGeneration;
+      const holder = el('div', { className: 'space-viewport' });
+      const photo = el('img', { className: 'visit-compare-photo', alt: 'Photo copy used for this object estimate', hidden: true });
+      const mask = el('img', { className: 'object-review-mask', alt: '', hidden: true });
+      mask.setAttribute('aria-hidden', 'true');
+      const wasInteractive = Boolean(viewer?.isInteractive());
+      if (wasInteractive) viewer.setInteractive(false, { focus: false });
+      viewport.hidden = true;
+      cameraActions.hidden = explore.status.hidden = photoSide.status.hidden = true;
+      comparisonFrame.append(holder, photo, mask);
+      const stage = { holder, photo, mask, maskUrl: null, wasInteractive, closed: false };
+      const cleanupStage = () => {
+        if (stage.closed) return;
+        stage.closed = true;
+        photo.onload = photo.onerror = mask.onload = mask.onerror = null;
+        photo.hidden = mask.hidden = true;
+        photo.removeAttribute('src'); mask.removeAttribute('src');
+        if (stage.maskUrl) URL.revokeObjectURL(stage.maskUrl);
+        stage.maskUrl = null;
+        if (objectStageCleanup === cleanupStage) objectStageCleanup = null;
+      };
+      stage.cleanup = cleanupStage;
+      objectStage = stage;
+      objectStageCleanup = cleanupStage;
+      comparisonFrame.classList.toggle('is-object-review', true);
+      objectStatus.remove();
+      objectReviewHeading.hidden = false; objectReviewLabel.hidden = false; objectReview.hidden = false;
+      if (objectInspector) objectInspector.hidden = true;
+      const note = el('p', { className: 'hint', textContent: 'The photo position is an estimate. Hidden sides and colour were generated, not photographed. Using it starts a new saved version at this estimated photo position.' });
+      const use = el('button', { type: 'button', textContent: 'Use this estimate at the photo position', disabled: true });
+      const back = el('button', { type: 'button', className: 'secondary', textContent: 'Leave review' });
+      const checkSaved = el('button', { type: 'button', className: 'secondary', textContent: 'Load saved scene', hidden: true });
+      const photoView = el('button', { type: 'button', className: 'secondary', textContent: 'Original viewpoint', disabled: true });
+      const sideView = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect from the side', disabled: true });
+      const estimateChoice = el('button', { type: 'button', className: 'secondary', textContent: 'Estimated shape', disabled: true });
+      const photoChoice = el('button', { type: 'button', className: 'secondary', textContent: 'Photo', disabled: true });
+      const useReason = el('p', { className: 'hint', textContent: 'Choose Estimated shape to use it.', hidden: true });
+      const exploreObject = createExploreToggle();
+      let photoReady = false;
+      let maskReady = false;
+      let viewerReady = false;
+      let photoCheck = 0;
+      let shown = 'estimate';
+      let photoInterruptedExplore = false;
+      const updateUse = () => {
+        photoChoice.disabled = !photoReady || !maskReady;
+        use.disabled = !photoReady || !maskReady || !viewerReady || shown !== 'estimate' || objectBusy;
+        useReason.hidden = shown !== 'photo';
+      };
+      const showObjectView = (view) => {
+        if ((view === 'photo' && (!photoReady || !maskReady)) || (view === 'estimate' && !viewerReady)) return;
+        if (view === 'photo' && shown !== 'photo') {
+          photoInterruptedExplore = Boolean(objectPreview?.isInteractive());
+          if (photoInterruptedExplore) objectPreview.setInteractive(false, { focus: false });
+        } else if (view === 'estimate' && shown === 'photo' && photoInterruptedExplore) {
+          objectPreview?.setInteractive(true, { focus: false });
+          photoInterruptedExplore = false;
+        }
+        shown = view;
+        photo.hidden = view !== 'photo';
+        mask.hidden = view !== 'photo';
+        objectReviewLabel.textContent = view === 'photo' ? 'Photo · The light area marks the selected outline.' : 'Estimated shape · The dark cutout marks the selected photo area; its hidden background is unknown.';
+        comparisonFrame.classList.toggle('is-photo', view === 'photo');
+        photoChoice.setAttribute('aria-pressed', String(view === 'photo'));
+        estimateChoice.setAttribute('aria-pressed', String(view === 'estimate'));
+        photoView.disabled = sideView.disabled = view === 'photo';
+        exploreObject.attach(viewerReady ? objectPreview : null);
+        exploreObject.button.disabled = view === 'photo' || !viewerReady;
+        exploreObject.status.hidden = view === 'photo';
+        updateUse();
+      };
+      photoChoice.setAttribute('aria-pressed', 'false');
+      estimateChoice.setAttribute('aria-pressed', 'true');
+      objectReviewLabel.textContent = 'Estimated shape · The dark cutout marks the selected photo area; its hidden background is unknown.';
+      photoChoice.addEventListener('click', () => showObjectView('photo'));
+      estimateChoice.addEventListener('click', () => showObjectView('estimate'));
+      const hideObjectPhoto = () => {
+        if (shown === 'photo' && viewerReady) showObjectView('estimate');
+        photo.hidden = true; mask.hidden = true; photoReady = false; photoChoice.disabled = true; shown = 'estimate';
+        objectReviewLabel.textContent = 'Estimated shape · The dark cutout marks the selected photo area; its hidden background is unknown.';
+        comparisonFrame.classList.toggle('is-photo', false);
+        photoChoice.setAttribute('aria-pressed', 'false'); estimateChoice.setAttribute('aria-pressed', 'true');
+        photoView.disabled = sideView.disabled = !viewerReady;
+        exploreObject.button.disabled = !viewerReady; exploreObject.status.hidden = false;
+        updateUse();
+      };
+      const validCurrent = (current) => current.ok && !current.body?.usageBlocked
+        && current.body?.edit?.version === session.saved.version && current.body?.sourceId === job.sourceId
+        && current.body?.sourceSha256 === sourceHash;
+      const stopUnverifiedView = () => {
+        previewGeneration += 1;
+        stage.cleanup();
+        objectPreview?.dispose(); objectPreview = null; viewerReady = false; holder.hidden = true;
+        estimateChoice.disabled = true; photoView.disabled = sideView.disabled = true; exploreObject.attach(null);
+        hideObjectPhoto();
+        viewer?.dispose(); viewer = null; viewport.hidden = true;
+        original.disabled = side.disabled = true; explore.attach(null);
+      };
+      photo.onload = async () => {
+        const check = ++photoCheck;
+        const current = await request(`${base}/${jobId}`, { cache: 'no-store' });
+        if (!objectCurrent() || generation !== previewGeneration || check !== photoCheck) return;
+        if (!validCurrent(current)) { stopUnverifiedView(); objectStatus.textContent = 'The photo or saved scene is no longer available for this review.'; return; }
+        photoReady = true; updateUse();
+      };
+      photo.onerror = () => {
+        if (!objectCurrent() || generation !== previewGeneration) return;
+        photoCheck += 1;
+        previewGeneration += 1;
+        stage.cleanup();
+        hideObjectPhoto(); objectStatus.textContent = 'The photo copy could not be shown. The saved scene is unchanged.';
+      };
+      mask.onload = async () => {
+        const current = await request(`${base}/${jobId}`, { cache: 'no-store' });
+        if (!objectCurrent() || generation !== previewGeneration) return;
+        if (!validCurrent(current)) { stopUnverifiedView(); objectStatus.textContent = 'The photo or saved scene is no longer available for this review.'; return; }
+        maskReady = true; updateUse();
+      };
+      mask.onerror = () => {
+        if (!objectCurrent() || generation !== previewGeneration) return;
+        previewGeneration += 1;
+        stage.cleanup();
+        maskReady = false; hideObjectPhoto();
+        objectStatus.textContent = 'The selected outline could not be shown. The saved scene is unchanged.';
+      };
+      back.addEventListener('click', () => { closeObjectWork(); objectStatus.textContent = useAttempt ? 'The save could not be confirmed. Load the saved scene or retry the same object.' : 'The saved scene was not changed.'; recoveryButton.focus(); });
+      checkSaved.addEventListener('click', () => { if (!objectBusy) openScene(jobId); });
+      photoView.addEventListener('click', () => objectPreview?.originalView());
+      sideView.addEventListener('click', () => objectPreview?.sideView());
+      objectReview.replaceChildren(objectStatus, note, el('div', { className: 'actions' }, [estimateChoice, photoChoice]),
+        el('div', { className: 'actions' }, [photoView, sideView, exploreObject.button]), exploreObject.status,
+        useReason, el('div', { className: 'actions' }, [back, checkSaved, use]));
+      objectStatus.textContent = 'Checking the object and photo…';
+      objectReviewHeading.focus();
+      photo.src = assetUrl(jobId, 'texture.jpg');
+      let created;
+      try {
+        const fresh = await request(`${objectRoot}/builds/${encodeURIComponent(build.id)}`, { cache: 'no-store' });
+        if (!fresh.ok || fresh.body?.id !== build.id || fresh.body.status !== 'ready' || fresh.body.object?.sha256 !== build.object.sha256) throw new Error('changed');
+        const binding = { buildId: build.id, outlineId: build.outlineId, outlineSha256: build.outlineSha256, ...fresh.body.object };
+        created = await createViewer(holder, surfaceResult.body, assetUrl(jobId, 'texture.jpg'), 'Estimated object at the photo position', { fullObject: fullObjectViewerBinding(`${base}/${jobId}`, binding) });
+        const current = await request(`${base}/${jobId}`, { cache: 'no-store' });
+        if (!objectCurrent() || generation !== previewGeneration) throw new Error('changed');
+        if (!validCurrent(current)) { stopUnverifiedView(); objectStatus.textContent = 'The photo or saved scene is no longer available for this review.'; throw new Error('changed'); }
+        objectPreview = created; created = null;
+        const maskBlob = objectPreview.outlineMaskBlob();
+        if (!maskBlob) throw new Error('changed');
+        stage.maskUrl = URL.createObjectURL(maskBlob);
+        mask.src = stage.maskUrl;
+        objectPreview.originalView();
+        viewerReady = true; estimateChoice.disabled = false; photoView.disabled = false; sideView.disabled = false; exploreObject.attach(objectPreview);
+        showObjectView(shown);
+        objectStatus.textContent = 'Review the estimate before using it. The previous saved version is kept.';
+        updateUse();
+      } catch {
+        created?.dispose();
+        if (objectCurrent() && generation === previewGeneration) {
+          const hadReviewFocus = document.activeElement === objectReviewHeading || objectReview.contains(document.activeElement);
+          objectPreview?.dispose(); objectPreview = null;
+          restoreObjectStage(); objectStatus.textContent = 'The object or current scene could not be verified. Nothing was changed.';
+          if (hadReviewFocus) { objectStatus.tabIndex = -1; objectStatus.focus(); }
+        }
+        return;
+      }
+      use.addEventListener('click', async () => {
+        if (!objectCurrent() || generation !== previewGeneration || use.disabled || objectBusy) return;
+        useAttempt ??= { requestId: crypto.randomUUID(), baseVersion: session.saved.version };
+        useBuildId = build.id;
+        objectBusy = true; use.disabled = true; back.disabled = true; checkSaved.disabled = true;
+        recoveryChoice.replaceChildren();
+        objectStatus.textContent = 'Saving the estimated object…';
+        const result = await postJson(`${objectRoot}/builds/${encodeURIComponent(build.id)}/confirm`, useAttempt);
+        if (!objectCurrent() || generation !== previewGeneration) return;
+        objectBusy = false; back.disabled = false; checkSaved.disabled = false;
+        if (result.ok && result.body?.version === useAttempt.baseVersion + 1 && result.body?.fullObject?.buildId === build.id && result.body.fullObject.sha256 === build.object.sha256) {
+          useAttempt = null; useBuildId = null; openScene(jobId); return;
+        }
+        if (result.status === 0 || result.status >= 500 || result.ok) {
+          objectStatus.textContent = 'The save could not be confirmed. Press the same button to safely repeat this request, or load the saved scene to check.';
+          checkSaved.hidden = false; updateUse();
+        } else { objectStatus.textContent = serverError(result, 'The estimate could not be saved. Load the saved scene before trying again.'); checkSaved.hidden = false; useAttempt = null; useBuildId = null; }
+      });
+    }
+    recoveryButton.addEventListener('click', async () => {
+      if (!objectCurrent() || objectBusy) return;
+      objectBusy = true; objectStatus.textContent = 'Checking saved outlines and shapes…';
+      const [outlines, builds] = await Promise.all([request(`${objectRoot}/outlines`, { cache: 'no-store' }), request(`${objectRoot}/builds`, { cache: 'no-store' })]);
+      if (!objectCurrent()) return;
+      objectBusy = false; objectLists.replaceChildren();
+      if (!outlines.ok || !builds.ok || !Array.isArray(outlines.body?.outlines) || !Array.isArray(builds.body?.builds)) {
+        objectStatus.textContent = 'Saved outlines or shapes could not be checked. The saved scene is unchanged.'; return;
+      }
+      let unreadable = false;
+      const pendingOutline = outlineAttempt;
+      for (const item of outlines.body.outlines) {
+        if (!validOutline(item)) { unreadable = true; continue; }
+        knownOutlines.set(item.outlineId, item);
+        if (!outlinePending && outlineAttempt?.id === item.outlineId && outlineAttempt.hash === item.maskSha256) outlineAttempt = null;
+        const stale = item.baseVersion !== session.saved.version || item.parentSurfaceSha256 !== parentHash;
+        const button = el('button', { type: 'button', className: 'secondary', textContent: `Review outline for version ${item.baseVersion}${stale ? ' (older scene)' : ''}` });
+        button.disabled = stale;
+        button.addEventListener('click', () => openRecovery(() => startObjectOutline(item))); objectLists.append(button);
+      }
+      const notFound = pendingOutline && outlineAttempt === pendingOutline && !outlinePending && !objectEditor && !unreadable;
+      if (notFound) outlineAttempt = null;
+      missingOutlineId = pendingOutline && outlineAttempt === pendingOutline && !outlinePending && !unreadable ? pendingOutline.id : null;
+      for (const item of builds.body.builds) {
+        if (buildAttempt?.requestId === item.id && buildAttempt.outlineId === item.outlineId && buildAttempt.outlineSha256 === item.outlineSha256) buildAttempt = null;
+        const state = { queued: 'Waiting', processing: 'In progress', ready: 'Ready', failed: 'Could not finish', interrupted: 'Stopped' }[item.status] ?? 'Unavailable';
+        const button = el('button', { type: 'button', className: 'secondary', textContent: `Check shape · ${state}` });
+        button.addEventListener('click', () => openRecovery(() => showObjectBuild(item))); objectLists.append(button);
+      }
+      objectStatus.textContent = unreadable ? 'Some saved outlines could not be read. The saved scene is unchanged.'
+        : notFound ? 'The earlier outline was not found. You can start a new one; the earlier save may still appear later.'
+        : outlines.body.outlines.length || builds.body.builds.length ? 'Choose an outline or shape to continue.' : 'No saved outlines or shapes for this scene yet.';
+    });
+    function openRecovery(open) {
+      if (!objectCurrent()) return;
+      if (objectBusy || outlinePending) { objectStatus.textContent = 'Wait for the current request to finish.'; return; }
+      if (!lockedBy.has('object')) { open(); return; }
+      objectStatus.textContent = 'Opening a saved item closes the current review and discards any unsaved outline changes.';
+      const keep = el('button', { type: 'button', className: 'secondary', textContent: 'Keep current work' });
+      const discard = el('button', { type: 'button', className: 'secondary', textContent: 'Discard unsaved work and open' });
+      keep.addEventListener('click', () => { recoveryChoice.replaceChildren(); objectStatus.textContent = 'Your current work is still open.'; });
+      discard.addEventListener('click', () => {
+        if (objectBusy || outlinePending) { objectStatus.textContent = 'Wait for the current request to finish.'; return; }
+        if (outlineAttempt?.id === missingOutlineId && !outlinePending) outlineAttempt = null;
+        recoveryChoice.replaceChildren(); closeObjectWork(); open();
+      });
+      recoveryChoice.replaceChildren(keep, discard);
+      keep.focus();
+    }
+    outlineButton.addEventListener('click', () => startObjectOutline());
+    objectSection.append(objectSummary,
+      el('p', { className: 'hint', textContent: 'Check the object in the photo, then decide whether to create and use an estimated shape.' }),
+      el('div', { className: 'actions' }, [outlineButton, recoveryButton]), objectStatusHome, objectLists, recoveryChoice, objectWork);
 
     const manualEdit = el('details', { className: 'source-details' }, [
       el('summary', { textContent: 'Move the object by hand' }),
@@ -1255,24 +1771,24 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     ]);
     const otherActions = el('details', { className: 'source-details' }, [
       el('summary', { textContent: 'More ways to continue' }),
-      nextActions(memorySection, collaborationSection, sharesSection),
+      ...(savedFullObject ? [el('p', { textContent: 'Memory changes, contributions and visitor sharing are not yet available for this estimated object.' })] : [nextActions(memorySection, collaborationSection, sharesSection)]),
     ]);
-    panel.replaceChildren(
-      heading,
-      sceneWorkspace(
-        [cameraActions, explore.status, photoSide.status, comparisonBar, comparisonFrame, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: SCENE_NOTE })],
+    const workspace = sceneWorkspace(
+        [cameraActions, explore.status, photoSide.status, comparisonBar, objectReviewHeading, objectReviewLabel, comparisonFrame, objectReview, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: savedFullObject ? 'The room and object are estimates from the photo. The object’s unseen sides were not photographed; empty areas remain unknown.' : SCENE_NOTE })],
         [
           placeLanding,
+          ...(!savedFullObject ? [objectSection] : []),
           manualEdit,
           otherActions,
-          inspection.details,
+          ...(inspection ? [inspection.details] : []),
           memorySection,
           collaborationSection,
           storiesSection,
           sharesSection,
         ],
-      ),
-    );
+      );
+    objectInspector = workspace.children[1];
+    panel.replaceChildren(heading, workspace);
     const editorFor = (name) => () => ({
       ...session.saved,
       clean: invalid.size === 0 && !session.isDirty() && !session.uncertain && !conflict && !saving && !reloading && ![...lockedBy].some((holder) => holder !== name),
@@ -1282,6 +1798,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       else lockedBy.delete(name);
       showEdit();
     };
+    if (!savedFullObject) {
     memoryEdit = mountMemoryEdit(memorySection, {
       jobUrl: `${base}/${jobId}`,
       textureUrl: assetUrl(jobId, 'texture.jpg'),
@@ -1371,10 +1888,21 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       editor: () => session.saved,
       getCamera: () => viewer?.getCamera() ?? null,
     });
+    }
 
     let created = null;
     try {
-      created = await createViewer(viewport, surfaceResult.body, assetUrl(jobId, 'texture.jpg'), `3D partial scene from photo ${number}`);
+      const fullObject = savedFullObject && fullObjectViewerBinding(`${base}/${jobId}`, savedFullObject);
+      created = await createViewer(viewport, surfaceResult.body, assetUrl(jobId, 'texture.jpg'), `3D scene from photo ${number}`, { fullObject });
+      if (fullObject) {
+        const current = await request(`${base}/${jobId}`, { cache: 'no-store' });
+        if (!current.ok || current.body?.usageBlocked || current.body?.edit?.version !== job.edit.version
+            || JSON.stringify(current.body?.edit?.fullObject ?? null) !== JSON.stringify(savedFullObject)) {
+          created.dispose();
+          created = null;
+          throw new Error('full-object');
+        }
+      }
     } catch (error) {
       viewport.hidden = true;
       original.disabled = true;
@@ -1382,6 +1910,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       viewMessage.textContent = {
         webgl: 'This browser could not start 3D graphics (WebGL), so the scene cannot be shown here. The photos, writing and the model’s outline and depth images are still available.',
         texture: 'The scene’s image could not be loaded, so the scene is not shown. The original photo is unchanged; reload the page to try again.',
+        'full-object': 'The estimated object or its outline could not be verified. The saved photo is unchanged; reload the scene to try again.',
       }[error.message] ?? 'The scene data could not be shown. The original photo is unchanged.';
     }
     if (disposed || token !== panelGeneration) {

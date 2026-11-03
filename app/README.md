@@ -58,6 +58,17 @@ texture; this is not automatic photo alignment. Both sources govern its use,
 saved history, recollections, stories and visitor snapshots. See
 [two objects and their relationships](OBJECTS.md).
 
+For a ready one-photo, one-object scene, the owner can check and refine the
+object's outline at the original photo size, then request an estimated shape
+from a separately configured supervised local worker. The owner compares the
+confirmed outline on the photo with the estimated shape before explicitly
+using it as a new saved version. Hidden sides, colour and the photo position
+are estimates; no background is invented for the selected area. The worker
+is disabled by default and needs the separately provisioned
+[supervised object setup](spatial/full_object_runner.md). Memory changes,
+contributions and visitor sharing are not available for a full-object version;
+existing supported versions remain separate.
+
 Scoped contributors can submit writing, a real recording, or both, with an
 optional photo. Each material retains its own original, source facts and
 default-off uses. Photo inspection uses a metadata-stripped copy; recordings

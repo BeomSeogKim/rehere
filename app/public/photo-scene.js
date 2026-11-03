@@ -136,7 +136,7 @@ function regionMesh(surface, regionOf, region, tangent) {
     return mapped;
   };
   const triangle = (a, b, c) => {
-    if (regionOf(a) !== region || regionOf(b) !== region || regionOf(c) !== region) return;
+    if (region !== null && (regionOf(a) !== region || regionOf(b) !== region || regionOf(c) !== region)) return;
     const values = [depth[a], depth[b], depth[c]];
     if (Math.max(...values) - Math.min(...values) > span) return;
     indices.push(vertex(a), vertex(b), vertex(c));
@@ -149,6 +149,77 @@ function regionMesh(surface, regionOf, region, tangent) {
     }
   }
   return { positions, uvs, indices };
+}
+
+// The full-object outline is in source pixels. Removing a whole intersecting
+// grid cell keeps photo pixels from appearing underneath the movable object.
+export function fullObjectBackground(surface, mask) {
+  validateSurface(surface);
+  if (surface.schema_version !== undefined) throw new Error('This scene cannot use a full object.');
+  const [imageWidth, imageHeight] = surface.source.image_size;
+  if (mask?.width !== imageWidth || mask?.height !== imageHeight || !(mask.data instanceof Uint8Array)
+      || mask.data.length !== imageWidth * imageHeight) throw new Error('The object outline could not be verified.');
+  const part = regionMesh(surface, () => 0, null, tangentOf(surface));
+  const kept = [];
+  const intersects = (a, b, c) => {
+    const us = [a, b, c].map((i) => part.uvs[i * 2]);
+    const vs = [a, b, c].map((i) => 1 - part.uvs[i * 2 + 1]);
+    if (Math.max(...us) - Math.min(...us) > 1 / (surface.width - 1) + 1e-7
+        || Math.max(...vs) - Math.min(...vs) > 1 / (surface.height - 1) + 1e-7) {
+      throw new Error('The room surface cannot use this object outline.');
+    }
+    const x1 = Math.max(0, Math.floor(Math.min(...us) * imageWidth));
+    const x2 = Math.min(imageWidth - 1, Math.ceil(Math.max(...us) * imageWidth));
+    const y1 = Math.max(0, Math.floor(Math.min(...vs) * imageHeight));
+    const y2 = Math.min(imageHeight - 1, Math.ceil(Math.max(...vs) * imageHeight));
+    for (let y = y1; y <= y2; y += 1) {
+      for (let x = x1; x <= x2; x += 1) if (mask.data[y * imageWidth + x]) return true;
+    }
+    return false;
+  };
+  for (let i = 0; i < part.indices.length; i += 3) {
+    const triangle = part.indices.slice(i, i + 3);
+    if (!intersects(...triangle)) kept.push(...triangle);
+  }
+  if (kept.length === 0) throw new Error('The remaining room surface is empty.');
+  return { ...part, indices: kept };
+}
+
+export function createFullObjectSceneObjects(THREE, surface, texture, model, initial, mask) {
+  const vector = (value, length) => Array.isArray(value) && value.length === length && value.every(Number.isFinite);
+  if (!vector(initial?.position, 3) || !vector(initial?.quaternion, 4) || !vector(initial?.modelPivot, 3)
+      || initial.position.some((value) => Math.abs(value) > 10)
+      || !Number.isFinite(initial?.scale) || initial.scale < 0.05 || initial.scale > 5
+      || Math.abs(Math.hypot(...initial.quaternion) - 1) > 1e-6) throw new Error('The object placement is invalid.');
+  const part = fullObjectBackground(surface, mask);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(part.positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(part.uvs, 2));
+  geometry.setIndex(part.indices);
+  const background = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: texture }));
+  background.name = 'observed-background';
+  background.userData = { sourceId: surface.source.source_id, sourceSha256: surface.source.sha256 };
+  const scene = new THREE.Scene();
+  const foreground = new THREE.Group();
+  foreground.name = 'estimated-foreground';
+  foreground.userData = { sourceId: surface.source.source_id, sourceSha256: surface.source.sha256 };
+  const base = new THREE.Group();
+  const centered = new THREE.Group();
+  centered.position.set(...initial.modelPivot.map((value) => -value));
+  centered.add(model);
+  base.add(centered);
+  base.quaternion.set(...initial.quaternion);
+  base.scale.setScalar(initial.scale);
+  foreground.add(base);
+  const pivot = new THREE.Vector3(...initial.position);
+  scene.add(background, foreground);
+  const applyEdit = ({ offset, yaw }) => {
+    foreground.position.set(pivot.x + offset[0], pivot.y + offset[1], pivot.z + offset[2]);
+    foreground.rotation.set(0, yaw, 0);
+    scene.updateMatrixWorld(true);
+  };
+  applyEdit({ offset: [0, 0, 0], yaw: 0 });
+  return { scene, background, foreground, applyEdit, pivot: [...initial.position], verticalFovDegrees: verticalFov(surface, tangentOf(surface)) };
 }
 
 // Moves an object's geometry to its own centre so it turns in place. The pivot

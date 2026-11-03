@@ -16,6 +16,7 @@ import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
 import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner, pythonOutlineRunner } from './reconstructions.mjs';
+import { FullObjectStore } from './full-objects.mjs';
 import { OBJECT_IDS } from './arrangements.mjs';
 import { PlaceDeletionService, PlaceDeletions } from './place-deletions.mjs';
 
@@ -41,6 +42,7 @@ const STATIC_FILES = new Map([
   ['/source-details.js', ['source-details.js', 'text/javascript; charset=utf-8']],
   ['/space.js', ['space.js', 'text/javascript; charset=utf-8']],
   ['/outline-editor.js', ['outline-editor.js', 'text/javascript; charset=utf-8']],
+  ['/object-outline-editor.js', ['object-outline-editor.js', 'text/javascript; charset=utf-8']],
   ['/photo-scene.js', ['photo-scene.js', 'text/javascript; charset=utf-8']],
   ['/composition-scene.js', ['composition-scene.js', 'text/javascript; charset=utf-8']],
   ['/composition-description.js', ['composition-description.js', 'text/javascript; charset=utf-8']],
@@ -104,6 +106,12 @@ const VENDOR_FILES = new Map([
   ['/vendor/THREE-LICENSE', ['LICENSE', 'text/plain; charset=utf-8']],
 ]);
 
+const OWNER_THREE_FILES = new Map([
+  ['/vendor/loaders/GLTFLoader.js', ['examples/jsm/loaders/GLTFLoader.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/utils/BufferGeometryUtils.js', ['examples/jsm/utils/BufferGeometryUtils.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/utils/SkeletonUtils.js', ['examples/jsm/utils/SkeletonUtils.js', 'text/javascript; charset=utf-8']],
+]);
+
 // The pinned surface-intersection library, for the owner's editor only; the
 // visitor listener never serves it. Its bundled ESM imports the bare
 // specifier 'three' once, rewritten like OrbitControls.
@@ -134,6 +142,10 @@ const JOBS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions$/;
 const JOB_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)$/;
 const JOB_EDIT_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/edit$/;
 const OUTLINE_CORRECTIONS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/outline-corrections$/;
+const FULL_OBJECT_OUTLINE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/full-object\/outlines\/([^/]+)(\/mask\.png)?$/;
+const FULL_OBJECT_OUTLINES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/full-object\/outlines$/;
+const FULL_OBJECT_BUILDS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/full-object\/builds$/;
+const FULL_OBJECT_BUILD_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/full-object\/builds\/([^/]+)(?:\/(confirm|assets\/object\.glb))?$/;
 const JOB_ASSET_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/assets\/([^/]+)$/;
 const PROPOSALS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals$/;
 const PROPOSAL_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/proposals\/([^/]+)$/;
@@ -403,6 +415,8 @@ export function createAppServer({
   recordingPreparer = createRecordingPreparer(),
   mediaVerifier = createMediaVerifier(),
   visibleSurfaceLimits,
+  fullObjectMaskValidator,
+  runFullObject,
 } = {}) {
   // Validated before anything else is created, so a bad value starts nothing.
   const visitor = visitorOrigin === null ? null : parseVisitorOrigin(visitorOrigin);
@@ -416,6 +430,8 @@ export function createAppServer({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage, visibleSurfaceLimits,
     placeDeletions, outlineRunner, outlineTimeoutMs,
   });
+  const fullObjects = new FullObjectStore({ reconstructions, validateMask: fullObjectMaskValidator, runFullObject });
+  reconstructions.fullObjects = fullObjects;
   const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder, prepareRecording: recordingPreparer });
   const stories = new StoryStore({ reconstructions, audioDecoder });
   const intakes = new IntakeStore({ dataDir, drafts: store, verifier: mediaVerifier, placeCommits: placeDeletions });
@@ -470,7 +486,7 @@ export function createAppServer({
     const { pathname } = new URL(req.url, `http://${host}`);
     const reading = req.method === 'GET' || req.method === 'HEAD';
 
-    if (req.method === 'POST') {
+    if (req.method === 'POST' || req.method === 'PUT') {
       const origin = req.headers.origin;
       if (origin !== undefined && origin !== `http://${host}`) {
         sendJson(res, 403, { error: 'This request is not allowed.' });
@@ -856,6 +872,60 @@ export function createAppServer({
       throw new RequestError(405, 'Method not allowed.');
     }
 
+    const fullBuildsMatch = FULL_OBJECT_BUILDS_PATH.exec(pathname);
+    if (fullBuildsMatch) {
+      await requireOwner();
+      if (reading) sendJson(res, 200, await fullObjects.listBuilds(fullBuildsMatch[1], fullBuildsMatch[2]));
+      else if (req.method === 'POST') {
+        const { status, build } = await fullObjects.createBuild(fullBuildsMatch[1], fullBuildsMatch[2], await readJsonBody(req));
+        sendJson(res, status, build);
+      } else throw new RequestError(405, 'Method not allowed.');
+      return;
+    }
+    const fullBuildMatch = FULL_OBJECT_BUILD_PATH.exec(pathname);
+    if (fullBuildMatch) {
+      await requireOwner();
+      const [, draftId, jobId, id, action] = fullBuildMatch;
+      if (action === 'assets/object.glb' && reading) sendAsset(req, res, await fullObjects.getAsset(draftId, jobId, id));
+      else if (!action && reading) sendJson(res, 200, await fullObjects.getBuild(draftId, jobId, id));
+      else if (action === 'confirm' && req.method === 'POST') sendJson(res, 200, await fullObjects.confirm(draftId, jobId, id, await readJsonBody(req)));
+      else throw new RequestError(405, 'Method not allowed.');
+      return;
+    }
+    const fullOutlinesMatch = FULL_OBJECT_OUTLINES_PATH.exec(pathname);
+    if (fullOutlinesMatch) {
+      await requireOwner();
+      if (!reading) throw new RequestError(405, 'Method not allowed.');
+      sendJson(res, 200, await fullObjects.listOutlines(fullOutlinesMatch[1], fullOutlinesMatch[2]));
+      return;
+    }
+    const fullOutlineMatch = FULL_OBJECT_OUTLINE_PATH.exec(pathname);
+    if (fullOutlineMatch) {
+      await requireOwner();
+      const [, draftId, jobId, id, asset] = fullOutlineMatch;
+      if (![draftId, jobId, id].every((value) => UUID.test(value))) throw new RequestError(404, 'Not found.');
+      if (asset && reading) {
+        sendAsset(req, res, await fullObjects.getOutline(draftId, jobId, id));
+        return;
+      }
+      if (asset || req.method !== 'PUT') throw new RequestError(405, 'Method not allowed.');
+      if (!/^image\/png(?:;|$)/i.test(req.headers['content-type'] ?? '')) throw new RequestError(415, 'The outline could not be read.');
+      const intHeader = (name) => {
+        const value = req.headers[name];
+        return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? Number(value) : NaN;
+      };
+      const width = intHeader('x-image-width'), height = intHeader('x-image-height');
+      const cropHeader = req.headers['x-crop-xyxy'];
+      const request = { sourceId: req.headers['x-source-id'], sourceSha256: req.headers['x-source-sha256'], maskSha256: req.headers['x-mask-sha256'],
+        parentSurfaceSha256: req.headers['x-parent-surface-sha256'], baseVersion: intHeader('x-base-version'), width, height,
+        crop: typeof cropHeader === 'string' && /^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*)){3}$/.test(cropHeader) ? cropHeader.split(',').map(Number) : null,
+        confirmed: req.headers['x-outline-confirmed'] === 'true' };
+      const cap = 32 * 1024 * 1024;
+      if (Number(req.headers['content-length']) > cap) throw new RequestError(413, 'The outline is too large.');
+      const { status, outline } = await fullObjects.putOutline(draftId, jobId, id, request, await readBody(req, cap));
+      sendJson(res, status, outline);
+      return;
+    }
     const outlineMatch = OUTLINE_CORRECTIONS_PATH.exec(pathname);
     if (outlineMatch) {
       await requireOwner();
@@ -1133,13 +1203,19 @@ export function createAppServer({
       await sendStatic(req, res, path.join(THREE_DIR, name), type, transform);
       return;
     }
+    const ownerThreeFile = OWNER_THREE_FILES.get(pathname);
+    if (ownerThreeFile && reading) {
+      const [name, type] = ownerThreeFile;
+      await sendStatic(req, res, path.join(THREE_DIR, name), type, (text) => text.replace("from 'three';", "from '/vendor/three.module.js';"));
+      return;
+    }
     const bvhFile = PRIVATE_VENDOR_FILES.get(pathname);
     if (bvhFile && reading) {
       const [name, type, transform] = bvhFile;
       await sendStatic(req, res, path.join(BVH_DIR, name), type, transform);
       return;
     }
-    if (staticFile || vendorFile || bvhFile || pathname.startsWith('/api/drafts')) {
+    if (staticFile || vendorFile || ownerThreeFile || bvhFile || pathname.startsWith('/api/drafts')) {
       sendJson(res, 405, { error: 'Method not allowed.' });
       return;
     }

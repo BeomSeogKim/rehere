@@ -6,10 +6,12 @@ import {
   boxProblem,
   buildBlockedReason,
   createEditSession,
+  createFullObjectSceneObjects,
   createObjectSceneObjects,
   createSceneObjects,
   editProblem,
   facingGuide,
+  fullObjectBackground,
   jobStatusText,
   objectSurfaceMeshes,
   surfaceMeshes,
@@ -157,6 +159,42 @@ describe('three.js scene', () => {
 
     applyEdit({ offset: [0, 0, 0], yaw: 0 });
     assert.ok(foreground.position.distanceTo(pivot) < 1e-12);
+  });
+});
+
+describe('full object scene', () => {
+  it('removes photo triangles intersecting the confirmed source-pixel mask', () => {
+    const surface = syntheticSurface();
+    const data = new Uint8Array(600 * 500);
+    data[10 * 600 + 10] = 1;
+    const background = fullObjectBackground(surface, { width: 600, height: 500, data });
+    assert.ok(background.indices.length > 0);
+    for (let i = 0; i < background.indices.length; i += 3) {
+      const triangle = background.indices.slice(i, i + 3);
+      const xs = triangle.map((index) => background.uvs[index * 2] * 600);
+      const ys = triangle.map((index) => (1 - background.uvs[index * 2 + 1]) * 500);
+      assert.ok(!(Math.floor(Math.min(...xs)) <= 10 && Math.ceil(Math.max(...xs)) >= 10
+        && Math.floor(Math.min(...ys)) <= 10 && Math.ceil(Math.max(...ys)) >= 10));
+    }
+    assert.throws(() => fullObjectBackground(surface, { width: 599, height: 500, data }), /outline/);
+    assert.throws(() => fullObjectBackground({ ...surface, schema_version: 2 }, { width: 600, height: 500, data }), /scene|objects/i);
+  });
+
+  it('keeps the base model rotation and pivot when the owner moves and turns it', () => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([2, 0, 0, 0, 1, 0, 0, 0, 1], 3));
+    const model = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const initial = { position: [1, 2, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 2, modelPivot: [1, 0, 0] };
+    const mask = { width: 600, height: 500, data: new Uint8Array(600 * 500) };
+    mask.data[10 * 600 + 10] = 1;
+    const result = createFullObjectSceneObjects(THREE, syntheticSurface(), null, model, initial, mask);
+    const point = new THREE.Vector3(2, 0, 0);
+    assert.ok(model.localToWorld(point.clone()).distanceTo(new THREE.Vector3(1, 2, -1)) < 1e-9);
+    result.applyEdit({ offset: [0.5, 0, 0], yaw: Math.PI / 2 });
+    assert.ok(model.localToWorld(point.clone()).distanceTo(new THREE.Vector3(3.5, 2, -3)) < 1e-9);
+    result.applyEdit({ offset: [0, 0, 0], yaw: 0 });
+    assert.ok(model.localToWorld(point.clone()).distanceTo(new THREE.Vector3(1, 2, -1)) < 1e-9);
+    assert.equal(result.scene.children.length, 2);
   });
 });
 

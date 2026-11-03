@@ -779,6 +779,7 @@ export class ReconstructionStore {
   async #compositionParent(draftId, reference) {
     const manifest = await this.editableScene(draftId, reference.jobId);
     if (manifest.status !== 'ready' || isComposition(manifest)) throw new RequestError(409, 'Select an object from a finished single-photo scene.');
+    if (manifest.edit?.fullObject) throw new RequestError(409, 'Composing a full-object version is not available yet.');
     if (isTwoObject(manifest)) assertObjectsConfirmed(manifest);
     assertSceneUsable(manifest, 'place');
     const original = await this.verifiedOriginal(draftId, manifest.sourceId, 'place');
@@ -893,6 +894,12 @@ export class ReconstructionStore {
   async get(draftId, jobId) {
     await this.recover();
     const manifest = await this.readManifest(draftId, jobId);
+    if (manifest?.edit?.fullObject) return this.fullObjects.withCommit(async () => {
+      const current = await this.readManifest(draftId, jobId);
+      if (!current) return null;
+      if (current.edit?.fullObject) await this.fullObjects.validateBinding(draftId, jobId, current.edit.fullObject);
+      return publicManifest(current, await this.sceneSourceUses(current));
+    });
     return manifest && publicManifest(manifest, await this.sceneSourceUses(manifest));
   }
 
@@ -922,7 +929,7 @@ export class ReconstructionStore {
   // Requests cancellation of this place's running work. Only called once its
   // deletion barrier is durable; nothing is awaited and no data is recalled.
   abortPlace(draftId) {
-    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition]) {
+    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition, this.fullObjects?.active]) {
       if (item?.draftId !== draftId) continue;
       try {
         item.controller.abort();
@@ -938,7 +945,7 @@ export class ReconstructionStore {
     const builds = new Set();
     if (this.active?.draftId === draftId) builds.add(this.active.id);
     for (const [jobId, runner] of this.runners) if (runner.draftId === draftId) builds.add(jobId);
-    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition].filter((item) => item?.draftId === draftId).length;
+    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition, this.fullObjects?.active].filter((item) => item?.draftId === draftId).length;
   }
 
   async asset(draftId, jobId, name) {
@@ -958,6 +965,14 @@ export class ReconstructionStore {
       const assets = path.join(this.jobDir(draftId, jobId), 'assets');
       if (!(await safeJobDirectory(assets, this.rootDir))) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
       return { ...entry, body: await verifiedAsset(path.join(assets, name), entry, COMPOSITION_OUTPUTS[name]) };
+    }
+    if (name === 'texture.jpg') {
+      const original = await this.verifiedOriginal(draftId, raw.sourceId, 'place');
+      if (original.source.sha256 !== raw.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
+      const assets = path.join(this.jobDir(draftId, jobId), 'assets');
+      if (!(await safeJobDirectory(assets, this.rootDir))) throw new RequestError(409, VISIBLE_SURFACE_UNVERIFIED);
+      await verifiedAsset(path.join(assets, 'surface.json'), raw.derivedAssets.find((item) => item.name === 'surface.json'), OUTPUTS['surface.json']);
+      return { ...entry, body: await verifiedAsset(path.join(assets, name), entry, OUTPUTS[name]) };
     }
     return { ...entry, file: path.join(this.jobDir(draftId, jobId), 'assets', name) };
   }
@@ -1035,7 +1050,7 @@ export class ReconstructionStore {
         }
       }
       if (this.closed) throw new RequestError(503, 'The app is shutting down. Try again later.');
-      if (this.active) throw new RequestError(409, 'Another scene is being built right now. Try again when it finishes.');
+      if (this.active || this.runners.size || this.fullObjects?.active) throw new RequestError(409, 'Another scene is being built right now. Try again when it finishes.');
 
       const now = new Date().toISOString();
       const manifest = {
@@ -1395,7 +1410,8 @@ export class ReconstructionStore {
           throw new RequestError(409, 'This edit request was already used with different values.');
         }
         assertReplayUsable(manifest, previous.version);
-        return { version: previous.version, offset: previous.offset, yaw: previous.yaw };
+        if (previous.fullObject) await this.fullObjects.validateBinding(draftId, jobId, previous.fullObject);
+        return { version: previous.version, offset: previous.offset, yaw: previous.yaw, ...(previous.fullObject && { fullObject: previous.fullObject }) };
       }
       if (manifest.status !== 'ready') throw new RequestError(409, 'Only a finished scene can be edited.');
       await this.assertSceneSources(manifest);
@@ -1403,7 +1419,8 @@ export class ReconstructionStore {
         throw new RequestError(409, 'The scene was changed elsewhere. Reload the saved version before applying this edit.');
       }
       assertSceneUsable(manifest, 'place');
-      const edit = { version: manifest.edit.version + 1, offset: request.offset, yaw: request.yaw };
+      if (manifest.edit.fullObject) await this.fullObjects.validateBinding(draftId, jobId, manifest.edit.fullObject);
+      const edit = { version: manifest.edit.version + 1, offset: request.offset, yaw: request.yaw, ...(manifest.edit.fullObject && { fullObject: manifest.edit.fullObject }) };
       await this.saveVersion(manifest, edit, { requestId: request.requestId, baseVersion: request.baseVersion, ...edit, dependencies: currentDependencies(manifest) });
       return edit;
     });
@@ -1577,6 +1594,7 @@ export class ReconstructionStore {
   async proposals(draftId, jobId) {
     await this.recover();
     const manifest = await this.editableScene(draftId, jobId);
+    if (manifest.edit?.fullObject) throw new RequestError(409, 'Memory proposals for this full-object version are not available yet.');
     // Proposals for a saved alternative are listed only under that alternative.
     return this.projectProposals(manifest, (manifest.proposals ?? []).filter((item) => !item.scope).reverse());
   }
@@ -1603,20 +1621,26 @@ export class ReconstructionStore {
 
   async history(draftId, jobId) {
     await this.recover();
-    const manifest = await this.editableScene(draftId, jobId);
-    if (isComposition(manifest)) await this.assertSceneSources(manifest);
-    // Owner-only audit: whether restoring each version is still allowed.
-    const { place } = await this.sceneSourceUses(manifest);
-    return editHistory(manifest).map((entry) => {
-      const dependencies = versionDependencies(manifest, entry.version);
-      return { ...entry, dependencies: [...dependencies], blocked: !place || dependenciesBlocked(manifest, dependencies) };
-    });
+    const read = async () => {
+      const manifest = await this.editableScene(draftId, jobId);
+      if (isComposition(manifest)) await this.assertSceneSources(manifest);
+      // Owner-only audit: whether restoring each version is still allowed.
+      const { place } = await this.sceneSourceUses(manifest);
+      return Promise.all(editHistory(manifest).map(async (entry) => {
+        const dependencies = versionDependencies(manifest, entry.version);
+        const fullObject = manifest.edits.find((item) => item.version === entry.version)?.fullObject;
+        if (fullObject) await this.fullObjects.validateBinding(draftId, jobId, fullObject);
+        return { ...entry, ...(fullObject && { fullObject }), dependencies: [...dependencies], blocked: !place || dependenciesBlocked(manifest, dependencies) };
+      }));
+    };
+    return this.serialize(() => this.placeDeletions ? this.placeDeletions.commit(read) : read());
   }
 
   async createProposal(draftId, jobId, body) {
     await this.recover();
     const accepted = await this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
+      if (manifest.edit?.fullObject) throw new RequestError(409, 'Memory proposals for this full-object version are not available yet.');
       const twoObjects = isTwoObject(manifest);
       if (isComposition(manifest)) await this.assertSceneSources(manifest);
       const request = parseProposalRequest(body, { targetIds: twoObjects ? [...OBJECT_IDS] : null });
@@ -1927,6 +1951,7 @@ export class ReconstructionStore {
     await this.recover();
     return this.serialize(async () => {
       const manifest = await this.editableScene(draftId, jobId);
+      if (manifest.edit?.fullObject) throw new RequestError(409, 'Memory proposals for this full-object version are not available yet.');
       if (isComposition(manifest)) await this.assertSceneSources(manifest);
       const proposals = manifest.proposals ?? [];
       const proposal = proposals.find((item) => item.id === proposalId && !item.scope);
@@ -1982,6 +2007,9 @@ export class ReconstructionStore {
       if (isComposition(manifest)) await this.assertSceneSources(manifest);
       const twoObjects = isTwoObject(manifest);
       const request = parseUndoRequest(body, { twoObjects });
+      if (manifest.edit?.fullObject || manifest.edits.some((item) => item.version === request.targetVersion && item.fullObject)) {
+        throw new RequestError(409, 'Restoring a full-object version is not available yet.');
+      }
       const previous = manifest.edits.find((item) => item.requestId === request.requestId);
       if (previous) {
         if (previous.kind !== 'undo' || previous.baseVersion !== request.baseVersion || previous.targetVersion !== request.targetVersion
@@ -2344,6 +2372,7 @@ export class ReconstructionStore {
     if (this.activeStory?.draftId === draftId && this.activeStory.sourceIds.includes(sourceId)) impacts.processing += 1;
     if (this.activeOutline?.draftId === draftId && this.activeOutline.sourceId === sourceId) impacts.processing += 1;
     if (this.activeComposition?.draftId === draftId && this.activeComposition.sourceIds.includes(sourceId)) impacts.processing += 1;
+    if (this.fullObjects?.active?.draftId === draftId && this.fullObjects.active.sourceId === sourceId) impacts.processing += 1;
     return impacts;
   }
 
@@ -2367,7 +2396,7 @@ export class ReconstructionStore {
       // allows is asked to stop again, and the answer reflects that attempt.
       // Story decoding and outline correction need only place use, so a
       // model- or share-only reduction leaves that local work running.
-      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, 'place'], [this.activeOutline, 'place'], [this.activeComposition, 'place']];
+      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, 'place'], [this.activeOutline, 'place'], [this.activeComposition, 'place'], [this.fullObjects?.active, 'model']];
       const running = work.filter(([item, purpose]) => item?.draftId === draftId
         && (item.sourceIds ?? [item.sourceId]).includes(sourceId) && !allows(policy, purpose)).map(([item]) => item);
       if (running.length > 0) {
@@ -2395,7 +2424,8 @@ export class ReconstructionStore {
     this.activeContributionMedia?.controller.abort();
     this.activeOutline?.controller.abort();
     this.activeComposition?.controller.abort();
+    this.fullObjects?.active?.controller.abort();
     await this.serialize(() => {});
-    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done, this.activeOutline?.done.catch(() => {}), this.activeComposition?.done.catch(() => {})]);
+    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done, this.activeOutline?.done.catch(() => {}), this.activeComposition?.done.catch(() => {}), this.fullObjects?.active?.done.catch(() => {})]);
   }
 }

@@ -719,6 +719,9 @@ function projectEra(variant, blocked) {
 // `sourceBlocked` is true when the scene's photo has no current place use;
 // every variant then counts as blocked.
 function projectVariant(manifest, variant, sourceBlocked) {
+  if (variant.edit?.fullObject || manifest.edits.some((item) => item.version === variant.parentVersion && item.fullObject)) {
+    throw fail(409, 'Alternatives for this full-object version are not available yet.');
+  }
   const blocked = sourceBlocked || dependenciesBlocked(manifest, variant.contributionIds);
   // An owner revision takes the ordinal its shares and stories use (shares.mjs
   // savedView); variants are only appended or replaced in place, so it is stable.
@@ -752,6 +755,9 @@ const collaborationOf = (manifest) => manifest.collaboration ?? { revision: 0, c
 // baseline to compare against: its whole current arrangement and rule for a
 // two-object scene.
 function addContribution(manifest, collaboration, principal, request, now, extra = {}) {
+  if (manifest.edit?.fullObject && collaboration.variants.length === 0) {
+    throw fail(409, 'Contributions to this full-object version are not available yet.');
+  }
   const contribution = {
     id: extra.id ?? randomUUID(),
     requestId: request.requestId,
@@ -1436,6 +1442,7 @@ export class CollaborationStore {
       let edit = null;
       let editReceipt = null;
       if (request.transform) {
+        if (manifest.edit?.fullObject) throw fail(409, 'Contribution-based changes to this full-object version are not available yet.');
         this.#ready(manifest);
         if (!contributionAllows(contribution, 'place')) throw fail(403, 'This contribution was not shared with permission to change the place.');
         if (!photoAttested(manifest, contribution)) throw fail(409, contribution.voice ? UNAVAILABLE_MATERIAL : UNAVAILABLE_PHOTO);
@@ -1581,6 +1588,9 @@ export class CollaborationStore {
       const collaboration = collaborationOf(manifest);
       const variant = collaboration.variants.find((item) => item.id === variantId);
       if (!variant) throw fail(404, 'This version of the scene could not be found.');
+      if (variant.edit?.fullObject || manifest.edits.some((item) => item.version === variant.parentVersion && item.fullObject)) {
+        throw fail(409, 'Time assertions for this full-object version are not available yet.');
+      }
       const sourceBlocked = await this.#sourceBlocked(manifest);
       if (this.#receipt(collaboration, request, 'era', principal.id, variantId)) return projectVariant(manifest, variant, sourceBlocked);
       if (request.baseRevision !== variant.eraRevision) throw fail(409, 'The time for this version changed. Reload it before saving.');
@@ -1613,6 +1623,9 @@ export class CollaborationStore {
   // of every original photo and derived file, and every contribution the
   // arrangement inherits. Model permission is never needed.
   async #revisable(manifest, variant) {
+    if (variant.edit?.fullObject || manifest.edits.some((item) => item.version === variant.parentVersion && item.fullObject)) {
+      throw fail(409, 'Alternatives for this full-object version are not available yet.');
+    }
     if (!REVISABLE_KINDS.has(variant.kind)) throw fail(409, REVISION_UNREADABLE);
     this.#ready(manifest);
     assertObjectsConfirmed(manifest);

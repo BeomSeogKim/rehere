@@ -49,7 +49,7 @@ export function photographedSideCamera(pivot, transform) {
 // any later step frees what was already created.
 // onDraw, when given, runs after every frame is drawn (camera moves included),
 // for anything placed over the canvas.
-export async function createViewer(viewport, surface, textureUrl, label, { onDraw = null } = {}) {
+export async function createViewer(viewport, surface, textureUrl, label, { onDraw = null, fullObject = null } = {}) {
   const releases = [];
   let released = false;
   const release = () => {
@@ -64,14 +64,14 @@ export async function createViewer(viewport, surface, textureUrl, label, { onDra
     }
   };
   try {
-    return await setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, () => released);
+    return await setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, () => released, fullObject);
   } catch (error) {
     release();
     throw error;
   }
 }
 
-async function setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, isReleased) {
+async function setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, isReleased, fullObject) {
   let renderer;
   try {
     renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -101,10 +101,65 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   } else texture = await loadTexture(textureUrl);
   const twoObjects = surface?.schema_version === 2 || composition;
   if (twoObjects && typeof photoScene.createObjectSceneObjects !== 'function') throw new Error('unsupported');
-  const objects = twoObjects ? photoScene.createObjectSceneObjects(THREE, surface, texture) : photoScene.createSceneObjects(THREE, surface, texture);
-  const meshes = (twoObjects ? [objects.background, ...objects.objects.map((object) => object.mesh)] : [objects.background, objects.foreground]).filter(Boolean);
+  if (twoObjects && fullObject) throw new Error('unsupported');
+  let objects;
+  let modelMeshes = [];
+  let outlineMaskBlob = null;
+  if (fullObject) {
+    const read = async (url, expected, maximum) => {
+      if (typeof url !== 'string' || !/^[a-f0-9]{64}$/.test(expected)) throw new Error('full-object');
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response.ok) throw new Error('full-object');
+      const bytes = await response.arrayBuffer();
+      if (bytes.byteLength === 0 || bytes.byteLength > maximum) throw new Error('full-object');
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      const actual = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
+      if (actual !== expected || isReleased()) throw new Error('full-object');
+      return bytes;
+    };
+    const [maskBytes, glbBytes] = await Promise.all([
+      read(fullObject.maskUrl, fullObject.outlineSha256, 32 * 1024 * 1024),
+      read(fullObject.assetUrl, fullObject.sha256, 128 * 1024 * 1024),
+    ]);
+    let bitmap;
+    try { bitmap = await createImageBitmap(new Blob([maskBytes], { type: 'image/png' }), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }); } catch { throw new Error('full-object'); }
+    let mask;
+    try {
+      const [width, height] = surface.source.image_size;
+      if (bitmap.width !== width || bitmap.height !== height || width * height > 32_000_000) throw new Error('full-object');
+      const { readBinaryMask } = await import('./object-outline-editor.js');
+      const data = readBinaryMask(bitmap, width, height, (w, h) => (
+        typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(w, h)
+          : Object.assign(document.createElement('canvas'), { width: w, height: h })
+      ));
+      mask = { width, height, data };
+    } finally { bitmap.close?.(); }
+    outlineMaskBlob = new Blob([maskBytes], { type: 'image/png' });
+    releases.push(() => { outlineMaskBlob = null; });
+    const { GLTFLoader } = await import('/vendor/loaders/GLTFLoader.js');
+    const manager = new THREE.LoadingManager();
+    manager.setURLModifier(() => { throw new Error('full-object'); });
+    let model;
+    try { model = (await new GLTFLoader(manager).parseAsync(glbBytes, '')).scene; } catch { throw new Error('full-object'); }
+    model.traverse((item) => { if (item.isMesh) modelMeshes.push(item); });
+    releases.push(() => {
+      for (const mesh of modelMeshes) {
+        mesh.geometry.dispose();
+        for (const material of (Array.isArray(mesh.material) ? mesh.material : [mesh.material])) material?.dispose();
+      }
+    });
+    if (modelMeshes.length !== 1 || !modelMeshes[0].geometry.getAttribute('color') || isReleased()) throw new Error('full-object');
+    for (const mesh of modelMeshes) {
+      for (const material of (Array.isArray(mesh.material) ? mesh.material : [mesh.material])) material?.dispose();
+      mesh.material = new THREE.MeshBasicMaterial({ vertexColors: true });
+    }
+    objects = photoScene.createFullObjectSceneObjects(THREE, surface, texture, model, fullObject.initial, mask);
+  } else {
+    objects = twoObjects ? photoScene.createObjectSceneObjects(THREE, surface, texture) : photoScene.createSceneObjects(THREE, surface, texture);
+  }
+  const meshes = (fullObject ? [objects.background, ...modelMeshes] : twoObjects ? [objects.background, ...objects.objects.map((object) => object.mesh)] : [objects.background, objects.foreground]).filter(Boolean);
   releases.push(() => {
-    for (const mesh of meshes) {
+    for (const mesh of (fullObject ? [objects.background] : meshes)) {
       mesh.geometry.dispose();
       mesh.material.dispose();
     }
@@ -255,6 +310,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   return {
     setInteractive: explore,
     isInteractive: () => interactive,
+    outlineMaskBlob: () => isReleased() ? null : outlineMaskBlob,
     // Photo framing on or off. Changes only the canvas size, its centring
     // offsets and the projection aspect; never the camera, controls, geometry,
     // transforms, texture or field of view.

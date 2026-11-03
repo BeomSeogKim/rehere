@@ -338,7 +338,10 @@ describe('the visitor listener', () => {
       assert.equal(page.status, 200);
       assert.equal(page.body.toString(), await readFile(path.join(PUBLIC, 'visit.html'), 'utf8'), 'the visit page, not the app page');
       assert.equal((await raw(visitorPort, 'GET', '/visitor-entry.js')).status, 200);
-      // Every module the visit page loads is on the allowlist.
+      // The shared viewer has an owner-only dynamic import for full objects.
+      // Those versions cannot be shared, so the visitor must not serve it.
+      assert.equal((await raw(visitorPort, 'GET', '/object-outline-editor.js')).status, 404);
+      // Every module the visit page can load is on the allowlist.
       const seen = new Set();
       const queue = ['visitor-entry.js'];
       while (queue.length) {
@@ -346,7 +349,11 @@ describe('the visitor listener', () => {
         if (seen.has(file)) continue;
         seen.add(file);
         const source = await readFile(path.join(PUBLIC, file), 'utf8');
-        for (const match of source.matchAll(/(?:import|export)[^'"]*?from\s*['"](\.\/[^'"]+)['"]|import\(\s*['"](\.\/[^'"]+)['"]\s*\)/g)) queue.push((match[1] ?? match[2]).slice(2));
+        for (const match of source.matchAll(/(?:import|export)[^'"]*?from\s*['"](\.\/[^'"]+)['"]|import\(\s*['"](\.\/[^'"]+)['"]\s*\)/g)) {
+          const dependency = (match[1] ?? match[2]).slice(2);
+          if (file === 'scene-viewer.js' && match[2] && dependency === 'object-outline-editor.js') continue;
+          queue.push(dependency);
+        }
       }
       for (const file of seen) assert.equal((await raw(visitorPort, 'GET', `/${file}`)).status, 200, `${file} is served`);
     } finally {

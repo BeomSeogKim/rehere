@@ -287,22 +287,36 @@ const JOB_FILES = [/^manifest\.json$/, /^region-links\.json$/, /^memory-links\.j
 const WAV = new RegExp(`^${UUID_SOURCE}\\.wav$`);
 const CONTRIBUTION_DIR = new RegExp(`^(${UUID_SOURCE}|\\.staging-${UUID_SOURCE}-${UUID_SOURCE})$`);
 const PART_FILE = new RegExp(`^${UUID_SOURCE}(\\.bin|\\.${UUID_SOURCE}\\.tmp)$`);
+const FULL_OUTLINE_STAGE = new RegExp(`^outline-${UUID_SOURCE}-${UUID_SOURCE}$`);
 
 export const draftTree = (parts, type) => type === 'file' && parts.length === 1 && DRAFT_FILES.some((pattern) => pattern.test(parts[0]));
 
 export function sceneTree(parts, type) {
-  const [job, second, third, fourth] = parts;
+  const [job, second, third, fourth, fifth, sixth] = parts;
   if (!isId(job)) return false;
   if (parts.length === 1) return type === 'directory';
   if (parts.length === 2) {
     if (type === 'file') return JOB_FILES.some((pattern) => pattern.test(second));
-    return ['assets', 'stories', 'story-staging', 'contributions'].includes(second);
+    return ['assets', 'stories', 'story-staging', 'contributions', 'full-object'].includes(second);
   }
   if (parts.length === 3) {
     if (second === 'assets') return type === 'file' && (Object.hasOwn(OUTPUTS, third) || Object.hasOwn(COMPOSITION_OUTPUTS, third));
     if (second === 'stories' || second === 'story-staging') return type === 'file' && WAV.test(third);
     if (second === 'contributions') return type === 'directory' && CONTRIBUTION_DIR.test(third);
+    if (second === 'full-object') return type === 'directory' && (['outlines', 'builds'].includes(third) || FULL_OUTLINE_STAGE.test(third));
     return false;
+  }
+  if (second === 'full-object' && parts.length === 4) {
+    if (FULL_OUTLINE_STAGE.test(third)) return type === 'file' && ['mask.png', 'outline.json'].includes(fourth);
+    return type === 'directory' && ['outlines', 'builds'].includes(third) && isId(fourth);
+  }
+  if (second === 'full-object' && parts.length === 5 && isId(fourth)) {
+    if (third === 'outlines') return type === 'file' && ['mask.png', 'outline.json'].includes(fifth);
+    if (third === 'builds') return type === 'directory' ? fifth === 'output'
+      : type === 'file' && (['build.json', 'object.glb'].includes(fifth) || temp('build.json').test(fifth));
+  }
+  if (second === 'full-object' && parts.length === 6 && third === 'builds' && isId(fourth) && fifth === 'output') {
+    return type === 'file' && ['object.glb', 'object.json'].includes(sixth);
   }
   return parts.length === 4 && second === 'contributions' && type === 'file' && MEDIA.has(fourth);
 }
@@ -347,6 +361,37 @@ async function readJsonFile(file) {
 }
 
 const list = (value) => (Array.isArray(value) ? value : null);
+
+// Full-object records live beside the scene manifest. Bind accepted records
+// into deletion review so a newly accepted outline or build makes it stale.
+async function fullObjectRecords(jobDir, rootDir) {
+  const base = path.join(jobDir, 'full-object');
+  const found = await folder(base, rootDir);
+  if (found === 'missing') return null;
+  if (found !== 'directory') throw fail(503, UNREVIEWABLE);
+  const entries = [];
+  for (const [group, filename, limit] of [['outlines', 'outline.json', 32], ['builds', 'build.json', 16]]) {
+    const directory = path.join(base, group), state = await folder(directory, rootDir);
+    if (state === 'missing') continue;
+    if (state !== 'directory') throw fail(503, UNREVIEWABLE);
+    const ids = (await readdir(directory)).sort();
+    if (ids.length > limit || !ids.every(isId)) throw fail(503, UNREVIEWABLE);
+    for (const id of ids) {
+      const recordDir = path.join(directory, id);
+      if ((await folder(recordDir, rootDir)) !== 'directory') throw fail(503, UNREVIEWABLE);
+      const file = path.join(recordDir, filename);
+      try {
+        if (!(await lstat(file)).isFile()) throw new Error('not a file');
+        const bytes = await readCapped(file, 4 * 1024 * 1024, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        const value = JSON.parse(bytes.toString('utf8'));
+        if (!value || typeof value !== 'object' || Array.isArray(value)
+            || (group === 'outlines' ? value.dto?.outlineId !== id : value.id !== id)) throw new Error('invalid record');
+        entries.push([group, id, sha256(bytes)]);
+      } catch { throw fail(503, UNREVIEWABLE); }
+    }
+  }
+  return entries;
+}
 
 export class PlaceDeletionService {
   constructor({ dataDir, placeDeletions, reconstructions, intakes, accessStore }) {
@@ -463,7 +508,9 @@ export class PlaceDeletionService {
       } catch (error) {
         if (error?.code !== 'ENOENT') throw fail(503, UNREVIEWABLE);
       }
-      jobs.push({ id: jobId, manifest: manifestFile.sha, links: linksFile.missing ? null : linksFile.sha, memories });
+      const fullObjects = await fullObjectRecords(jobDir, this.dataDir);
+      jobs.push({ id: jobId, manifest: manifestFile.sha, links: linksFile.missing ? null : linksFile.sha, memories,
+        ...(fullObjects !== null && { fullObjects }) });
     }
     inventory.contributionProviders = providers.size;
 

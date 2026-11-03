@@ -67,12 +67,27 @@ export class OrbitControls {
   update() {}
   dispose() { globalThis.viewerLog.push('controls.dispose'); }
 }`;
+const actualViewer = import.meta.resolve('../public/scene-viewer.js');
+const spaceViewerShim = `
+export * from '${actualViewer}';
+import { createViewer as actualCreateViewer } from '${actualViewer}';
+export function createViewer(...args) {
+  if (args[4]?.fullObject && globalThis.mockFullObjectCreateViewer) return globalThis.mockFullObjectCreateViewer(...args);
+  return actualCreateViewer(...args);
+}`;
 const SHIMS = {
   '/vendor/three.module.js': `data:text/javascript,${encodeURIComponent(threeShim)}`,
   '/vendor/OrbitControls.js': `data:text/javascript,${encodeURIComponent(controlsShim)}`,
+  '/vendor/loaders/GLTFLoader.js': `data:text/javascript,${encodeURIComponent('export class GLTFLoader { constructor(manager) { this.manager = manager; } parseAsync(bytes) { return globalThis.parseFullObject(bytes, this.manager); } }')}`,
 };
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier === './scene-viewer.js' && context.parentURL.endsWith('/public/space.js')) {
+      return { url: `data:text/javascript,${encodeURIComponent(spaceViewerShim)}`, shortCircuit: true };
+    }
+    if (specifier === './object-outline-editor.js' && context.parentURL.endsWith('/public/space.js')) {
+      return { url: `data:text/javascript,${encodeURIComponent('export function mountObjectOutlineEditor(host, options) { globalThis.outlineComponent = { host, options, disposed: false, dispose() { this.disposed = true; } }; return globalThis.outlineComponent; }')}`, shortCircuit: true };
+    }
     return SHIMS[specifier] ? { url: SHIMS[specifier], shortCircuit: true } : nextResolve(specifier, context);
   },
 });
@@ -115,6 +130,7 @@ const settle = async () => {
 };
 
 let mountSpace;
+let rawCreateViewer;
 let job;
 let surfaceBody;
 let posts;
@@ -126,6 +142,10 @@ let collaboration;
 let gets = [];
 let storyList;
 let history;
+let outlinePuts;
+let savedOutlines;
+let objectBuilds;
+let objectBuildById;
 
 before(async () => {
   globalThis.document = { createElement: (tag) => new FakeElement(tag) };
@@ -133,6 +153,12 @@ before(async () => {
   globalThis.ResizeObserver = FakeResizeObserver;
   globalThis.fetch = async (url, options = {}) => {
     gets.push(url);
+    if (options.method === 'PUT') {
+      let respond;
+      const promise = new Promise((resolve) => (respond = resolve));
+      outlinePuts.push({ url, options, respond });
+      return promise;
+    }
     if (options.method === 'POST') {
       let respond;
       const promise = new Promise((resolve) => (respond = resolve));
@@ -146,6 +172,9 @@ before(async () => {
     if (url.endsWith('/stories')) return json(200, { stories: storyList });
     if (url === '/api/invitations') return json(200, []);
     if (url.endsWith('/history')) return json(200, history);
+    if (url.endsWith('/full-object/outlines')) return json(200, { outlines: savedOutlines });
+    if (url.endsWith('/full-object/builds')) return json(200, { builds: objectBuilds });
+    if (/\/full-object\/builds\/[^/]+$/.test(url)) return objectBuildById ? json(200, objectBuildById) : json(404, {});
     if (heldGets) {
       let respond;
       const promise = new Promise((resolve) => (respond = resolve));
@@ -155,10 +184,11 @@ before(async () => {
     return json(200, job);
   };
   ({ mountSpace } = await import('../public/space.js'));
+  ({ createViewer: rawCreateViewer } = await import('../public/scene-viewer.js'));
 });
 
 after(() => {
-  for (const name of ['document', 'window', 'ResizeObserver', 'fetch', 'viewerLog', 'viewerFail', 'lastRenderedScene']) delete globalThis[name];
+  for (const name of ['document', 'window', 'ResizeObserver', 'fetch', 'viewerLog', 'viewerFail', 'lastRenderedScene', 'outlineComponent', 'mockFullObjectCreateViewer', 'parseFullObject', 'createImageBitmap']) delete globalThis[name];
 });
 
 beforeEach(() => {
@@ -166,6 +196,11 @@ beforeEach(() => {
   globalThis.viewerFail = null;
   globalThis.document.activeElement = null;
   posts = [];
+  outlinePuts = [];
+  savedOutlines = [];
+  objectBuilds = [];
+  objectBuildById = null;
+  delete globalThis.mockFullObjectCreateViewer;
   heldGets = null;
   gets = [];
   proposals = [];
@@ -178,6 +213,8 @@ beforeEach(() => {
     id: JOB_ID,
     draftId: DRAFT_ID,
     sourceId: SOURCE_ID,
+    sourceSha256: 'b'.repeat(64),
+    derivedAssets: [{ name: 'surface.json', sha256: 'c'.repeat(64) }],
     box: [100, 100, 400, 400],
     status: 'ready',
     createdAt: new Date().toISOString(),
@@ -208,6 +245,566 @@ async function openScene({ sources = [], text = '', textRecord = null } = {}) {
 }
 
 const count = (entry) => globalThis.viewerLog.filter((item) => item === entry).length;
+
+describe('source-bound full object owner flow', () => {
+  it('confirms the original-grid outline, retries uncertain bytes, and starts only an explicit build', async () => {
+    const view = await openScene();
+    const landing = view.find((node) => node.className === 'place-landing')[0];
+    assert.ok(landing.findAll((node) => node.tag === 'button' && node.textContent === 'Explore an estimated shape').length, 'the next step is visible on the place landing');
+    view.button('Explore an estimated shape').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    assert.match(editor.options.source.url, /\/assets\/texture\.jpg$/);
+    assert.match(editor.options.initialMaskUrl, /\/assets\/mask\.png$/);
+    const mask = new Blob(['unchanged'], { type: 'image/png' });
+    const payload = { mask, maskSha256: 'd'.repeat(64), width: 600, height: 500, crop: [0, 0, 600, 500] };
+    const first = editor.options.onConfirm(payload);
+    assert.equal(outlinePuts.length, 1);
+    assert.equal(outlinePuts[0].options.body, mask);
+    assert.equal(outlinePuts[0].options.headers['X-Source-SHA256'], 'b'.repeat(64));
+    assert.equal(outlinePuts[0].options.headers['X-Parent-Surface-SHA256'], 'c'.repeat(64));
+    assert.equal(outlinePuts[0].options.headers['X-Base-Version'], '1');
+    outlinePuts[0].respond(json(503, {}));
+    assert.equal(await first, false);
+    const retry = editor.options.onConfirm(payload);
+    assert.equal(outlinePuts[1].url, outlinePuts[0].url);
+    assert.equal(outlinePuts[1].options.body, mask);
+    const outlineId = outlinePuts[1].url.split('/').at(-1);
+    outlinePuts[1].respond(json(200, { outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1, confirmed: true }));
+    assert.equal(await retry, true);
+    assert.equal(editor.disposed, true);
+    assert.equal(posts.length, 0, 'saving an outline does not start a model');
+    view.button('Create estimated shape').dispatch('click');
+    await settle();
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].body.outlineId, outlineId);
+    assert.equal(posts[0].body.outlineSha256, 'd'.repeat(64));
+    posts[0].respond(json(202, { id: posts[0].body.requestId, status: 'failed', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), error: 'A supervised runner is unavailable.' }));
+    await settle();
+    assert.ok(view.find((node) => node.textContent === 'A supervised runner is unavailable.').length);
+    view.space.dispose();
+  });
+
+  it('does not call an uncertain outline cancelled or silently retry when the editor is closed', async () => {
+    const view = await openScene();
+    view.button('Check and refine the outline').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    const pending = editor.options.onConfirm({ mask: new Blob(['mask']), maskSha256: 'd'.repeat(64), crop: [0, 0, 600, 500] });
+    outlinePuts[0].respond(json(503, {}));
+    assert.equal(await pending, false);
+    editor.options.onCancel();
+    assert.ok(view.find((node) => /outline save could not be confirmed/i.test(node.textContent)).length);
+    view.button('Check and refine the outline').dispatch('click');
+    await settle();
+    assert.equal(outlinePuts.length, 1);
+    assert.ok(view.find((node) => /earlier request has an unconfirmed outcome/i.test(node.textContent)).length);
+    view.space.dispose();
+  });
+
+  it('allows a fresh outline after a definite refusal', async () => {
+    const view = await openScene();
+    view.button('Explore an estimated shape').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    const payload = { mask: new Blob(['mask']), maskSha256: 'd'.repeat(64), crop: [0, 0, 600, 500] };
+    const first = editor.options.onConfirm(payload);
+    outlinePuts[0].respond(json(403, { error: 'Photo use was stopped.' }));
+    assert.equal(await first, false);
+    const second = editor.options.onConfirm(payload);
+    assert.notEqual(outlinePuts[1].url, outlinePuts[0].url, 'a definite refusal starts a new request');
+    outlinePuts[1].respond(json(403, { error: 'Photo use was stopped.' }));
+    assert.equal(await second, false);
+    view.space.dispose();
+  });
+
+  it('says an earlier saved outline remains when its reopened editor is cancelled', async () => {
+    const view = await openScene();
+    savedOutlines = [{ outlineId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 }];
+    view.button('Find saved outlines and shapes').dispatch('click'); await settle();
+    view.button('Review outline for version 1').dispatch('click'); await settle();
+    globalThis.outlineComponent.options.onCancel();
+    assert.ok(view.find((node) => node.textContent === 'No new outline was saved. Your earlier saved outline is still available.').length);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('explains why shape creation is unavailable when model use is not granted', async () => {
+    const view = await openScene();
+    view.source.permissions.model = false;
+    view.button('Explore an estimated shape').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    const pending = editor.options.onConfirm({ mask: new Blob(['mask']), maskSha256: 'd'.repeat(64), crop: [0, 0, 600, 500] });
+    const outlineId = outlinePuts[0].url.split('/').at(-1);
+    outlinePuts[0].respond(json(201, { outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 }));
+    assert.equal(await pending, true);
+    assert.equal(view.button('Create estimated shape').disabled, true);
+    assert.ok(view.find((node) => /Use for model processing/.test(node.textContent)).length);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('allows a new outline after recovery finds no prior uncertain request', async () => {
+    const view = await openScene();
+    view.button('Explore an estimated shape').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    const pending = editor.options.onConfirm({ mask: new Blob(['mask']), maskSha256: 'd'.repeat(64), crop: [0, 0, 600, 500] });
+    outlinePuts[0].respond(json(503, {}));
+    assert.equal(await pending, false);
+    editor.options.onCancel();
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    assert.ok(view.find((node) => /earlier save may still appear later/.test(node.textContent)).length);
+    view.button('Check and refine the outline').dispatch('click');
+    await settle();
+    assert.notEqual(globalThis.outlineComponent, editor);
+    assert.equal(outlinePuts.length, 1, 'finding no saved outline does not write');
+    view.space.dispose();
+  });
+
+  it('keeps an in-flight outline request intact when recovery lists it before its response', async () => {
+    const view = await openScene();
+    view.button('Explore an estimated shape').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    const pending = editor.options.onConfirm({ mask: new Blob(['mask']), maskSha256: 'd'.repeat(64), crop: [0, 0, 600, 500] });
+    const outlineId = outlinePuts[0].url.split('/').at(-1);
+    const outline = { outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 };
+    savedOutlines = [outline];
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    outlinePuts[0].respond(json(201, outline));
+    assert.equal(await pending, true);
+    assert.ok(view.button('Create estimated shape'));
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('offers cancel while the outline photo is still loading', async () => {
+    const view = await openScene();
+    view.button('Explore an estimated shape').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    assert.equal(editor.host.hidden, true);
+    view.button('Cancel opening the outline').dispatch('click');
+    assert.equal(editor.disposed, true);
+    assert.equal(outlinePuts.length, 0);
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    assert.equal(editor.host.hidden, true);
+    view.space.dispose();
+  });
+
+  it('does not replace an open outline when a recovered build is selected', async () => {
+    const view = await openScene();
+    view.button('Explore an estimated shape').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    savedOutlines = [{ outlineId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 }];
+    objectBuilds = [{ id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', outlineSha256: 'd'.repeat(64), object: { sha256: 'e'.repeat(64) } }];
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    view.button('Check shape · Ready').dispatch('click');
+    assert.equal(editor.disposed, false);
+    assert.ok(view.find((node) => /discards any unsaved outline changes/.test(node.textContent)).length);
+    view.button('Keep current work').dispatch('click');
+    assert.equal(editor.disposed, false);
+    view.button('Check shape · Ready').dispatch('click');
+    view.button('Discard unsaved work and open').dispatch('click');
+    assert.equal(editor.disposed, true);
+    assert.ok(view.button('Review the estimated object'));
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('does not switch recovery items when an outline save starts after the choice appears', async () => {
+    const view = await openScene();
+    view.button('Explore an estimated shape').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    objectBuilds = [{ id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', outlineSha256: 'd'.repeat(64), object: { sha256: 'e'.repeat(64) } }];
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    view.button('Check shape · Ready').dispatch('click');
+    const staleDiscard = view.button('Discard unsaved work and open');
+    const pending = editor.options.onConfirm({ mask: new Blob(['mask']), maskSha256: 'd'.repeat(64), crop: [0, 0, 600, 500] });
+    assert.equal(view.button('Discard unsaved work and open'), undefined);
+    staleDiscard.dispatch('click');
+    assert.equal(editor.disposed, false);
+    assert.equal(view.button('Review the estimated object'), undefined);
+    const outlineId = outlinePuts[0].url.split('/').at(-1);
+    outlinePuts[0].respond(json(201, { outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 }));
+    assert.equal(await pending, true);
+    assert.ok(view.button('Create estimated shape'));
+    view.space.dispose();
+  });
+
+  it('does not switch recovery items when an object confirmation starts after the choice appears', async () => {
+    globalThis.mockFullObjectCreateViewer = async () => ({ originalView() {}, dispose() {}, isInteractive() { return false; }, applyEdit() {}, outlineMaskBlob() { return new Blob(['mask']); } });
+    const view = await openScene();
+    const outlineId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const buildId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    savedOutlines = [{ outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 }];
+    const object = { asset: 'object.glb', sha256: 'e'.repeat(64), initial: { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] } };
+    objectBuildById = { id: buildId, status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId, outlineSha256: 'd'.repeat(64), object };
+    objectBuilds = [objectBuildById];
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    view.button('Check shape · Ready').dispatch('click');
+    view.button('Review the estimated object').dispatch('click');
+    await settle();
+    await view.find((node) => node.alt === 'Photo copy used for this object estimate')[0].onload();
+    await view.find((node) => node.className === 'object-review-mask')[0].onload();
+    view.button('Check shape · Ready').dispatch('click');
+    const staleDiscard = view.button('Discard unsaved work and open');
+    view.button('Use this estimate at the photo position').dispatch('click');
+    await settle();
+    assert.equal(view.button('Discard unsaved work and open'), undefined);
+    staleDiscard.dispatch('click');
+    assert.equal(posts.length, 1);
+    posts[0].respond(json(503, {}));
+    await settle();
+    assert.equal(view.button('Use this estimate at the photo position').disabled, false, 'the same uncertain confirmation remains retryable');
+    view.space.dispose();
+  });
+
+  it('keeps a loaded outline photo hidden when its source is withdrawn during loading', async () => {
+    const view = await openScene();
+    view.button('Check and refine the outline').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    assert.equal(editor.host.hidden, true);
+    job.usageBlocked = true;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    assert.equal(editor.disposed, true);
+    assert.equal(editor.host.hidden, true);
+    assert.equal(outlinePuts.length, 0);
+    view.space.dispose();
+  });
+
+  it('does not offer a ready build for an outline from an older version', async () => {
+    const view = await openScene();
+    const outlineId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    savedOutlines = [{ outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 2 }];
+    objectBuilds = [{ id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId, outlineSha256: 'd'.repeat(64), object: { sha256: 'e'.repeat(64) } }];
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    view.button('Check shape · Ready').dispatch('click');
+    assert.equal(view.button('Review the estimated object'), undefined);
+    assert.ok(view.find((node) => /older or unavailable outline/.test(node.textContent)).length);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('reviews the exact ready object before explicit use, and replays an uncertain save', async (t) => {
+    const focused = [];
+    const oldFocus = FakeElement.prototype.focus;
+    FakeElement.prototype.focus = function () { focused.push(this); };
+    t.after(() => { FakeElement.prototype.focus = oldFocus; });
+    const made = [], revoked = [];
+    const oldCreateURL = URL.createObjectURL, oldRevokeURL = URL.revokeObjectURL;
+    URL.createObjectURL = () => { const url = `blob:test-${made.length}`; made.push(url); return url; };
+    URL.revokeObjectURL = (url) => revoked.push(url);
+    t.after(() => { URL.createObjectURL = oldCreateURL; URL.revokeObjectURL = oldRevokeURL; });
+    const views = [];
+    globalThis.mockFullObjectCreateViewer = async (holder, source, texture, label, options) => {
+      const result = { binding: options.fullObject, original: 0, disposed: false,
+        originalView() { this.original += 1; }, dispose() { this.disposed = true; }, outlineMaskBlob() { return new Blob(['mask']); },
+        interactive: false, isInteractive() { return this.interactive; }, setInteractive(value, options) { this.interactive = value; this.options = options; }, applyEdit() {}, getCamera() { return null; } };
+      views.push(result);
+      return result;
+    };
+    const view = await openScene();
+    const savedViewport = view.find((node) => node.className === 'space-viewport')[0];
+    const outlineId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const buildId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const outline = { outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1, confirmed: true };
+    const object = { representation: 'source-photo-full-object-v1', asset: 'object.glb', sha256: 'e'.repeat(64), bytes: 64, initial: { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] } };
+    objectBuildById = { id: buildId, status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId, outlineSha256: 'd'.repeat(64), object };
+    savedOutlines = [outline]; objectBuilds = [objectBuildById];
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    view.button('Check shape · Ready').dispatch('click');
+    assert.equal(posts.length, 0);
+    view.button('Review the estimated object').dispatch('click');
+    await settle();
+    const reviewHeading = view.find((node) => node.textContent === 'Review the estimated shape')[0];
+    const reviewControls = view.find((node) => node.className === 'object-review')[0];
+    const inspector = view.find((node) => node.className === 'scene-inspector')[0];
+    assert.equal(focused.at(-1), reviewHeading, 'review receives keyboard focus');
+    assert.equal(inspector.hidden, true, 'unrelated actions are hidden during review');
+    assert.equal(reviewControls.parent, reviewHeading.parent, 'review choices and scene share the stage');
+    assert.equal(reviewControls.hidden, false);
+    assert.equal(views.length, 1);
+    assert.equal(views[0].original, 1, 'the owner sees the photo-position estimate first');
+    assert.equal(views[0].binding.buildId, buildId);
+    assert.equal(posts.length, 0, 'reviewing never saves');
+    const photo = view.find((node) => node.alt === 'Photo copy used for this object estimate')[0];
+    assert.equal(savedViewport.hidden, true, 'the new estimate replaces the old scene in the main stage');
+    assert.equal(photo.parent, savedViewport.parent, 'photo and estimate share the scene frame');
+    assert.notEqual(photo.className, 'space-proposal', 'the existing class forces display:block over hidden outside inspection');
+    assert.equal(view.button('Use this estimate at the photo position').disabled, true, 'photo must also be visible before saving');
+    await photo.onload();
+    assert.equal(photo.hidden, true, 'the shape stays visible until the owner chooses the photo');
+    const mask = view.find((node) => node.className === 'object-review-mask')[0];
+    const staleMaskLoad = mask.onload;
+    assert.equal(view.button('Use this estimate at the photo position').disabled, true, 'the selected outline must also load');
+    await mask.onload();
+    assert.equal(view.button('Use this estimate at the photo position').disabled, false);
+    const explore = view.find((node) => node.tag === 'button' && node.textContent === 'Explore in 3D').at(-1);
+    explore.dispatch('click');
+    assert.equal(views[0].interactive, true);
+    view.find((node) => node.tag === 'button' && node.textContent === 'Photo').at(-1).dispatch('click');
+    assert.equal(photo.hidden, false);
+    assert.equal(mask.hidden, false, 'the checked outline appears over the photo');
+    assert.ok(view.find((node) => node.textContent === 'Photo · The light area marks the selected outline.').length);
+    assert.ok(view.find((node) => node.textContent === 'Choose Estimated shape to use it.' && !node.hidden).length);
+    assert.equal(views[0].interactive, false, 'hidden scene cannot keep keyboard interaction');
+    assert.equal(explore.disabled, true);
+    assert.equal(view.button('Use this estimate at the photo position').disabled, true, 'the estimate must be visible to approve it');
+    view.button('Estimated shape').dispatch('click');
+    assert.equal(photo.hidden, true);
+    assert.equal(mask.hidden, true);
+    assert.ok(view.find((node) => node.textContent === 'Estimated shape · The dark cutout marks the selected photo area; its hidden background is unknown.').length);
+    assert.equal(views[0].interactive, true);
+    assert.deepEqual(views[0].options, { focus: false }, 'restoring exploration does not steal focus');
+    assert.equal(view.button('Use this estimate at the photo position').disabled, false);
+    view.button('Use this estimate at the photo position').dispatch('click');
+    await settle();
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].body.baseVersion, 1);
+    posts[0].respond(json(503, {}));
+    await settle();
+    view.button('Use this estimate at the photo position').dispatch('click');
+    await settle();
+    assert.deepEqual(posts[1].body, posts[0].body, 'uncertain confirmation repeats the exact request');
+    job.edit = { version: 2, offset: [0, 0, 0], yaw: 0, fullObject: { buildId, outlineId, outlineSha256: 'd'.repeat(64), sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), asset: 'object.glb', sha256: 'e'.repeat(64), initial: object.initial } };
+    posts[1].respond(json(200, { version: 2, offset: [0, 0, 0], yaw: 0, fullObject: { buildId, sha256: 'e'.repeat(64) } }));
+    await settle();
+    assert.deepEqual(revoked, made, 'successful navigation revokes the one review URL');
+    assert.equal(mask.onload, null); assert.equal(mask.src, ''); assert.equal(mask.hidden, true);
+    await staleMaskLoad();
+    assert.deepEqual(revoked, made, 'a late load cannot revoke anything again');
+    assert.equal(views[0].disposed, true);
+    assert.equal(views.at(-1).binding.buildId, buildId, 'reopening uses the saved version binding');
+    assert.equal(posts.length, 2);
+    view.space.dispose();
+    assert.deepEqual(revoked, made, 'disposing the new scene does not double revoke');
+  });
+
+  it('removes both scene views when the photo use is withdrawn during comparison loading', async () => {
+    const views = [];
+    globalThis.mockFullObjectCreateViewer = async () => {
+      const preview = { disposed: false, originalView() {}, dispose() { this.disposed = true; }, isInteractive() { return false; }, applyEdit() {}, outlineMaskBlob() { return new Blob(['mask']); } };
+      views.push(preview); return preview;
+    };
+    const view = await openScene();
+    const savedViewport = view.find((node) => node.className === 'space-viewport')[0];
+    const outlineId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const buildId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    savedOutlines = [{ outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 }];
+    objectBuildById = { id: buildId, status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId, outlineSha256: 'd'.repeat(64), object: { asset: 'object.glb', sha256: 'e'.repeat(64), initial: { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] } } };
+    objectBuilds = [objectBuildById];
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    view.button('Check shape · Ready').dispatch('click');
+    view.button('Review the estimated object').dispatch('click');
+    await settle();
+    const photo = view.find((node) => node.alt === 'Photo copy used for this object estimate')[0];
+    const mask = view.find((node) => node.className === 'object-review-mask')[0];
+    const latePhotoLoad = photo.onload;
+    job.usageBlocked = true;
+    await mask.onload();
+    await latePhotoLoad();
+    assert.equal(photo.hidden, true);
+    assert.equal(mask.hidden, true, 'a late outline load cannot reveal withdrawn source');
+    assert.equal(views[0].disposed, true);
+    assert.equal(savedViewport.hidden, true);
+    assert.equal(view.button('Use this estimate at the photo position').disabled, true);
+    view.button('Leave review').dispatch('click');
+    assert.equal(savedViewport.hidden, true, 'leaving cannot reveal the blocked saved scene');
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('revokes only the departing review URL on Leave and ignores its late load', async (t) => {
+    const made = [], revoked = [];
+    const oldCreateURL = URL.createObjectURL, oldRevokeURL = URL.revokeObjectURL;
+    URL.createObjectURL = () => { const url = `blob:test-${made.length}`; made.push(url); return url; };
+    URL.revokeObjectURL = (url) => revoked.push(url);
+    t.after(() => { URL.createObjectURL = oldCreateURL; URL.revokeObjectURL = oldRevokeURL; });
+    globalThis.mockFullObjectCreateViewer = async () => ({ originalView() {}, dispose() {}, isInteractive() { return false; }, applyEdit() {}, outlineMaskBlob() { return new Blob(['mask']); } });
+    const view = await openScene();
+    const outlineId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', buildId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    savedOutlines = [{ outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 }];
+    objectBuildById = { id: buildId, status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId, outlineSha256: 'd'.repeat(64), object: { asset: 'object.glb', sha256: 'e'.repeat(64), initial: { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] } } };
+    objectBuilds = [objectBuildById];
+    const openReview = async () => {
+      view.button('Find saved outlines and shapes').dispatch('click'); await settle();
+      view.button('Check shape · Ready').dispatch('click');
+      view.button('Review the estimated object').dispatch('click'); await settle();
+    };
+    await openReview();
+    const oldMask = view.find((node) => node.className === 'object-review-mask')[0];
+    const lateLoad = oldMask.onload;
+    view.button('Leave review').dispatch('click');
+    assert.deepEqual(revoked, [made[0]]);
+    assert.equal(oldMask.onload, null); assert.equal(oldMask.src, ''); assert.equal(oldMask.hidden, true);
+    await openReview();
+    const currentMask = view.find((node) => node.className === 'object-review-mask')[0];
+    await lateLoad();
+    assert.deepEqual(revoked, [made[0]], 'the stale callback cannot revoke the current review URL');
+    assert.equal(currentMask.src, made[1]);
+    view.space.dispose();
+    assert.deepEqual(revoked, made, 'panel disposal revokes the remaining URL once');
+  });
+
+  it('disposes a preview that finishes after Leave and never offers or sends a save', async (t) => {
+    const focused = [];
+    const oldFocus = FakeElement.prototype.focus;
+    FakeElement.prototype.focus = function () { focused.push(this); };
+    t.after(() => { FakeElement.prototype.focus = oldFocus; });
+    let release;
+    globalThis.mockFullObjectCreateViewer = () => new Promise((resolve) => { release = resolve; });
+    const view = await openScene();
+    view.button('Explore in 3D').dispatch('click');
+    assert.equal(globalThis.viewerControls.enabled, true);
+    const outlineId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const buildId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    savedOutlines = [{ outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1, confirmed: true }];
+    const object = { asset: 'object.glb', sha256: 'e'.repeat(64), initial: { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] } };
+    objectBuildById = { id: buildId, status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId, outlineSha256: 'd'.repeat(64), object };
+    objectBuilds = [objectBuildById];
+    view.button('Find saved outlines and shapes').dispatch('click');
+    await settle();
+    view.button('Check shape · Ready').dispatch('click');
+    view.button('Review the estimated object').dispatch('click');
+    await settle();
+    assert.equal(globalThis.viewerControls.enabled, false, 'the hidden saved scene stops receiving interaction');
+    const photo = view.find((node) => node.alt === 'Photo copy used for this object estimate')[0];
+    const latePhotoLoad = photo.onload;
+    view.button('Leave review').dispatch('click');
+    assert.equal(view.find((node) => node.className === 'scene-inspector')[0].hidden, false);
+    assert.equal(view.find((node) => node.className === 'object-review')[0].hidden, true);
+    assert.equal(focused.at(-1), view.button('Find saved outlines and shapes'), 'leaving returns to the recovery control');
+    assert.equal(globalThis.viewerControls.enabled, true, 'leaving restores the earlier interaction mode');
+    const late = { disposed: false, dispose() { this.disposed = true; } };
+    release(late);
+    await latePhotoLoad();
+    await settle();
+    assert.equal(late.disposed, true);
+    assert.equal(photo.hidden, true);
+    assert.equal(posts.length, 0);
+    assert.equal(view.button('Use this estimate at the photo position'), undefined);
+    view.space.dispose();
+  });
+
+  it('returns focus to the visible error when a failed review still has focus', async (t) => {
+    const oldFocus = FakeElement.prototype.focus;
+    FakeElement.prototype.focus = function () { globalThis.document.activeElement = this; };
+    t.after(() => { FakeElement.prototype.focus = oldFocus; });
+    let fail;
+    globalThis.mockFullObjectCreateViewer = () => new Promise((resolve, reject) => { fail = reject; });
+    const view = await openScene();
+    const outlineId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const buildId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    savedOutlines = [{ outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1, confirmed: true }];
+    objectBuildById = { id: buildId, status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId, outlineSha256: 'd'.repeat(64), object: { asset: 'object.glb', sha256: 'e'.repeat(64), initial: { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] } } };
+    objectBuilds = [objectBuildById];
+    view.button('Find saved outlines and shapes').dispatch('click'); await settle();
+    view.button('Check shape · Ready').dispatch('click');
+    view.button('Review the estimated object').dispatch('click'); await settle();
+    assert.equal(globalThis.document.activeElement.textContent, 'Review the estimated shape');
+    fail(new Error('failed')); await settle();
+    assert.equal(globalThis.document.activeElement.textContent, 'The object or current scene could not be verified. Nothing was changed.');
+    assert.equal(view.find((node) => node.className === 'scene-inspector')[0].hidden, false);
+    view.space.dispose();
+  });
+});
+
+describe('full object viewer asset checks', () => {
+  it('rejects bad bytes, masks and models and releases allocated resources', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalCreate = globalThis.document.createElement;
+    const threeModule = await import('three');
+    const maskBytes = new Uint8Array([1, 2, 3]).buffer;
+    const glbBytes = new Uint8Array([4, 5, 6]).buffer;
+    const hash = async (bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (n) => n.toString(16).padStart(2, '0')).join('');
+    const validMaskHash = await hash(maskBytes), validGlbHash = await hash(glbBytes);
+    const initial = { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] };
+    let mode = 'valid';
+    globalThis.document.createElement = (tag) => {
+      const element = new FakeElement(tag);
+      if (tag === 'canvas') element.getContext = () => ({
+        clearRect() {}, drawImage() {},
+        getImageData(x, y, width, height) {
+          const data = new Uint8ClampedArray(width * height * 4);
+          for (let i = 0; i < width * height; i += 1) data[i * 4 + 3] = 255;
+          data[0] = data[1] = data[2] = mode === 'nonbinary' ? 127 : 255;
+          return { data };
+        },
+      });
+      return element;
+    };
+    globalThis.createImageBitmap = async () => ({ width: mode === 'wrong-size' ? 599 : 600, height: 500, close() {} });
+    globalThis.fetch = async (url) => ({ ok: true, arrayBuffer: async () => url === '/mask'
+      ? (mode === 'empty-mask' ? new ArrayBuffer(0) : maskBytes)
+      : (mode === 'oversize' ? { byteLength: 128 * 1024 * 1024 + 1 } : glbBytes) });
+    globalThis.parseFullObject = async (bytes, manager) => {
+      if (mode === 'invalid-glb') throw new Error('invalid glb');
+      if (mode === 'external') manager.resolveURL('https://invalid.example/texture.png');
+      const scene = new threeModule.Group();
+      const add = () => {
+        const geometry = new threeModule.BufferGeometry();
+        if (mode !== 'no-colour') geometry.setAttribute('color', new threeModule.Float32BufferAttribute([1, 1, 1], 3));
+        geometry.setAttribute('position', new threeModule.Float32BufferAttribute([0, 0, 0], 3));
+        scene.add(new threeModule.Mesh(geometry, new threeModule.MeshBasicMaterial()));
+      };
+      add(); if (mode === 'two-meshes') add();
+      return { scene };
+    };
+    const binding = { maskUrl: '/mask', assetUrl: '/glb', outlineSha256: validMaskHash, sha256: validGlbHash, initial };
+    try {
+      for (const failure of ['mask-hash', 'glb-hash', 'empty-mask', 'oversize', 'wrong-size', 'nonbinary', 'invalid-glb', 'external', 'no-colour', 'two-meshes']) {
+        mode = failure;
+        globalThis.viewerLog = [];
+        const input = { ...binding, ...(failure === 'mask-hash' ? { outlineSha256: '0'.repeat(64) } : {}), ...(failure === 'glb-hash' ? { sha256: '0'.repeat(64) } : {}) };
+        await assert.rejects(rawCreateViewer(new FakeElement('div'), surface(), '/texture', 'Test', { fullObject: input }), failure);
+        assert.equal(count('renderer.dispose'), 1, `${failure} releases the renderer`);
+        assert.equal(count('texture.dispose'), 1, `${failure} releases the texture`);
+      }
+      mode = 'valid';
+      const viewer = await rawCreateViewer(new FakeElement('div'), surface(), '/texture', 'Test', { fullObject: binding });
+      assert.deepEqual(new Uint8Array(await viewer.outlineMaskBlob().arrayBuffer()), new Uint8Array(maskBytes), 'the photo overlay uses the checked mask bytes');
+      viewer.dispose();
+      assert.equal(viewer.outlineMaskBlob(), null);
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalThis.document.createElement = originalCreate;
+      delete globalThis.createImageBitmap;
+      delete globalThis.parseFullObject;
+    }
+  });
+});
 
 describe('place landing', () => {
   it('offers the original and a memory action without starting a write', async () => {
