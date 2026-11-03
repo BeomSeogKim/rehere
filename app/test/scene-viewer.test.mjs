@@ -171,6 +171,7 @@ describe('photo framing', () => {
       const surface = surfaceWithSize(...source);
       const viewport = viewportOf(...viewportSize);
       const viewer = await createViewer(viewport, surface, 'blob:texture', 'Scene');
+      assert.equal(viewer.inspectObject(true), false, 'only a full object can be inspected alone');
       viewer.originalView();
       viewer.setPhotoFraming(true);
 

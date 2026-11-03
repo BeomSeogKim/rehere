@@ -10,7 +10,7 @@ import {
 } from './photo-scene.js';
 import { mountBlockedScene, mountCollaboration, mountInvitations } from './collaboration.js';
 import { mountMemoryEdit } from './memory-edit.js';
-import { createExploreToggle, createViewer } from './scene-viewer.js';
+import { createExploreToggle, createInspectToggle, createViewer } from './scene-viewer.js';
 import { createArrangementSession, describeArrangement, objectNames, objectState, ruleText as ruleWords, withObject } from './arrangement.js';
 import { stopAll } from './playback.js';
 import { mountShares } from './shares.js';
@@ -826,6 +826,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const photoSide = photographedSideControls();
     const side = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect from the side' });
     const explore = createExploreToggle();
+    // Exploring is driven by the inspection while it lasts.
+    const objectInspect = createInspectToggle({ onChange: () => explore.attach(viewer?.isInspecting?.() ? null : viewer) });
     const savedFullObject = job.edit?.fullObject ?? null;
     const session = createEditSession(job.edit, () => crypto.randomUUID());
     const axes = [
@@ -1063,7 +1065,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       el('p', { className: 'hint', textContent: 'Photo is the copy used to build this scene. Saved and Proposed use the same photo viewpoint. Switching does not save a change.' }),
       comparisonPhotoNote, comparisonStatus,
     ]);
-    const cameraActions = el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]);
+    const cameraActions = el('div', { className: 'actions space-camera' }, [explore.button, objectInspect.button, original, side, photoSide.button]);
     let comparisonLoad = 0;
     let comparisonTimer = null;
     let comparisonResize = null;
@@ -1120,6 +1122,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         comparisonBar.hidden = false;
         viewer.setInteractive(false);
         explore.attach(null);
+        objectInspect.attach(null);
         original.disabled = side.disabled = photoSide.button.disabled = true;
         cameraActions.hidden = explore.status.hidden = photoSide.status.hidden = true;
         comparisonFrame.classList.toggle('is-comparing', true);
@@ -1150,6 +1153,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         viewer?.setCamera(saved.camera);
         if (saved.interactive) viewer?.setInteractive(true, { focus: false });
         explore.attach(viewer);
+        objectInspect.attach(viewer);
         original.disabled = side.disabled = !viewer;
         photoSide.button.disabled = !viewer;
         if (focusHidden && focusWasInside) original.focus();
@@ -1347,6 +1351,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       cameraActions.hidden = explore.status.hidden = photoSide.status.hidden = !viewer;
       if (viewer && wasInteractive) viewer.setInteractive(true, { focus: false });
       explore.attach(viewer);
+      objectInspect.attach(viewer);
     };
     const closeObjectWork = () => {
       previewGeneration += 1;
@@ -1534,6 +1539,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       // selection boundary stays visible over light photographed pixels.
       const outline = el('img', { className: 'object-review-outline', alt: '', hidden: true });
       outline.setAttribute('aria-hidden', 'true');
+      viewer?.inspectObject?.(false);
+      objectInspect.attach(null);
       const wasInteractive = Boolean(viewer?.isInteractive());
       if (wasInteractive) viewer.setInteractive(false, { focus: false });
       viewport.hidden = true;
@@ -1567,6 +1574,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       const photoChoice = el('button', { type: 'button', className: 'secondary', textContent: 'Photo', disabled: true });
       const useReason = el('p', { className: 'hint', textContent: 'Choose Estimated shape to use it.', hidden: true });
       const exploreObject = createExploreToggle();
+      const inspectEstimate = createInspectToggle({ onChange: () => exploreObject.attach(objectPreview?.isInspecting?.() ? null : objectPreview) });
       let photoReady = false;
       let maskReady = false;
       let viewerReady = false;
@@ -1581,6 +1589,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       const showObjectView = (view) => {
         if ((view === 'photo' && (!photoReady || !maskReady)) || (view === 'estimate' && !viewerReady)) return;
         if (view === 'photo' && shown !== 'photo') {
+          objectPreview?.inspectObject?.(false);
           photoInterruptedExplore = Boolean(objectPreview?.isInteractive());
           if (photoInterruptedExplore) objectPreview.setInteractive(false, { focus: false });
         } else if (view === 'estimate' && shown === 'photo' && photoInterruptedExplore) {
@@ -1598,6 +1607,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         exploreObject.attach(viewerReady ? objectPreview : null);
         exploreObject.button.disabled = view === 'photo' || !viewerReady;
         exploreObject.status.hidden = view === 'photo';
+        inspectEstimate.attach(view === 'estimate' && viewerReady ? objectPreview : null);
         updateUse();
       };
       photoChoice.setAttribute('aria-pressed', 'false');
@@ -1622,10 +1632,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         previewGeneration += 1;
         stage.cleanup();
         objectPreview?.dispose(); objectPreview = null; viewerReady = false; holder.hidden = true;
-        estimateChoice.disabled = true; photoView.disabled = sideView.disabled = true; exploreObject.attach(null);
+        estimateChoice.disabled = true; photoView.disabled = sideView.disabled = true; exploreObject.attach(null); inspectEstimate.attach(null);
         hideObjectPhoto();
         viewer?.dispose(); viewer = null; viewport.hidden = true;
-        original.disabled = side.disabled = true; explore.attach(null);
+        original.disabled = side.disabled = true; explore.attach(null); objectInspect.attach(null);
       };
       photo.onload = async () => {
         const check = ++photoCheck;
@@ -1659,7 +1669,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       photoView.addEventListener('click', () => objectPreview?.originalView());
       sideView.addEventListener('click', () => objectPreview?.sideView());
       objectReview.replaceChildren(objectStatus, note, el('div', { className: 'actions' }, [estimateChoice, photoChoice]),
-        el('div', { className: 'actions' }, [photoView, sideView, exploreObject.button]), exploreObject.status,
+        el('div', { className: 'actions' }, [photoView, sideView, exploreObject.button, inspectEstimate.button]), exploreObject.status, inspectEstimate.note,
         useReason, el('div', { className: 'actions' }, [back, checkSaved, use]));
       objectStatus.textContent = 'Checking the object and photo…';
       objectReviewHeading.focus();
@@ -1783,7 +1793,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       ...(savedFullObject ? [el('p', { textContent: 'Memory changes to this estimated object are saved as separate alternatives under “Compare saved scenes”. Start one from the current scene; the current scene itself stays unchanged.' })] : [nextActions(memorySection, collaborationSection, sharesSection)]),
     ]);
     const workspace = sceneWorkspace(
-        [cameraActions, explore.status, photoSide.status, comparisonBar, objectReviewHeading, objectReviewLabel, comparisonFrame, objectReview, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: savedFullObject ? 'The room and object are estimates from the photo. The object’s unseen sides were not photographed. In the 3D view, hatching marks background hidden by the object and gaps in the room estimate; it is not a reconstructed surface.' : SCENE_NOTE })],
+        [cameraActions, explore.status, objectInspect.note, photoSide.status, comparisonBar, objectReviewHeading, objectReviewLabel, comparisonFrame, objectReview, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: savedFullObject ? 'The room and object are estimates from the photo. The object’s unseen sides were not photographed. In the 3D view, hatching marks background hidden by the object and gaps in the room estimate; it is not a reconstructed surface.' : SCENE_NOTE })],
         [
           placeLanding,
           ...(!savedFullObject ? [objectSection] : []),
@@ -1940,6 +1950,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
     viewer = created;
     explore.attach(viewer);
+    objectInspect.attach(viewer);
     original.addEventListener('click', () => {
       viewer?.originalView();
       photoSide.status.textContent = '';

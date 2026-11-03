@@ -9,7 +9,8 @@ import { FakeElement } from './fake-dom.mjs';
 
 // The visitor screen's 3D viewer is replaced by a recorder; Node has no WebGL.
 const viewerStub = `export function createViewer(...args) { globalThis.visitViewerCalls.push(args); return Promise.resolve({ dispose() { globalThis.visitViewerCalls.disposed = true; }, applyEdit(edit) { globalThis.visitViewerCalls.edits.push(edit); }, setCamera() {}, getCamera() { return null; }, originalView() { return true; }, setInteractive() {}, isInteractive() { return false; } }); }
-export function createExploreToggle() { const button = document.createElement('button'); const status = document.createElement('p'); return { button, status, attach() {}, detach() {} }; }`;
+export function createExploreToggle() { const button = document.createElement('button'); const status = document.createElement('p'); return { button, status, attach() {}, detach() {} }; }
+export function createInspectToggle() { const button = document.createElement('button'); const note = document.createElement('p'); return { button, note, attach() {} }; }`;
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === './scene-viewer.js' && context.parentURL?.endsWith('/public/visits.js')) return { url: `data:text/javascript,${encodeURIComponent(viewerStub)}`, shortCircuit: true };

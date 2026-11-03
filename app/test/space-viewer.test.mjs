@@ -131,6 +131,7 @@ const settle = async () => {
 
 let mountSpace;
 let rawCreateViewer;
+let rawInspectToggle;
 let job;
 let surfaceBody;
 let posts;
@@ -184,7 +185,7 @@ before(async () => {
     return json(200, job);
   };
   ({ mountSpace } = await import('../public/space.js'));
-  ({ createViewer: rawCreateViewer } = await import('../public/scene-viewer.js'));
+  ({ createViewer: rawCreateViewer, createInspectToggle: rawInspectToggle } = await import('../public/scene-viewer.js'));
 });
 
 after(() => {
@@ -784,8 +785,10 @@ describe('full object viewer asset checks', () => {
       const scene = new threeModule.Group();
       const add = () => {
         const geometry = new threeModule.BufferGeometry();
-        if (mode !== 'no-colour') geometry.setAttribute('color', new threeModule.Float32BufferAttribute([1, 1, 1], 3));
-        geometry.setAttribute('position', new threeModule.Float32BufferAttribute([0, 0, 0], 3));
+        // 'wide': the eight corners of a 0.6 cube, for the inspection fit check.
+        const points = mode === 'wide' ? [-0.3, 0.3].flatMap((x) => [-0.3, 0.3].flatMap((y) => [-0.3, 0.3].flatMap((z) => [x, y, z]))) : [0, 0, 0];
+        if (mode !== 'no-colour') geometry.setAttribute('color', new threeModule.Float32BufferAttribute(points.map(() => 1), 3));
+        geometry.setAttribute('position', new threeModule.Float32BufferAttribute(points, 3));
         scene.add(new threeModule.Mesh(geometry, new threeModule.MeshBasicMaterial()));
       };
       add(); if (mode === 'two-meshes') add();
@@ -803,11 +806,82 @@ describe('full object viewer asset checks', () => {
       }
       mode = 'valid';
       const holder = new FakeElement('div');
+      holder.clientWidth = 800; holder.clientHeight = 600;
       const viewer = await rawCreateViewer(holder, surface(), '/texture', 'Test', { fullObject: binding });
-      assert.equal(holder.children.at(-1).classList.contains('full-object-unknown'), true, 'undrawn pixels show the unknown hatch');
+      const canvas = holder.children.at(-1);
+      assert.equal(canvas.classList.contains('full-object-unknown'), true, 'undrawn pixels show the unknown hatch');
+      // Inspecting the object alone, then returning to exactly the prior view.
+      const controls = globalThis.viewerControls, camera = controls.object;
+      const room = () => globalThis.lastRenderedScene.getObjectByName('observed-background');
+      viewer.setCamera({ position: [0.3, 0.1, 0.2], target: [0, 0, -2] });
+      viewer.setPhotoFraming(true);
+      const state = () => ({ position: camera.position.toArray(), quaternion: camera.quaternion.toArray(), up: camera.up.toArray(), fov: camera.fov, zoom: camera.zoom, near: camera.near, far: camera.far, aspect: camera.aspect, target: controls.target.toArray(), margin: [canvas.style.marginLeft, canvas.style.marginTop], interactive: viewer.isInteractive(), hatch: canvas.classList.contains('full-object-unknown'), room: room().visible });
+      const before = state();
+      assert.equal(viewer.canInspectObject, true);
+      assert.equal(viewer.inspectObject(true), true);
+      assert.equal(viewer.isInspecting(), true);
+      assert.equal(room().visible, false, 'the room is hidden while inspecting');
+      assert.equal(canvas.classList.contains('full-object-unknown'), false, 'no unknown hatch behind the object alone');
+      assert.deepEqual([canvas.style.marginLeft, canvas.style.marginTop], ['', ''], 'inspection fills the viewport, without photo framing');
+      assert.notDeepEqual(before.margin, ['', ''], 'the prior view was photo-framed');
+      assert.equal(controls.enabled, true, 'the object can be orbited');
+      assert.equal(viewer.isInteractive(), false, 'callers that record the mode see the scene’s own page-scroll mode');
+      assert.deepEqual(controls.target.toArray(), [0, 0, -3], 'the camera aims at the object');
+      {
+        // It opens on the ray from the object's centre through the prior camera,
+        // not along the prior orbit target's direction.
+        const out = camera.position.clone().sub(controls.target), prior = new threeModule.Vector3(0.3, 0.1, 3.2);
+        assert.ok(out.clone().cross(prior).length() <= 1e-12 * out.length() * prior.length() && out.dot(prior) > 0, 'entry keeps the current view’s ray to the object');
+      }
+      assert.deepEqual(viewer.getCamera(), { position: before.position, target: before.target }, 'saved views never see the inspector camera');
+      viewer.inspectObject(false);
+      assert.deepEqual(state(), before, 'leaving restores camera, clipping, framing, mode and room exactly');
+      viewer.inspectObject(true);
+      viewer.setCamera({ position: [0, 0, 0], target: [0, 0, -3] });
+      assert.equal(viewer.isInspecting(), false, 'any other camera call leaves inspection first');
+      assert.equal(room().visible, true);
+      assert.equal(canvas.classList.contains('full-object-unknown'), true);
+      // Escape on the canvas restores the prior view and returns focus to the toggle;
+      // other ways out never move focus.
+      const toggle = rawInspectToggle();
+      toggle.attach(viewer);
+      let focused = 0;
+      toggle.button.focus = () => { focused += 1; };
+      const prior = state();
+      toggle.button.dispatch('click');
+      assert.match(toggle.note.textContent, /Press Escape to return to the scene\./);
+      viewer.setCamera({ position: [0, 0, 0], target: [0, 0, -3] });
+      assert.equal(focused, 0, 'a camera call leaving inspection does not take focus');
+      viewer.setCamera({ position: prior.position, target: prior.target });
+      const again = state();
+      toggle.button.dispatch('click');
+      canvas.dispatch('keydown', { key: 'Escape' });
+      assert.equal(viewer.isInspecting(), false);
+      assert.deepEqual(state(), again, 'Escape restores the prior view, mode, room and hatch');
+      assert.equal(focused, 1, 'Escape returns focus to the toggle');
+      assert.equal(toggle.note.hidden, true);
       assert.deepEqual(new Uint8Array(await viewer.outlineMaskBlob().arrayBuffer()), new Uint8Array(maskBytes), 'the photo overlay uses the checked mask bytes');
       viewer.dispose();
       assert.equal(viewer.outlineMaskBlob(), null);
+      // Entering inspection in a portrait viewport frames every object vertex.
+      mode = 'wide';
+      const portrait = new FakeElement('div');
+      portrait.clientWidth = 300; portrait.clientHeight = 800;
+      const tall = await rawCreateViewer(portrait, surface(), '/texture', 'Test', { fullObject: binding });
+      tall.originalView();
+      tall.inspectObject(true);
+      const scene = globalThis.lastRenderedScene, eye = globalThis.viewerControls.object;
+      scene.updateMatrixWorld(true);
+      eye.updateMatrixWorld(true);
+      const drawn = [];
+      scene.getObjectByName('estimated-foreground').traverse((item) => {
+        if (!item.isMesh) return;
+        const position = item.geometry.getAttribute('position');
+        for (let i = 0; i < position.count; i += 1) drawn.push(new threeModule.Vector3().fromBufferAttribute(position, i).applyMatrix4(item.matrixWorld).project(eye));
+      });
+      assert.equal(drawn.length, 8);
+      assert.ok(drawn.every((p) => Math.abs(p.x) <= 1 && Math.abs(p.y) <= 1 && p.z > -1 && p.z < 1), 'every vertex is inside the portrait frame');
+      tall.dispose();
     } finally {
       globalThis.fetch = originalFetch;
       delete globalThis.createImageBitmap;

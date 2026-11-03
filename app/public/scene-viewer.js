@@ -305,20 +305,94 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   };
   releases.push(clearGuide);
 
+  // Inspecting a full object hides the room and orbits the estimated object
+  // alone. Everything it changes is recorded first and restored exactly on
+  // leaving, and any other camera or mode call leaves it first, so no saved
+  // view, share or comparison ever sees the inspector's camera.
+  let inspection = null;
+  let onInspection = null;
+  const inspectObject = (on, reason = null) => {
+    if (!fullObject || isReleased()) return false;
+    if (Boolean(on) === Boolean(inspection)) return true;
+    if (on) {
+      inspection = { position: camera.position.clone(), quaternion: camera.quaternion.clone(), up: camera.up.clone(), fov: camera.fov, zoom: camera.zoom, near: camera.near, far: camera.far, target: controls.target.clone(), framing, interactive };
+      objects.background.visible = false;
+      canvas.classList.toggle('full-object-unknown', false);
+      framing = false;
+      resize();
+      objects.scene.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(objects.foreground);
+      const centre = box.getCenter(new THREE.Vector3());
+      // Fit the bounding sphere to the narrower of the two half-angles (zoom
+      // included), so a portrait viewport does not clip the object.
+      const vertical = (camera.getEffectiveFOV() * Math.PI) / 360;
+      const half = Math.min(vertical, Math.atan(Math.tan(vertical) * camera.aspect));
+      const fit = (box.getSize(new THREE.Vector3()).length() / 2 / Math.sin(half)) * 1.1;
+      const distance = Math.min(CAMERA_LIMITS.maxDistance, Math.max(CAMERA_LIMITS.minDistance, fit));
+      // Open along the current view's ray to the object, so the first view keeps
+      // the side and elevation already shown; only a camera exactly at the
+      // object's centre falls back to the orbit target's direction.
+      const ray = camera.position.clone().sub(centre);
+      const direction = (ray.lengthSq() > 0 ? ray : camera.position.clone().sub(controls.target)).normalize();
+      controls.target.copy(centre);
+      camera.position.copy(centre).addScaledVector(direction, distance);
+      controls.update();
+      explore(true);
+    } else {
+      const saved = inspection;
+      inspection = null;
+      objects.background.visible = true;
+      canvas.classList.toggle('full-object-unknown', true);
+      camera.up.copy(saved.up);
+      camera.fov = saved.fov;
+      camera.zoom = saved.zoom;
+      // Near and far are restored too; the adaptive clipping at the next draw
+      // recomputes them from this same camera and scene, as it always does.
+      camera.near = saved.near;
+      camera.far = saved.far;
+      camera.position.copy(saved.position);
+      camera.quaternion.copy(saved.quaternion);
+      controls.target.copy(saved.target);
+      framing = saved.framing;
+      resize();
+      explore(saved.interactive, { focus: false });
+    }
+    draw();
+    onInspection?.(Boolean(inspection), reason);
+    return true;
+  };
+  const leaveInspection = () => { if (inspection) inspectObject(false); };
+  // Escape on the canvas leaves inspection; the toggle then takes focus back.
+  const escape = (event) => {
+    if (event.key !== 'Escape' || !inspection) return;
+    event.preventDefault();
+    inspectObject(false, 'escape');
+  };
+  canvas.addEventListener('keydown', escape);
+  releases.push(() => canvas.removeEventListener('keydown', escape));
+
   return {
-    setInteractive: explore,
-    isInteractive: () => interactive,
+    setInteractive: (on, options) => { leaveInspection(); explore(on, options); },
+    // Like getCamera, reports the scene's own mode while inspecting, so a caller
+    // that records it (a comparison) restores page scrolling, not the inspector's orbit.
+    isInteractive: () => (inspection ? inspection.interactive : interactive),
+    canInspectObject: Boolean(fullObject),
+    inspectObject,
+    isInspecting: () => Boolean(inspection),
+    setInspectionListener: (listener) => { onInspection = listener; },
     outlineMaskBlob: () => isReleased() ? null : outlineMaskBlob,
     // Photo framing on or off. Changes only the canvas size, its centring
     // offsets and the projection aspect; never the camera, controls, geometry,
     // transforms, texture or field of view.
     setPhotoFraming(on) {
+      leaveInspection();
       if (composition) return false;
       framing = Boolean(on);
       resize();
     },
-    originalView: () => composition ? false : look([0, 0, 0]),
+    originalView: () => { leaveInspection(); return composition ? false : look([0, 0, 0]); },
     showGuide(transform, point, targetId = null) {
+      leaveInspection();
       clearGuide();
       if (!transform || !point) {
         draw();
@@ -353,10 +427,12 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       draw();
       return relation;
     },
-    sideView: () => look(composition ? [4, 2, 5] : [1.6, 0.25, -0.4]),
+    sideView: () => { leaveInspection(); return look(composition ? [4, 2, 5] : [1.6, 0.25, -0.4]); },
     // The camera as two finite vectors, for snapshots that must restore the
     // exact view later.
-    getCamera: () => ({ position: camera.position.toArray(), target: controls.target.toArray() }),
+    getCamera: () => (inspection
+      ? { position: inspection.position.toArray(), target: inspection.target.toArray() }
+      : { position: camera.position.toArray(), target: controls.target.toArray() }),
     // Where each object's visible centre appears on screen now, in viewport
     // pixels, for text labels drawn over the canvas. Two-object surfaces only.
     projectCentres() {
@@ -374,6 +450,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     // `transform`; changes nothing else. False when there is no such object or
     // the vantage is outside the limits, and the camera stays where it was.
     viewPhotographedSide(transform, targetId = null) {
+      leaveInspection();
       const selected = twoObjects ? objects.objects.find((object) => object.id === targetId) : null;
       const pivot = composition ? selected?.sourcePivot : twoObjects ? selected?.pivot : objects.pivot;
       const view = pivot && transform ? photographedSideCamera(pivot, transform) : null;
@@ -385,6 +462,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       return true;
     },
     setCamera({ position, target }) {
+      leaveInspection();
       if (composition) { camera.fov = 55; camera.updateProjectionMatrix(); }
       camera.position.set(...position);
       controls.target.set(...target);
@@ -392,6 +470,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       draw();
     },
     applyEdit(edit) {
+      leaveInspection();
       objects.applyEdit(edit);
       draw();
     },
@@ -402,6 +481,48 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       draw();
     },
     dispose: release,
+  };
+}
+
+const INSPECT_NOTE = 'Showing only the generated object, without the room. Shape, hidden sides and colour are estimates. Its front is not known. Press Escape to return to the scene.';
+
+// A toggle for viewing a full object's estimate alone. attach(viewer) after the
+// viewer exists; it stays hidden for scenes without a full object.
+// onChange runs whenever inspection starts or ends, for controls that depend on it.
+export function createInspectToggle({ onChange = null } = {}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'secondary';
+  button.textContent = 'Inspect estimated object';
+  const note = document.createElement('p');
+  note.className = 'hint';
+  note.setAttribute('role', 'status');
+  let viewer = null;
+  let supported = false;
+  const render = () => {
+    const inspecting = Boolean(viewer?.isInspecting?.());
+    button.hidden = !supported;
+    button.disabled = !viewer;
+    button.setAttribute('aria-pressed', String(inspecting));
+    note.textContent = inspecting ? INSPECT_NOTE : '';
+    note.hidden = !inspecting;
+  };
+  button.addEventListener('click', () => {
+    if (viewer) viewer.inspectObject(!viewer.isInspecting());
+  });
+  render();
+  return {
+    button,
+    note,
+    attach(next) {
+      viewer?.setInspectionListener?.(null);
+      viewer = next;
+      // Detaching (for example during a comparison) disables the button; only a
+      // viewer without a full object hides it.
+      if (next) supported = Boolean(next.canInspectObject);
+      viewer?.setInspectionListener?.((inspecting, reason) => { render(); onChange?.(); if (reason === 'escape') button.focus(); });
+      render();
+    },
   };
 }
 

@@ -6,7 +6,7 @@
 
 import { copyPose, isComposition, poseProblem } from './composition-scene.js';
 import { compositionDifference } from './composition-description.js';
-import { createExploreToggle, createViewer } from './scene-viewer.js';
+import { createExploreToggle, createInspectToggle, createViewer } from './scene-viewer.js';
 import { createStoryPlayer } from './story-player.js';
 import { describeArrangement, objectNames, ruleText } from './arrangement.js';
 
@@ -565,6 +565,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     }
     const back = el('button', { type: 'button', className: 'secondary', textContent: 'Back to the starting view' });
     const explore = createExploreToggle();
+    // Exploring is driven by the inspection while it lasts.
+    const inspect = createInspectToggle({ onChange: () => explore.attach(viewer?.isInspecting?.() ? null : viewer) });
     // Comparison with the photograph: the same photo pixels this scene was
     // built from (the texture already loaded for it) and the selected saved
     // arrangement, both from the photograph's own viewpoint and fitted to the
@@ -645,6 +647,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       comparing = true;
       viewer.setInteractive(false);
       explore.attach(null);
+      inspect.attach(null);
       back.disabled = true;
       viewer.setPhotoFraming(true);
       viewer.originalView();
@@ -674,6 +677,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       viewer?.setCamera(saved.camera);
       if (saved.interactive) viewer?.setInteractive(true);
       explore.attach(viewer);
+      inspect.attach(viewer);
       back.disabled = false;
       saved = null;
       renderSide();
@@ -732,8 +736,9 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       el('div', { className: 'scene-workspace' }, [
         el('div', { className: 'scene-stage' }, [
           el('p', { className: 'hint', textContent: manifest.synthetic ? 'Synthetic test material, shared by the owner.' : 'Shared by the owner.' }),
-          el('div', { className: 'actions space-camera' }, [explore.button, back, compareButton]),
+          el('div', { className: 'actions space-camera' }, [explore.button, inspect.button, back, compareButton]),
           explore.status,
+          inspect.note,
           compareBar,
           stageFrame,
           message,
@@ -778,6 +783,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     }
     viewer = created;
     explore.attach(viewer);
+    inspect.attach(viewer);
     // A camera returns only with its own restored view.
     viewer.setCamera(viewRestored && copyCamera(restore.camera) ? copyCamera(restore.camera) : manifest.camera);
     back.addEventListener('click', () => {

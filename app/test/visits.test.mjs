@@ -211,6 +211,7 @@ describe('visitor screen', () => {
     assert.match(v.container.textContent, /Synthetic test material/);
     assert.match(v.container.textContent, /Time unknown/);
     assert.match(v.container.textContent, /model estimate from this one photo, not a measurement/);
+    assert.equal(v.button('Inspect estimated object').hidden, true, 'no inspection without a full object');
     assert.equal(v.find((node) => node.tag === 'a').length, 0, 'no download links');
     assert.equal(v.find((node) => ['input', 'textarea', 'form'].includes(node.tag)).length, 0, 'no editing or contribution controls');
     v.view.dispose();
