@@ -310,6 +310,7 @@ def supervise(config_path, host=None):
     proc, reason, handle, baseline, proof, result = None, None, None, [], None, None
     life_read, life_write, watchdog = None, None, None
     failure_kind = None
+    baseline_failure = None
     verified, peak_rss, peak_swap, cleanup_result = True, 0, 0, None
 
     def check():
@@ -324,6 +325,14 @@ def supervise(config_path, host=None):
             result = call()
         check()
         return result
+
+    def baseline_diagnostic(sample, predicates):
+        failed_at = time.monotonic()
+        return {"sampleIndex": len(baseline) - 1,
+                "sample": {key: sample[key] for key in ("pressure", "available", "swap_used", "swap_free", "disk_free")},
+                "failedPredicates": predicates,
+                "elapsedSeconds": failed_at - started + elapsed_before_start,
+                "baselineElapsedSeconds": failed_at - baseline_start}
 
     try:
         check()
@@ -342,8 +351,17 @@ def supervise(config_path, host=None):
             baseline.append(sample)
             if (sample["available"] < 7 * GIB or sample["pressure"] < 50 or sample["swap_free"] < GIB
                     or sample["disk_free"] < 10 * GIB):
+                baseline_failure = baseline_diagnostic(sample, [
+                    {"metric": metric, "operator": "<", "threshold": threshold}
+                    for metric, threshold in (("available", 7 * GIB), ("pressure", 50),
+                                              ("swap_free", GIB), ("disk_free", 10 * GIB))
+                    if sample[metric] < threshold])
                 raise Stop("baseline_threshold")
             if max(s["swap_used"] for s in baseline) - min(s["swap_used"] for s in baseline) > 64 * MIB:
+                minimum, maximum = min(s["swap_used"] for s in baseline), max(s["swap_used"] for s in baseline)
+                baseline_failure = baseline_diagnostic(sample, [
+                    {"metric": "swapUsedRangeBytes", "operator": ">", "threshold": 64 * MIB,
+                     "observed": maximum - minimum, "minimum": minimum, "maximum": maximum}])
                 raise Stop("baseline_swap_range")
             if time.monotonic() - baseline_start >= BASELINE:
                 break
@@ -448,6 +466,7 @@ def supervise(config_path, host=None):
     receipt = {"nonce": config["nonce"], "status": "complete" if not reason and verified else "failed",
                "reason": reason, "cleanupVerified": verified, "handle": handle, "networkProof": proof,
                "failureKind": failure_kind,
+               "baselineFailure": baseline_failure,
                "cleanup": cleanup_result,
                "workerExitCode": None if proc is None else proc.returncode, "result": result,
                "sampled": {"elapsedSeconds": time.monotonic() - started + elapsed_before_start,

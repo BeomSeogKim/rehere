@@ -153,6 +153,56 @@ class SupervisorTests(unittest.TestCase):
         code, receipt = self.run_supervisor(host)
         self.assertEqual((code, receipt["reason"], host.launches), (1, "baseline_threshold", 0))
         self.assertTrue(receipt["cleanupVerified"])
+        diagnostic = receipt["baselineFailure"]
+        self.assertEqual(diagnostic["sampleIndex"], 0)
+        self.assertEqual(diagnostic["sample"], {"pressure": 75, "available": 7 * supervisor.GIB - 1,
+                                               "swap_used": 0, "swap_free": 2 * supervisor.GIB,
+                                               "disk_free": 20 * supervisor.GIB})
+        self.assertEqual(diagnostic["failedPredicates"], [
+            {"metric": "available", "operator": "<", "threshold": 7 * supervisor.GIB}])
+
+    def test_baseline_failure_records_reached_guard_sample_predicates_and_clock_origins(self):
+        host = DummyHost()
+        clock = [100.0]
+        safe = {"pressure": 50, "available": 7 * supervisor.GIB, "swap_used": 0,
+                "swap_free": supervisor.GIB, "disk_free": 10 * supervisor.GIB}
+        failing = {"pressure": 49, "available": 7 * supervisor.GIB - 1,
+                   "swap_used": 64 * supervisor.MIB + 1, "swap_free": supervisor.GIB - 1,
+                   "disk_free": 10 * supervisor.GIB - 1}
+
+        def sample(_):
+            host.samples += 1
+            clock[0] = 100.5 if host.samples == 1 else 113.339
+            return dict(safe if host.samples == 1 else failing)
+
+        host.sample = sample
+        with patch.object(supervisor, "BASELINE", 20), \
+                patch.object(supervisor.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(supervisor.time, "time", return_value=self.config["startedEpoch"] + 4), \
+                patch.object(supervisor.time, "sleep"), \
+                patch.object(host, "launch", side_effect=AssertionError("baseline refusal must not launch")) as launch:
+            code, receipt = self.run_supervisor(host)
+        self.assertEqual((code, receipt["reason"], host.launches), (1, "baseline_threshold", 0))
+        launch.assert_not_called()
+        self.assertEqual(receipt["failureKind"], "Stop")
+        self.assertTrue(receipt["cleanupVerified"])
+        self.assertIsNone(receipt["handle"])
+        diagnostic = receipt["baselineFailure"]
+        self.assertEqual(set(diagnostic), {"sampleIndex", "sample", "failedPredicates",
+                                           "elapsedSeconds", "baselineElapsedSeconds"})
+        self.assertEqual(diagnostic["sampleIndex"], 1)
+        self.assertEqual(diagnostic["sample"], failing)
+        self.assertEqual(diagnostic["failedPredicates"], [
+            {"metric": metric, "operator": "<", "threshold": threshold}
+            for metric, threshold in (("available", 7 * supervisor.GIB), ("pressure", 50),
+                                      ("swap_free", supervisor.GIB), ("disk_free", 10 * supervisor.GIB))])
+        self.assertAlmostEqual(diagnostic["elapsedSeconds"], 17.339)
+        self.assertAlmostEqual(diagnostic["baselineElapsedSeconds"], 13.339)
+        self.assertFalse((self.attempt / "baseline.json").exists())
+        self.assertEqual((self.attempt / "supervisor-result.json").stat().st_mode & 0o777, 0o600)
+        events = [json.loads(line) for line in self.stdout.getvalue().splitlines()]
+        self.assertEqual(events, [{"nonce": self.config["nonce"], "phase": "ready"},
+                                  {"nonce": self.config["nonce"], "phase": "stopped", "exitCode": 1}])
 
     def test_baseline_swap_range_refuses(self):
         host = DummyHost()
@@ -160,6 +210,15 @@ class SupervisorTests(unittest.TestCase):
         host.sample = lambda output: {**original(output), "swap_used": (host.samples % 2) * (64 * supervisor.MIB + 1)}
         code, receipt = self.run_supervisor(host)
         self.assertEqual((code, receipt["reason"], host.launches), (1, "baseline_swap_range", 0))
+        diagnostic = receipt["baselineFailure"]
+        self.assertEqual(diagnostic["sampleIndex"], 1)
+        self.assertEqual(diagnostic["sample"], {"pressure": 75, "available": 8 * supervisor.GIB,
+                                               "swap_used": 0, "swap_free": 2 * supervisor.GIB,
+                                               "disk_free": 20 * supervisor.GIB})
+        self.assertEqual(diagnostic["failedPredicates"], [{"metric": "swapUsedRangeBytes", "operator": ">",
+                                                        "threshold": 64 * supervisor.MIB,
+                                                        "observed": 64 * supervisor.MIB + 1,
+                                                        "minimum": 0, "maximum": 64 * supervisor.MIB + 1}])
 
     def test_held_telemetry_times_out_before_launch(self):
         host = DummyHost()
@@ -167,6 +226,7 @@ class SupervisorTests(unittest.TestCase):
         with patch.object(supervisor, "TELEMETRY_TIMEOUT", .02):
             code, receipt = self.run_supervisor(host)
         self.assertEqual((code, receipt["reason"], host.launches), (1, "telemetry_timeout", 0))
+        self.assertIsNone(receipt["baselineFailure"])
 
     def test_failed_preflight_and_launch_never_claim_success(self):
         host = DummyHost()
