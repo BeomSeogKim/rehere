@@ -160,6 +160,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
   let objectEditor = null;
   let objectPreview = null;
   let objectStageCleanup = null;
+  let savedPhotoCleanup = null;
   let objectTimer = null;
   let currentPlace = draft.place;
   let placeHeading = null;
@@ -269,6 +270,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     objectEditor = null;
     objectStageCleanup?.();
     objectStageCleanup = null;
+    savedPhotoCleanup?.();
     objectPreview?.dispose();
     objectPreview = null;
     if (objectTimer !== null) clearTimeout(objectTimer);
@@ -1047,6 +1049,87 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const comparisonBox = el('div', { className: 'box-overlay', hidden: true });
     comparisonBox.setAttribute('aria-hidden', 'true');
     const comparisonFrame = el('div', { className: 'visit-compare-frame memory-comparison-frame' }, [viewport, comparisonPhoto, comparisonBox]);
+    // A saved full object: the photo copy its estimate was built from, at size,
+    // with the scene's own verified outline drawn over it. Viewing only; it never
+    // changes the pose, camera or saved version.
+    const selectedPhoto = el('button', { type: 'button', className: 'secondary', textContent: 'See selected object in photo', hidden: !savedFullObject, disabled: true });
+    selectedPhoto.setAttribute('aria-pressed', 'false');
+    const selectedSummary = el('summary', { textContent: 'Selected object in the photo' });
+    const selectedStatus = el('p', { className: 'hint', role: 'status' });
+    const selectedFrame = el('div', { className: 'space-viewport visit-compare-frame', hidden: true });
+    const selectedBack = el('button', { type: 'button', className: 'secondary', textContent: 'Return to the scene' });
+    const selectedDetails = el('details', { className: 'source-details', hidden: !savedFullObject }, [selectedSummary, selectedStatus, selectedFrame, el('div', { className: 'actions' }, [selectedBack])]);
+    const SELECTED_REFUSED = 'The photo or object changed, or this photo can no longer be used. Nothing was changed; reload the scene.';
+    let selectedGeneration = 0;
+    let selectedUrl = null;
+    // Every open, close or refusal starts a new generation, so a pending check
+    // or image load from an earlier one cannot show anything.
+    const clearSelected = (message = '') => {
+      selectedGeneration += 1;
+      for (const image of selectedFrame.children) { image.onload = image.onerror = null; image.removeAttribute('src'); }
+      selectedFrame.replaceChildren();
+      selectedFrame.hidden = true;
+      if (selectedUrl) URL.revokeObjectURL(selectedUrl);
+      selectedUrl = null;
+      selectedStatus.textContent = message;
+    };
+    // Focus returns to the toggle only when the person asks to go back.
+    const closeSelectedPhoto = (focus = false) => {
+      clearSelected();
+      if (savedPhotoCleanup === closeSelectedPhoto) savedPhotoCleanup = null;
+      if (!selectedDetails.open) return;
+      selectedDetails.open = false;
+      selectedPhoto.setAttribute('aria-pressed', 'false');
+      if (focus) selectedPhoto.focus();
+    };
+    const selectedCurrent = (mine) => mine === selectedGeneration && selectedDetails.open && !disposed;
+    const sameObject = (current) => current.ok && current.body?.id === jobId && current.body.status === 'ready' && !current.body.usageBlocked
+      && current.body.sourceId === job.sourceId && current.body.sourceSha256 === job.sourceSha256
+      && JSON.stringify(current.body.edit?.fullObject ?? null) === JSON.stringify(savedFullObject);
+    const openSelectedPhoto = async () => {
+      clearSelected('Checking the photo and object…');
+      const mine = selectedGeneration;
+      savedPhotoCleanup = closeSelectedPhoto;
+      viewer?.inspectObject?.(false);
+      selectedDetails.open = true;
+      selectedPhoto.setAttribute('aria-pressed', 'true');
+      selectedSummary.focus();
+      selectedSummary.scrollIntoView?.({ block: 'start' });
+      const before = await request(`${base}/${jobId}`, { cache: 'no-store' });
+      if (!selectedCurrent(mine)) return;
+      const blob = viewer?.outlineMaskBlob?.();
+      if (!sameObject(before) || !blob) { clearSelected(SELECTED_REFUSED); return; }
+      const photo = el('img', { className: 'visit-compare-photo', alt: 'Photo copy used for this object estimate' });
+      const mask = el('img', { className: 'object-review-mask', alt: '' });
+      const outline = el('img', { className: 'object-review-outline', alt: '' });
+      mask.setAttribute('aria-hidden', 'true');
+      outline.setAttribute('aria-hidden', 'true');
+      selectedUrl = URL.createObjectURL(blob);
+      let pending = 2;
+      // Shown only after both images load and the scene is checked once more.
+      const loaded = async () => {
+        if (!selectedCurrent(mine) || --pending > 0) return;
+        const after = await request(`${base}/${jobId}`, { cache: 'no-store' });
+        if (!selectedCurrent(mine)) return;
+        if (!sameObject(after)) { clearSelected(SELECTED_REFUSED); return; }
+        selectedFrame.hidden = false;
+        selectedStatus.textContent = 'Photo copy used for this estimate · The drawn line outlines the selected object; it is not part of the photo.';
+      };
+      photo.onload = mask.onload = loaded;
+      photo.onerror = mask.onerror = () => { if (selectedCurrent(mine)) clearSelected('The photo copy or outline could not be shown. The saved scene is unchanged.'); };
+      selectedFrame.replaceChildren(photo, mask, outline);
+      mask.src = outline.src = selectedUrl;
+      photo.src = assetUrl(jobId, 'texture.jpg');
+    };
+    const toggleSelectedPhoto = () => (selectedDetails.open ? closeSelectedPhoto() : openSelectedPhoto());
+    selectedPhoto.addEventListener('click', toggleSelectedPhoto);
+    selectedSummary.addEventListener('click', (event) => { event.preventDefault(); toggleSelectedPhoto(); });
+    selectedBack.addEventListener('click', () => closeSelectedPhoto(true));
+    selectedDetails.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !selectedDetails.open) return;
+      event.preventDefault();
+      closeSelectedPhoto(true);
+    });
     const objectReviewHeading = el('h3', { textContent: 'Review the estimated shape', tabIndex: -1, hidden: true });
     const objectReviewLabel = el('p', { className: 'hint', hidden: true });
     const objectReview = el('div', { className: 'object-review', hidden: true });
@@ -1065,7 +1148,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       el('p', { className: 'hint', textContent: 'Photo is the copy used to build this scene. Saved and Proposed use the same photo viewpoint. Switching does not save a change.' }),
       comparisonPhotoNote, comparisonStatus,
     ]);
-    const cameraActions = el('div', { className: 'actions space-camera' }, [explore.button, objectInspect.button, original, side, photoSide.button]);
+    const cameraActions = el('div', { className: 'actions space-camera' }, [explore.button, objectInspect.button, selectedPhoto, original, side, photoSide.button]);
     let comparisonLoad = 0;
     let comparisonTimer = null;
     let comparisonResize = null;
@@ -1120,6 +1203,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         comparisonPhotoNote.textContent = boxUsable ? 'The box marks the selected photo region; it is not a confirmed object outline.' : 'The selected photo box could not be shown here.';
         comparisonStatus.textContent = '';
         comparisonBar.hidden = false;
+        closeSelectedPhoto();
         viewer.setInteractive(false);
         explore.attach(null);
         objectInspect.attach(null);
@@ -1541,6 +1625,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       outline.setAttribute('aria-hidden', 'true');
       viewer?.inspectObject?.(false);
       objectInspect.attach(null);
+      closeSelectedPhoto();
       const wasInteractive = Boolean(viewer?.isInteractive());
       if (wasInteractive) viewer.setInteractive(false, { focus: false });
       viewport.hidden = true;
@@ -1793,7 +1878,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       ...(savedFullObject ? [el('p', { textContent: 'Memory changes to this estimated object are saved as separate alternatives under “Compare saved scenes”. Start one from the current scene; the current scene itself stays unchanged.' })] : [nextActions(memorySection, collaborationSection, sharesSection)]),
     ]);
     const workspace = sceneWorkspace(
-        [cameraActions, explore.status, objectInspect.note, photoSide.status, comparisonBar, objectReviewHeading, objectReviewLabel, comparisonFrame, objectReview, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: savedFullObject ? 'The room and object are estimates from the photo. The object’s unseen sides were not photographed. In the 3D view, hatching marks background hidden by the object and gaps in the room estimate; it is not a reconstructed surface.' : SCENE_NOTE })],
+        [cameraActions, explore.status, objectInspect.note, photoSide.status, comparisonBar, objectReviewHeading, objectReviewLabel, comparisonFrame, objectReview, viewMessage, selectedDetails, ...photoCredit(job), el('p', { className: 'hint', textContent: savedFullObject ? 'The room and object are estimates from the photo. The object’s unseen sides were not photographed. In the 3D view, hatching marks background hidden by the object and gaps in the room estimate; it is not a reconstructed surface.' : SCENE_NOTE })],
         [
           placeLanding,
           ...(!savedFullObject ? [objectSection] : []),
@@ -1951,6 +2036,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     viewer = created;
     explore.attach(viewer);
     objectInspect.attach(viewer);
+    selectedPhoto.disabled = !viewer;
     original.addEventListener('click', () => {
       viewer?.originalView();
       photoSide.status.textContent = '';

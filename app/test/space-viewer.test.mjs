@@ -958,6 +958,110 @@ describe('place landing', () => {
   });
 });
 
+describe('seeing a saved object in its photo', () => {
+  const B = { buildId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', outlineId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', outlineSha256: 'd'.repeat(64), sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), asset: 'object.glb', sha256: 'e'.repeat(64), initial: { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] } };
+  const setUp = (t) => {
+    const made = [], revoked = [], left = [];
+    const oldCreateURL = URL.createObjectURL, oldRevokeURL = URL.revokeObjectURL;
+    URL.createObjectURL = () => { const url = `blob:photo-${made.length}`; made.push(url); return url; };
+    URL.revokeObjectURL = (url) => revoked.push(url);
+    t.after(() => { URL.createObjectURL = oldCreateURL; URL.revokeObjectURL = oldRevokeURL; });
+    globalThis.mockFullObjectCreateViewer = async () => ({ originalView() {}, dispose() {}, isInteractive() { return false; }, setInteractive() {}, applyEdit() {}, getCamera() { return null; }, outlineMaskBlob() { return new Blob(['mask']); }, inspectObject(on) { left.push(on); } });
+    // A later manual version of the same object; its outline was made at version 1.
+    job.edit = { version: 3, offset: [0.1, 0, 0], yaw: 0.5, fullObject: structuredClone(B) };
+    savedOutlines = [{ outlineId: B.outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, confirmed: true, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1 }];
+    return { made, revoked, left };
+  };
+  const frameOf = (view) => view.find((node) => node.className === 'space-viewport visit-compare-frame')[0];
+
+  it('shows the scene’s own outline on the photo copy for the same object at a later version, without a write', async (t) => {
+    const { made, revoked, left } = setUp(t);
+    const view = await openScene();
+    const button = view.button('See selected object in photo');
+    assert.equal(button.hidden, false);
+    button.dispatch('click');
+    await settle();
+    assert.deepEqual(left, [false], 'any object-only inspection is left first');
+    const frame = frameOf(view);
+    const [photo, mask, outline] = frame.children;
+    assert.equal(frame.hidden, true, 'nothing shows before both images load and the scene is checked again');
+    assert.match(photo.src, /assets\/texture\.jpg$/);
+    assert.equal(photo.alt, 'Photo copy used for this object estimate');
+    assert.equal(mask.src, made[0]);
+    assert.equal(outline.src, made[0], 'the stroke uses the same verified mask bytes');
+    const lateLoad = mask.onload;
+    await photo.onload();
+    assert.equal(frame.hidden, true);
+    await mask.onload();
+    assert.equal(frame.hidden, false);
+    assert.ok(view.find((node) => node.role === 'status' && /^Photo copy used for this estimate · The drawn line/.test(node.textContent)).length, 'labelled as a photo copy with a drawn line');
+    button.dispatch('click');
+    assert.deepEqual(revoked, made, 'closing revokes the one URL');
+    assert.equal(frame.hidden, true);
+    assert.equal(mask.src, '');
+    await lateLoad();
+    assert.equal(frame.hidden, true, 'a late load cannot reveal a closed view');
+    view.space.dispose();
+    assert.deepEqual(revoked, made, 'no second revoke');
+    assert.equal(posts.length, 0, 'viewing never writes');
+  });
+
+  it('cancels a pending check without showing anything, and returns focus only when asked', async (t) => {
+    const { made } = setUp(t);
+    const view = await openScene();
+    const button = view.button('See selected object in photo');
+    let focused = 0;
+    button.focus = () => { focused += 1; };
+    heldGets = [];
+    button.dispatch('click');
+    await settle();
+    assert.equal(heldGets.length, 1, 'the first check is still pending');
+    button.dispatch('click');
+    heldGets[0](json(200, job));
+    heldGets = null;
+    await settle();
+    assert.equal(made.length, 0, 'a cancelled check creates no URL');
+    assert.equal(frameOf(view).children.length, 0, 'and shows nothing');
+    assert.equal(focused, 0, 'closing by the toggle does not move focus');
+    button.dispatch('click');
+    await settle();
+    view.button('Return to the scene').dispatch('click');
+    assert.equal(focused, 1, 'Return to the scene focuses the toggle');
+    button.dispatch('click');
+    await settle();
+    const details = view.find((node) => node.tag === 'details' && node.children[0]?.textContent === 'Selected object in the photo')[0];
+    details.dispatch('keydown', { key: 'Escape' });
+    assert.equal(details.open, false);
+    assert.equal(focused, 2, 'Escape inside the panel focuses the toggle');
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('refuses when the photo use is stopped or the saved object changed', async (t) => {
+    const { made, revoked } = setUp(t);
+    const view = await openScene();
+    const button = view.button('See selected object in photo');
+    job.usageBlocked = true;
+    button.dispatch('click');
+    await settle();
+    assert.equal(made.length, 0, 'nothing is loaded for a stopped photo');
+    assert.ok(view.find((node) => /can no longer be used/.test(node.textContent ?? '')).length);
+    job.usageBlocked = false;
+    button.dispatch('click');
+    assert.equal(view.find((node) => /can no longer be used/.test(node.textContent ?? '')).length, 0, 'closing clears the refusal');
+    button.dispatch('click');
+    await settle();
+    const [photo, mask] = frameOf(view).children;
+    job.edit = { ...job.edit, fullObject: { ...B, sha256: 'f'.repeat(64) } };
+    await photo.onload();
+    await mask.onload();
+    assert.equal(frameOf(view).hidden, true, 'a different object is never shown with this outline');
+    assert.deepEqual(revoked, made);
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+});
+
 describe('inspecting the selected object', () => {
   it('checks the exact saved scene before showing the outline and returns focus without a write', async () => {
     const view = await openScene();
