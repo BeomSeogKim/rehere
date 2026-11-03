@@ -744,30 +744,30 @@ describe('source-bound full object owner flow', () => {
 describe('full object viewer asset checks', () => {
   it('rejects bad bytes, masks and models and releases allocated resources', async () => {
     const originalFetch = globalThis.fetch;
-    const originalCreate = globalThis.document.createElement;
     const threeModule = await import('three');
-    const maskBytes = new Uint8Array([1, 2, 3]).buffer;
+    const { encodeMaskPng } = await import('../public/object-outline-editor.js');
+    const outline = new Uint8Array(600 * 500); outline[0] = 1;
+    const maskBytes = (await encodeMaskPng(outline, 600, 500)).buffer;
+    const wrongSize = (await encodeMaskPng(new Uint8Array(599 * 500), 599, 500)).buffer;
+    // The same image with one grey sample changed to 127, checksums rewritten.
+    const nonbinary = await (async () => {
+      const raw = new Uint8Array(500 * 601); raw[1] = 127;
+      const idat = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
+      const { crc32 } = await import('node:zlib');
+      const chunk = (type, data) => { const out = Buffer.alloc(12 + data.length); out.writeUInt32BE(data.length, 0); out.write(type, 4, 'latin1'); Buffer.from(data).copy(out, 8); out.writeUInt32BE(crc32(out.subarray(4, 8 + data.length)) >>> 0, 8 + data.length); return out; };
+      const header = Buffer.alloc(13); header.writeUInt32BE(600, 0); header.writeUInt32BE(500, 4); header.set([8, 0, 0, 0, 0], 8);
+      return new Uint8Array(Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))])).buffer;
+    })();
     const glbBytes = new Uint8Array([4, 5, 6]).buffer;
     const hash = async (bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (n) => n.toString(16).padStart(2, '0')).join('');
     const validMaskHash = await hash(maskBytes), validGlbHash = await hash(glbBytes);
+    const maskFor = (failure) => (failure === 'wrong-size' ? wrongSize : failure === 'nonbinary' ? nonbinary : maskBytes);
     const initial = { position: [0, 0, -3], quaternion: [-0.5, -0.5, -0.5, 0.5], scale: 1, modelPivot: [0, 0, 0] };
     let mode = 'valid';
-    globalThis.document.createElement = (tag) => {
-      const element = new FakeElement(tag);
-      if (tag === 'canvas') element.getContext = () => ({
-        clearRect() {}, drawImage() {},
-        getImageData(x, y, width, height) {
-          const data = new Uint8ClampedArray(width * height * 4);
-          for (let i = 0; i < width * height; i += 1) data[i * 4 + 3] = 255;
-          data[0] = data[1] = data[2] = mode === 'nonbinary' ? 127 : 255;
-          return { data };
-        },
-      });
-      return element;
-    };
-    globalThis.createImageBitmap = async () => ({ width: mode === 'wrong-size' ? 599 : 600, height: 500, close() {} });
+    // The outline is read from its bytes; the colour-managed image path is never used.
+    globalThis.createImageBitmap = async () => { throw new Error('the colour-managed image path must not be used'); };
     globalThis.fetch = async (url) => ({ ok: true, arrayBuffer: async () => url === '/mask'
-      ? (mode === 'empty-mask' ? new ArrayBuffer(0) : maskBytes)
+      ? (mode === 'empty-mask' ? new ArrayBuffer(0) : maskFor(mode))
       : (mode === 'oversize' ? { byteLength: 128 * 1024 * 1024 + 1 } : glbBytes) });
     globalThis.parseFullObject = async (bytes, manager) => {
       if (mode === 'invalid-glb') throw new Error('invalid glb');
@@ -787,7 +787,7 @@ describe('full object viewer asset checks', () => {
       for (const failure of ['mask-hash', 'glb-hash', 'empty-mask', 'oversize', 'wrong-size', 'nonbinary', 'invalid-glb', 'external', 'no-colour', 'two-meshes']) {
         mode = failure;
         globalThis.viewerLog = [];
-        const input = { ...binding, ...(failure === 'mask-hash' ? { outlineSha256: '0'.repeat(64) } : {}), ...(failure === 'glb-hash' ? { sha256: '0'.repeat(64) } : {}) };
+        const input = { ...binding, outlineSha256: failure === 'mask-hash' ? '0'.repeat(64) : await hash(maskFor(failure)), ...(failure === 'glb-hash' ? { sha256: '0'.repeat(64) } : {}) };
         await assert.rejects(rawCreateViewer(new FakeElement('div'), surface(), '/texture', 'Test', { fullObject: input }), failure);
         assert.equal(count('renderer.dispose'), 1, `${failure} releases the renderer`);
         assert.equal(count('texture.dispose'), 1, `${failure} releases the texture`);
@@ -799,7 +799,6 @@ describe('full object viewer asset checks', () => {
       assert.equal(viewer.outlineMaskBlob(), null);
     } finally {
       globalThis.fetch = originalFetch;
-      globalThis.document.createElement = originalCreate;
       delete globalThis.createImageBitmap;
       delete globalThis.parseFullObject;
     }

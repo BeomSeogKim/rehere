@@ -121,19 +121,14 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       read(fullObject.maskUrl, fullObject.outlineSha256, 32 * 1024 * 1024),
       read(fullObject.assetUrl, fullObject.sha256, 128 * 1024 * 1024),
     ]);
-    let bitmap;
-    try { bitmap = await createImageBitmap(new Blob([maskBytes], { type: 'image/png' }), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }); } catch { throw new Error('full-object'); }
+    // The outline is decoded from its exact stored bytes, never through the
+    // browser's colour-managed image path.
+    const [width, height] = surface.source.image_size;
+    if (width * height > 32_000_000) throw new Error('full-object');
+    const { readBinaryMask } = await import('./object-outline-editor.js');
     let mask;
-    try {
-      const [width, height] = surface.source.image_size;
-      if (bitmap.width !== width || bitmap.height !== height || width * height > 32_000_000) throw new Error('full-object');
-      const { readBinaryMask } = await import('./object-outline-editor.js');
-      const data = readBinaryMask(bitmap, width, height, (w, h) => (
-        typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(w, h)
-          : Object.assign(document.createElement('canvas'), { width: w, height: h })
-      ));
-      mask = { width, height, data };
-    } finally { bitmap.close?.(); }
+    try { mask = { width, height, data: await readBinaryMask(maskBytes, width, height) }; } catch { throw new Error('full-object'); }
+    if (isReleased()) throw new Error('full-object');
     outlineMaskBlob = new Blob([maskBytes], { type: 'image/png' });
     releases.push(() => { outlineMaskBlob = null; });
     const { GLTFLoader } = await import('/vendor/loaders/GLTFLoader.js');

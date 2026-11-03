@@ -65,42 +65,129 @@ export async function encodeMaskPng(mask, width, height) {
   return out;
 }
 
-const TILE = 1024;
+const MAX_MASK_BYTES = 32 * 1024 * 1024;
+const MAX_MASK_PIXELS = 32_000_000;
+const UNREADABLE = 'The suggested outline could not be read.';
+const UNSUPPORTED = 'The suggested outline uses an image format this reader does not support.';
+// The colour type and bit depth combinations the server's outline validator
+// admits, with their channel counts: greyscale 1/2/4/8, RGB 8/16, grey with
+// alpha 16 and RGBA 8/16. Palette, 16-bit grey and 8-bit grey with alpha are
+// refused there too.
+const FORMATS = { '0:1': 1, '0:2': 1, '0:4': 1, '0:8': 1, '2:8': 3, '2:16': 3, '4:16': 2, '6:8': 4, '6:16': 4 };
+// Adam7 passes as [x start, y start, x step, y step].
+const ADAM7 = [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]];
 
-// Reads a natively decoded mask in bounded 1:1 tiles, so no canvas ever holds
-// the whole photo and nothing is resampled. Only opaque pixels with equal
+const paeth = (a, b, c) => {
+  const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+  return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+};
+
+// Inflates into exactly `expected` bytes; more, less or a stream error fails.
+async function inflateExactly(parts, expected) {
+  const reader = new Blob(parts).stream().pipeThrough(new DecompressionStream('deflate')).getReader();
+  const out = new Uint8Array(expected);
+  let length = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (length + value.length > expected) throw new Error(UNREADABLE);
+      out.set(value, length);
+      length += value.length;
+    }
+  } catch {
+    reader.cancel().catch(() => {});
+    throw new Error(UNREADABLE);
+  }
+  if (length !== expected) throw new Error(UNREADABLE);
+  return out;
+}
+
+// Decodes the stored PNG bytes directly, so no browser colour management can
+// change a sample. Samples become 8-bit values as the server's validator reads
+// them (low bit depths scaled to 0..255, 16-bit samples by their high byte,
+// tRNS keys compared by their low byte). Only opaque pixels with equal
 // channels at 0 or 255 are accepted; anything else is refused, not converted.
-export function readBinaryMask(bitmap, width, height, makeCanvas) {
-  if (bitmap.width !== width || bitmap.height !== height) throw new Error('The suggested outline does not fit this photo.');
+// Returns one byte per pixel (0 or 1).
+export async function readBinaryMask(bytes, width, height) {
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (data.length > MAX_MASK_BYTES || data.length < 8 || PNG_SIGNATURE.some((value, i) => data[i] !== value)) throw new Error(UNREADABLE);
+  if (typeof DecompressionStream !== 'function') throw new Error('The suggested outline could not be read in this browser.');
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let header = null, ended = false, key = null;
+  const idat = [];
+  for (let at = 8; at < data.length;) {
+    if (ended || at + 12 > data.length) throw new Error(UNREADABLE);
+    const length = view.getUint32(at);
+    if (length > data.length - at - 12) throw new Error(UNREADABLE);
+    const type = String.fromCharCode(...data.subarray(at + 4, at + 8));
+    if (view.getUint32(at + 8 + length) !== crc32(data, at + 4, at + 8 + length)) throw new Error(UNREADABLE);
+    if (!header && type !== 'IHDR') throw new Error(UNREADABLE);
+    if (type === 'IHDR') {
+      if (header || length !== 13) throw new Error(UNREADABLE);
+      header = { width: view.getUint32(at + 8), height: view.getUint32(at + 12), depth: data[at + 16], colour: data[at + 17], compression: data[at + 18], filter: data[at + 19], interlace: data[at + 20] };
+    } else if (type === 'IDAT') idat.push(data.subarray(at + 8, at + 8 + length));
+    else if (type === 'IEND') {
+      // As the server's outline check and Pillow do: a zero-length IEND ends
+      // the file and any bytes after it are ignored.
+      if (length !== 0) throw new Error(UNREADABLE);
+      ended = true;
+      break;
+    }
+    else if (type === 'tRNS' && (header.colour === 0 || header.colour === 2)) {
+      const count = header.colour === 0 ? 1 : 3;
+      if (length < 2 * count) throw new Error(UNREADABLE);
+      // The validator compares the low byte of each 16-bit key with the 8-bit
+      // converted sample; a 1-bit key is 255 when nonzero.
+      key = Array.from({ length: count }, (_, i) => view.getUint16(at + 8 + 2 * i));
+      key = header.depth === 1 ? [key[0] ? 255 : 0] : key.map((value) => value & 255);
+    } else if (type !== 'PLTE' && type !== 'tRNS' && !(data[at + 4] & 0x20)) throw new Error(UNREADABLE);
+    at += 12 + length;
+  }
+  if (!header || !ended || idat.length === 0 || header.compression !== 0 || header.filter !== 0 || header.interlace > 1) throw new Error(UNREADABLE);
+  if (header.width !== width || header.height !== height) throw new Error('The suggested outline does not fit this photo.');
+  const channels = FORMATS[`${header.colour}:${header.depth}`];
+  if (!channels) throw new Error(UNSUPPORTED);
+  if (width < 1 || height < 1 || width * height > MAX_MASK_PIXELS) throw new Error(UNREADABLE);
+  const depth = header.depth, bitsPerPixel = channels * depth, step = Math.max(1, bitsPerPixel >> 3);
+  const scale = depth === 1 ? 255 : depth === 2 ? 85 : depth === 4 ? 17 : 1;
+  const passes = (header.interlace ? ADAM7 : [[0, 0, 1, 1]]).map(([x0, y0, dx, dy]) => {
+    const columns = width > x0 ? Math.ceil((width - x0) / dx) : 0, rows = height > y0 ? Math.ceil((height - y0) / dy) : 0;
+    return { x0, y0, dx, dy, columns, rows, rowBytes: Math.ceil((columns * bitsPerPixel) / 8) };
+  }).filter((pass) => pass.columns > 0 && pass.rows > 0);
+  const raw = await inflateExactly(idat, passes.reduce((sum, pass) => sum + pass.rows * (pass.rowBytes + 1), 0));
   const mask = new Uint8Array(width * height);
-  const canvas = makeCanvas(Math.min(TILE, width), Math.min(TILE, height));
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (!context) throw new Error('The suggested outline could not be read in this browser.');
-  context.imageSmoothingEnabled = false;
-  for (let top = 0; top < height; top += TILE) {
-    for (let left = 0; left < width; left += TILE) {
-      const [w, h] = [Math.min(TILE, width - left), Math.min(TILE, height - top)];
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(bitmap, left, top, w, h, 0, 0, w, h);
-      const { data } = context.getImageData(0, 0, w, h);
-      for (let y = 0; y < h; y += 1) {
-        for (let x = 0; x < w; x += 1) {
-          const at = 4 * (y * w + x);
-          const value = data[at];
-          if ((value !== 0 && value !== 255) || data[at + 1] !== value || data[at + 2] !== value || data[at + 3] !== 255) {
-            throw new Error('The suggested outline could not be read.');
-          }
-          mask[(top + y) * width + left + x] = value ? 1 : 0;
-        }
+  // One 8-bit value per channel, as the validator's RGBA conversion reads it.
+  const sampleAt = (row, x, channel) => {
+    if (depth < 8) { const bit = x * depth; return ((row[bit >> 3] >> (8 - depth - (bit & 7))) & ((1 << depth) - 1)) * scale; }
+    return row[(x * channels + channel) * (depth >> 3)];
+  };
+  let offset = 0;
+  for (const pass of passes) {
+    let previous = new Uint8Array(pass.rowBytes);
+    for (let y = 0; y < pass.rows; y += 1) {
+      const kind = raw[offset], row = raw.subarray(offset + 1, offset + 1 + pass.rowBytes);
+      offset += pass.rowBytes + 1;
+      for (let i = 0; i < pass.rowBytes; i += 1) {
+        const left = i >= step ? row[i - step] : 0, up = previous[i], corner = i >= step ? previous[i - step] : 0;
+        if (kind === 1) row[i] = (row[i] + left) & 255;
+        else if (kind === 2) row[i] = (row[i] + up) & 255;
+        else if (kind === 3) row[i] = (row[i] + ((left + up) >> 1)) & 255;
+        else if (kind === 4) row[i] = (row[i] + paeth(left, up, corner)) & 255;
+        else if (kind !== 0) throw new Error(UNREADABLE);
       }
+      for (let x = 0; x < pass.columns; x += 1) {
+        const first = sampleAt(row, x, 0);
+        const rgb = channels >= 3 ? [first, sampleAt(row, x, 1), sampleAt(row, x, 2)] : [first, first, first];
+        let alpha = channels === 2 ? sampleAt(row, x, 1) : channels === 4 ? sampleAt(row, x, 3) : 255;
+        if (key && key.every((value, i) => value === rgb[channels === 1 ? 0 : i])) alpha = 0;
+        if (alpha !== 255 || rgb[1] !== first || rgb[2] !== first || (first !== 0 && first !== 255)) throw new Error(UNREADABLE);
+        mask[(pass.y0 + y * pass.dy) * width + pass.x0 + x * pass.dx] = first ? 1 : 0;
+      }
+      previous = row;
     }
   }
   return mask;
-}
-
-function makeTileCanvas(width, height) {
-  if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(width, height);
-  return Object.assign(document.createElement('canvas'), { width, height });
 }
 
 // Maps a pointer position to the source pixel under it, whatever the zoom.
@@ -382,15 +469,10 @@ export function mountObjectOutlineEditor(host, { source, initialMaskUrl = null, 
       return;
     }
     try {
-      if (typeof createImageBitmap !== 'function') throw new Error('The suggested outline could not be read in this browser.');
       const response = await fetch(target.href, { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
       if (!response.ok) throw new Error('The suggested outline could not be loaded.');
-      const bitmap = await createImageBitmap(await response.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
-      try {
-        if (!disposed) start(readBinaryMask(bitmap, width, height, makeTileCanvas), 'Check the suggested outline against the photo. Add or remove parts where it is wrong.');
-      } finally {
-        bitmap.close?.();
-      }
+      const mask = await readBinaryMask(new Uint8Array(await response.arrayBuffer()), width, height);
+      if (!disposed) start(mask, 'Check the suggested outline against the photo. Add or remove parts where it is wrong.');
     } catch (error) {
       if (!disposed) refuse(error?.message?.startsWith('The suggested outline') ? error.message : 'The suggested outline could not be loaded.');
     }

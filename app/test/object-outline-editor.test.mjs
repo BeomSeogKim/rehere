@@ -14,20 +14,6 @@ class Element extends FakeElement {
     return {
       clearRect() {}, putImageData(image) { canvas.painted = image; }, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
       createImageData: (w, h) => ({ data: new Uint8ClampedArray(4 * w * h) }),
-      drawImage(bitmap, sx, sy, w, h, dx, dy, dw, dh) {
-        assert.equal(dw, w, 'tiles are copied 1:1');
-        assert.equal(dh, h, 'tiles are copied 1:1');
-        assert.ok(w <= canvas.width && h <= canvas.height);
-        canvas.drawn = { bitmap, sx, sy, w, h };
-      },
-      getImageData(x, y, w, h) {
-        const { bitmap, sx, sy } = canvas.drawn;
-        const data = new Uint8ClampedArray(4 * w * h);
-        for (let row = 0; row < h; row += 1) {
-          for (let col = 0; col < w; col += 1) data.set(bitmap.rgba(sx + col, sy + row), 4 * (row * w + col));
-        }
-        return { data };
-      },
     };
   }
   focus() { this.focused = true; }
@@ -67,14 +53,6 @@ function pixelsOf(raw, width, height) {
     out.push(...raw.subarray(y * (width + 1) + 1, (y + 1) * (width + 1)));
   }
   return out;
-}
-
-function bitmapFrom(mask, width = W, height = H, override = () => null) {
-  return {
-    width, height, closed: false,
-    close() { this.closed = true; },
-    rgba(x, y) { return override(x, y) ?? (mask[y * width + x] ? [255, 255, 255, 255] : [0, 0, 0, 255]); },
-  };
 }
 
 describe('mask session at source-pixel precision', () => {
@@ -132,19 +110,14 @@ describe('fixed-format mask export and native mask reading', () => {
     await assert.rejects(editor.encodeMaskPng(new Uint8Array(3), W, H));
   });
 
-  it('reads masks in bounded 1:1 tiles and refuses wrong size or non-binary pixels', () => {
-    const width = 1500;
-    const height = 1100;
+  it('reads back its own exported masks exactly and refuses a wrong size', async () => {
+    const width = 15;
+    const height = 11;
     const mask = new Uint8Array(width * height);
-    mask[0] = mask[1024] = mask[1024 * width + 1499] = 1;
-    const canvases = [];
-    const make = (w, h) => { const canvas = Object.assign(new Element('canvas'), { width: w, height: h }); canvases.push(canvas); return canvas; };
-    assert.deepEqual(editor.readBinaryMask(bitmapFrom(mask, width, height), width, height, make), mask);
-    assert.deepEqual(canvases.map((canvas) => [canvas.width, canvas.height]), [[1024, 1024]], 'one bounded tile canvas, never the full photo');
-    assert.throws(() => editor.readBinaryMask(bitmapFrom(mask, width, height), width + 1, height, make), /does not fit this photo/);
-    for (const bad of [[128, 128, 128, 255], [255, 0, 255, 255], [255, 255, 255, 254]]) {
-      assert.throws(() => editor.readBinaryMask(bitmapFrom(new Uint8Array(W * H), W, H, (x, y) => (x === 2 && y === 5 ? bad : null)), W, H, make), /could not be read/);
-    }
+    mask[0] = mask[3 * width + 7] = mask[10 * width + 14] = 1;
+    const bytes = await editor.encodeMaskPng(mask, width, height);
+    assert.deepEqual(await editor.readBinaryMask(bytes, width, height), mask);
+    await assert.rejects(editor.readBinaryMask(bytes, width + 1, height), /does not fit this photo/);
   });
 });
 
@@ -352,17 +325,13 @@ describe('object outline editor component', () => {
     view.component.dispose();
   });
 
-  it('starts from a same-origin proposed mask read natively, and closes the bitmap', async () => {
+  it('starts from a same-origin proposed mask read from its exact bytes', async () => {
     const proposal = new Uint8Array(W * H);
     proposal[W + 1] = proposal[W + 2] = 1;
+    const bytes = await editor.encodeMaskPng(proposal, W, H);
     const requests = [];
-    let bitmap;
-    globalThis.fetch = async (url, options) => { requests.push([url, options]); return { ok: true, blob: async () => ({ proposal }) }; };
-    globalThis.createImageBitmap = async (blob, options) => {
-      assert.deepEqual(options, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
-      bitmap = bitmapFrom(blob.proposal);
-      return bitmap;
-    };
+    globalThis.fetch = async (url, options) => { requests.push([url, options]); return { ok: true, arrayBuffer: async () => bytes.slice().buffer }; };
+    globalThis.createImageBitmap = () => { throw new Error('the colour-managed image path must not be used'); };
     const view = mount({ initialMaskUrl: '/api/drafts/d/reconstructions/j/mask.png' });
     view.load();
     await settle();
@@ -370,7 +339,6 @@ describe('object outline editor component', () => {
     assert.equal(requests[0][0], 'http://app.test/api/drafts/d/reconstructions/j/mask.png');
     assert.equal(requests[0][1].credentials, 'same-origin');
     assert.equal(view.selected(), 2);
-    assert.equal(bitmap.closed, true);
   });
 
   it('refuses an invalid or foreign proposed mask and offers a blank manual outline', async () => {
@@ -379,8 +347,8 @@ describe('object outline editor component', () => {
     foreign.load();
     await settle();
     assert.match(foreign.status(), /could not be used/);
-    globalThis.fetch = async () => ({ ok: true, blob: async () => ({}) });
-    globalThis.createImageBitmap = async () => bitmapFrom(new Uint8Array(W * H), W, H, (x) => (x === 0 ? [7, 7, 7, 255] : null));
+    const notPng = new Uint8Array([1, 2, 3]);
+    globalThis.fetch = async () => ({ ok: true, arrayBuffer: async () => notPng.buffer });
     const view = mount({ initialMaskUrl: '/mask.png' });
     view.load();
     await settle();
