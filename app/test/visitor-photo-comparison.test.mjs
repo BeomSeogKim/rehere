@@ -147,6 +147,7 @@ describe('comparing with the photograph', () => {
     assert.ok(close(currentCamera().position, [0, 0, 0]) && close(currentCamera().target, [0, 0, -3]), 'the original camera, not the saved start');
     assert.deepEqual(rendererState().size, [480, 400], 'a 600 x 500 photo fitted inside 800 x 400, not stretched or cropped');
     assert.equal(v.button('Compare with the photograph').hidden, true);
+    assert.equal(v.button('Photo with the estimated object').hidden, true, 'offered only for a full object');
     assert.equal(pressed(v.button('This reconstruction')), 'true');
     assert.equal(pressed(v.button('Photo')), 'false');
     assert.equal(v.button('Back to the starting view').disabled, true, 'the starting camera is not offered while comparing');

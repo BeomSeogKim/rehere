@@ -138,6 +138,17 @@ A visit hidden in another tab is cleared at once and re-authorized on return;
 it then reopens the same saved view, object and camera when that saved copy and
 those choices are unchanged, with audio stopped and photos collapsed.
 
+For a full-object visit, the comparison also offers **Photo with the
+estimated object**. Outside the confirmed outline it shows the permitted photo
+copy unchanged; inside, a hatch marks what the photo hid as unknown, with an
+approximate edge. The estimated object is drawn from the original viewpoint at
+the selected view's saved pose. The retained room estimate only hides the
+object where it lies in front; where that estimate has gaps, occlusion is
+uncertain and the object is drawn in front. Nothing is inpainted, and the saved
+pose and camera are unchanged. Choosing another option or leaving the
+comparison turns it off without changing anything saved. This optional
+comparison is not a placement approval or a claim about room quality.
+
 The saved-place screen puts the scene workspace first. Original photos,
 writing, recordings and source-use controls remain under **Original materials
 and allowed uses**. Opening that disclosure keeps the scene and camera in

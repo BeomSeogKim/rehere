@@ -597,15 +597,21 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     const showPhoto = el('button', { type: 'button', className: 'secondary', textContent: 'Photo' });
     const showScene = el('button', { type: 'button', className: 'secondary', textContent: 'This reconstruction' });
     const leaveCompare = el('button', { type: 'button', className: 'secondary', textContent: 'Leave the comparison' });
+    // Optional, full objects only: the photo copy with the estimated object
+    // drawn over it from the photo's viewpoint.
+    const showContext = el('button', { type: 'button', className: 'secondary', textContent: 'Photo with the estimated object', hidden: !fullObject });
+    const contextNote = el('p', { className: 'hint', hidden: true, textContent: 'The photo copy used for this scene, with the estimated object drawn from the photo’s viewpoint in this view’s saved arrangement. Hatching marks what the object hid in the photo: unknown, approximate edge. Approximate projection: where the room estimate has gaps, what hides the object is uncertain and the object is drawn in front.' });
+    let wantContext = false;
     const compareStatus = el('p', { className: 'hint', role: 'status' });
     const compareBar = el('div', { className: 'visit-compare', hidden: true }, [
-      el('div', { className: 'actions' }, [showPhoto, showScene, leaveCompare]),
+      el('div', { className: 'actions' }, [showPhoto, showContext, showScene, leaveCompare]),
       el('p', {
         className: 'hint',
         textContent:
           'Photo is the copy used for this scene. Both views use the photo’s viewpoint. Switching saved arrangements changes only the reconstruction; it does not establish when the place changed.',
       }),
       compareStatus,
+      contextNote,
     ]);
     const photoImage = el('img', { className: 'visit-compare-photo', alt: `The photograph used for “${manifest.title}”`, hidden: true });
     const stageFrame = el('div', { className: 'visit-compare-frame' }, [viewport, photoImage]);
@@ -626,18 +632,31 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       if (compareStatus.textContent === 'Loading the photograph…') compareStatus.textContent = '';
     };
     const PHOTO_LOAD_MS = 10_000;
-    const setPressed = (photo) => {
-      showPhoto.setAttribute('aria-pressed', String(photo));
+    const setPressed = (photo, context = false) => {
+      if (!context) viewer?.setPhotoContext?.(false);
+      showPhoto.setAttribute('aria-pressed', String(photo && !context));
+      showContext.setAttribute('aria-pressed', String(context));
       showScene.setAttribute('aria-pressed', String(!photo));
       photoImage.hidden = !photo;
-      stageFrame.classList?.toggle('is-photo', photo);
+      contextNote.hidden = !context;
+      stageFrame.classList?.toggle('is-photo', photo && !context);
+      stageFrame.classList?.toggle('is-context', context);
+    };
+    // The object is drawn over the photo only with its unknown hatch in place;
+    // otherwise the reconstruction stays as it was.
+    const showChosen = () => {
+      if (!wantContext) return setPressed(true);
+      if (viewer?.setPhotoContext?.(true) === true) return setPressed(true, true);
+      compareStatus.textContent = 'The photo with the estimated object could not be shown here. The reconstruction stays as it was.';
+      setPressed(false);
     };
     // Photo is shown only after the image has actually loaded; a load that
     // finishes after leaving, closing or a newer load is ignored.
-    const choosePhoto = () => {
+    const choosePhoto = (context = false) => {
       if (!comparing || !viewer) return;
+      wantContext = context;
       if (photoReady) {
-        setPressed(true);
+        showChosen();
         return;
       }
       const load = ++photoLoad;
@@ -650,7 +669,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
         if (ok) {
           photoReady = true;
           compareStatus.textContent = '';
-          setPressed(true);
+          showChosen();
         } else {
           photoImage.removeAttribute('src');
           compareStatus.textContent = 'The photograph could not be shown here. The reconstruction stays as it was.';
@@ -706,7 +725,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       renderStories(currentId);
     };
     compareButton.addEventListener('click', enterCompare);
-    showPhoto.addEventListener('click', choosePhoto);
+    showPhoto.addEventListener('click', () => choosePhoto(false));
+    showContext.addEventListener('click', () => choosePhoto(true));
     showScene.addEventListener('click', () => {
       if (!comparing) return;
       // Choosing the reconstruction wins over a photo still loading.
@@ -804,6 +824,11 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       return;
     }
     viewer = created;
+    viewer.setContextListener?.(() => {
+      if (!comparing) return;
+      compareStatus.textContent = 'The photo with the estimated object could not be shown here. The reconstruction stays as it was.';
+      setPressed(false);
+    });
     explore.attach(viewer);
     inspect.attach(viewer);
     // A camera returns only with its own restored view.

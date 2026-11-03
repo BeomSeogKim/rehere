@@ -8,7 +8,7 @@ import path from 'node:path';
 import { FakeElement } from './fake-dom.mjs';
 
 // The visitor screen's 3D viewer is replaced by a recorder; Node has no WebGL.
-const viewerStub = `export function createViewer(...args) { globalThis.visitViewerCalls.push(args); return Promise.resolve({ dispose() { globalThis.visitViewerCalls.disposed = true; }, applyEdit(edit) { globalThis.visitViewerCalls.edits.push(edit); }, setCamera() {}, getCamera() { return null; }, originalView() { return true; }, setInteractive() {}, isInteractive() { return false; } }); }
+const viewerStub = `export function createViewer(...args) { globalThis.visitViewerCalls.push(args); return Promise.resolve({ dispose() { globalThis.visitViewerCalls.disposed = true; }, applyEdit(edit) { globalThis.visitViewerCalls.edits.push(edit); }, setCamera() {}, getCamera() { return null; }, originalView() { return true; }, setInteractive() {}, isInteractive() { return false; }, setPhotoFraming() {}, setPhotoContext(on) { globalThis.visitContext?.push(on); return !on || globalThis.visitContextResult !== false; }, setContextListener(listener) { globalThis.visitContextListener = listener; } }); }
 export function createExploreToggle() { const button = document.createElement('button'); const status = document.createElement('p'); return { button, status, attach() {}, detach() {} }; }
 export function createInspectToggle() { const button = document.createElement('button'); const note = document.createElement('p'); return { button, note, attach() {} }; }`;
 registerHooks({
@@ -298,6 +298,57 @@ describe('full-object visitor view', () => {
       v.screen.dispose();
       assert.deepEqual([...v.revoked].sort(), [...v.created].sort(), 'every local copy is released on close');
     } finally { v.restore(); }
+  });
+
+  it('shows the photo with the object only after the photo loads and with its hatch, and otherwise keeps the reconstruction', async (t) => {
+    globalThis.visitContext = []; globalThis.visitContextResult = true;
+    t.after(() => { delete globalThis.visitContext; delete globalThis.visitContextResult; delete globalThis.visitContextListener; });
+    const v = await visit(async () => {
+      const object = await pinned();
+      return { id: '7f3a9c2e-1d4b-4e8a-9b6c-0123456789ab', title: 'Synthetic room', createdAt: '2026-11-03T00:00:00Z', synthetic: true, startViewId: PARENT_VIEW, camera: { position: [0, 0, 0], target: [0, 0, -3] }, views: [view(PARENT_VIEW, 'Start', { offset: [0, 0, 0], yaw: 0 }, object)] };
+    });
+    // Registered before any assertion, so a failure still closes the screen
+    // (stopping its timers) and restores the URL stand-ins.
+    t.after(() => { v.screen.dispose(); v.restore(); });
+    {
+      const button = (text) => v.container.findAll((node) => node.tag === 'button' && node.textContent === text)[0];
+      const [photo] = v.container.findAll((node) => node.className === 'visit-compare-photo');
+      const [frame] = v.container.findAll((node) => node.className?.startsWith?.('visit-compare-frame'));
+      const [note] = v.container.findAll((node) => node.tag === 'p' && /approximate edge/.test(node.textContent ?? ''));
+      const context = button('Photo with the estimated object'), scene = button('This reconstruction');
+      const shown = () => ({ photo: !photo.hidden, context: context.attributes['aria-pressed'], scene: scene.attributes['aria-pressed'], note: !note.hidden, frame: frame.className });
+      const RECONSTRUCTION = { photo: false, context: 'false', scene: 'true', note: false, frame: 'visit-compare-frame' };
+      assert.equal(context.hidden, false, 'offered for a full object');
+      button('Compare with the photograph').dispatch('click');
+      context.dispatch('click');
+      assert.equal(globalThis.visitContext.includes(true), false, 'nothing is drawn over the photo before it loads');
+      assert.equal(photo.hidden, true);
+      photo.onload();
+      assert.equal(globalThis.visitContext.at(-1), true);
+      assert.deepEqual(shown(), { photo: true, context: 'true', scene: 'false', note: true, frame: 'visit-compare-frame is-context' });
+      scene.dispatch('click');
+      assert.equal(globalThis.visitContext.at(-1), false);
+      assert.deepEqual(shown(), RECONSTRUCTION);
+      // A hatch that cannot be drawn: the photo stays hidden, so the photographed
+      // object is never shown twice.
+      globalThis.visitContextResult = false;
+      context.dispatch('click');
+      assert.deepEqual(shown(), RECONSTRUCTION);
+      assert.match(v.container.textContent, /could not be shown here\. The reconstruction stays as it was/);
+      globalThis.visitContextResult = true;
+      context.dispatch('click');
+      globalThis.visitContextListener(false);
+      assert.deepEqual(shown(), RECONSTRUCTION, 'a later redraw failure returns to the reconstruction');
+      context.dispatch('click');
+      button('Leave the comparison').dispatch('click');
+      assert.equal(globalThis.visitContext.at(-1), false, 'leaving turns it off');
+      assert.equal(photo.hidden, true);
+      assert.equal(button('Compare with the photograph').hidden, false);
+      context.dispatch('click');
+      assert.equal(globalThis.visitContext.at(-1), false, 'nothing is drawn outside a comparison');
+      v.screen.dispose();
+      assert.equal(globalThis.visitViewerCalls.disposed, true);
+    }
   });
 
   // Bounded: a screen stuck in loading fails here instead of hanging the run.

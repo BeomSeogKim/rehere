@@ -107,6 +107,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   let objects;
   let modelMeshes = [];
   let outlineMaskBlob = null;
+  let unknownMask = null;
   if (fullObject) {
     const read = async (url, expected, maximum) => {
       if (typeof url !== 'string' || !/^[a-f0-9]{64}$/.test(expected)) throw new Error('full-object');
@@ -132,7 +133,8 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     try { mask = { width, height, data: await readBinaryMask(maskBytes, width, height) }; } catch { throw new Error('full-object'); }
     if (isReleased()) throw new Error('full-object');
     outlineMaskBlob = new Blob([maskBytes], { type: 'image/png' });
-    releases.push(() => { outlineMaskBlob = null; });
+    unknownMask = mask;
+    releases.push(() => { outlineMaskBlob = null; unknownMask = null; });
     const { GLTFLoader } = await import('/vendor/loaders/GLTFLoader.js');
     const manager = new THREE.LoadingManager();
     manager.setURLModifier(() => { throw new Error('full-object'); });
@@ -263,6 +265,9 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   const sourceAspect = imageWidth / imageHeight;
   let framing = false;
   let frame = null;
+  let context = null;
+  let onContext = null;
+  let drawHatch = () => {};
   const resize = () => {
     const width = viewport.clientWidth;
     const height = viewport.clientHeight;
@@ -280,6 +285,9 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     renderer.setSize(frame.width, frame.height);
     canvas.style.marginLeft = framing ? `${frame.left}px` : '';
     canvas.style.marginTop = framing ? `${frame.top}px` : '';
+    if (context) {
+      try { drawHatch(); } catch { leaveContext(); onContext?.(false); }
+    }
     draw();
   };
   const observer = new ResizeObserver(resize);
@@ -315,6 +323,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     if (!fullObject || isReleased()) return false;
     if (Boolean(on) === Boolean(inspection)) return true;
     if (on) {
+      leaveContext();
       inspection = { position: camera.position.clone(), quaternion: camera.quaternion.clone(), up: camera.up.clone(), fov: camera.fov, zoom: camera.zoom, near: camera.near, far: camera.far, target: controls.target.clone(), framing, interactive };
       objects.background.visible = false;
       canvas.classList.toggle('full-object-unknown', false);
@@ -371,12 +380,70 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   canvas.addEventListener('keydown', escape);
   releases.push(() => canvas.removeEventListener('keydown', escape));
 
+  // Photo context, for a comparison only: the room estimate writes depth but
+  // no colour, so the photo copy shown behind the transparent canvas stays
+  // as it is, and a hatch drawn from the verified outline covers what the
+  // object hid in the photo. Everything changed is restored exactly on leaving.
+  drawHatch = () => {
+    const hatch = context.hatch, scale = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.max(1, Math.round(frame.width * scale)), height = Math.max(1, Math.round(frame.height * scale));
+    Object.assign(hatch.style, { position: 'absolute', left: `${frame.left}px`, top: `${frame.top}px`, width: `${frame.width}px`, height: `${frame.height}px`, pointerEvents: 'none' });
+    hatch.width = width;
+    hatch.height = height;
+    const g = hatch.getContext('2d');
+    if (!g) throw new Error('hatch');
+    const image = g.createImageData(width, height), { width: mw, height: mh, data } = unknownMask;
+    for (let y = 0; y < height; y += 1) {
+      const row = Math.min(mh - 1, Math.floor(((y + 0.5) * mh) / height)) * mw;
+      for (let x = 0; x < width; x += 1) {
+        if (!data[row + Math.min(mw - 1, Math.floor(((x + 0.5) * mw) / width))]) continue;
+        const shade = Math.floor((x + y) / scale) % 10 < 2 ? 42 : 0, i = (y * width + x) * 4;
+        image.data[i] = 22 + shade; image.data[i + 1] = 27 + shade; image.data[i + 2] = 32 + shade; image.data[i + 3] = 255;
+      }
+    }
+    g.putImageData(image, 0, 0);
+  };
+  const leaveContext = () => {
+    if (!context) return;
+    const saved = context;
+    context = null;
+    saved.hatch.remove();
+    objects.background.material.colorWrite = saved.colorWrite;
+    objects.background.renderOrder = saved.renderOrder;
+    canvas.classList.toggle('photo-context', false);
+    canvas.classList.toggle('full-object-unknown', saved.unknownClass);
+    draw();
+  };
+  releases.push(leaveContext);
+  const setPhotoContext = (on) => {
+    if (!on) { leaveContext(); return true; }
+    if (!fullObject || !unknownMask || !framing || inspection || isReleased()) return false;
+    if (context) return true;
+    context = { hatch: document.createElement('canvas'), colorWrite: objects.background.material.colorWrite, renderOrder: objects.background.renderOrder, unknownClass: canvas.classList.contains('full-object-unknown') };
+    try {
+      drawHatch();
+    } catch {
+      context.hatch.remove();
+      context = null;
+      return false;
+    }
+    viewport.insertBefore(context.hatch, canvas);
+    objects.background.material.colorWrite = false;
+    objects.background.renderOrder = -1;
+    canvas.classList.toggle('full-object-unknown', false);
+    canvas.classList.toggle('photo-context', true);
+    draw();
+    return true;
+  };
+
   return {
-    setInteractive: (on, options) => { leaveInspection(); explore(on, options); },
+    setInteractive: (on, options) => { leaveInspection(); if (on) leaveContext(); explore(on, options); },
     // Like getCamera, reports the scene's own mode while inspecting, so a caller
     // that records it (a comparison) restores page scrolling, not the inspector's orbit.
     isInteractive: () => (inspection ? inspection.interactive : interactive),
     canInspectObject: Boolean(fullObject),
+    setPhotoContext,
+    setContextListener: (listener) => { onContext = listener; },
     inspectObject,
     isInspecting: () => Boolean(inspection),
     setInspectionListener: (listener) => { onInspection = listener; },
@@ -386,6 +453,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     // transforms, texture or field of view.
     setPhotoFraming(on) {
       leaveInspection();
+      if (!on) leaveContext();
       if (composition) return false;
       framing = Boolean(on);
       resize();
@@ -427,7 +495,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       draw();
       return relation;
     },
-    sideView: () => { leaveInspection(); return look(composition ? [4, 2, 5] : [1.6, 0.25, -0.4]); },
+    sideView: () => { leaveInspection(); leaveContext(); return look(composition ? [4, 2, 5] : [1.6, 0.25, -0.4]); },
     // The camera as two finite vectors, for snapshots that must restore the
     // exact view later.
     getCamera: () => (inspection
@@ -455,6 +523,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       const pivot = composition ? selected?.sourcePivot : twoObjects ? selected?.pivot : objects.pivot;
       const view = pivot && transform ? photographedSideCamera(pivot, transform) : null;
       if (!view) return false;
+      leaveContext();
       camera.position.set(...view.position);
       controls.target.set(...view.target);
       controls.update();
@@ -463,6 +532,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     },
     setCamera({ position, target }) {
       leaveInspection();
+      leaveContext();
       if (composition) { camera.fov = 55; camera.updateProjectionMatrix(); }
       camera.position.set(...position);
       controls.target.set(...target);

@@ -860,9 +860,65 @@ describe('full object viewer asset checks', () => {
       assert.deepEqual(state(), again, 'Escape restores the prior view, mode, room and hatch');
       assert.equal(focused, 1, 'Escape returns focus to the toggle');
       assert.equal(toggle.note.hidden, true);
+      // Photo context: the room writes depth only, a hatch drawn from the
+      // verified outline covers what the object hid, and every exit restores.
+      const makeElement = globalThis.document.createElement, puts = [];
+      holder.insertBefore = (node, ref) => { node.parent = holder; holder.children.splice(holder.children.indexOf(ref), 0, node); };
+      viewer.setPhotoFraming(true);
+      viewer.originalView();
+      const look = () => ({ colorWrite: room().material.colorWrite, order: room().renderOrder, visible: room().visible, className: canvas.className, children: holder.children.length });
+      const plain = look();
+      assert.equal(viewer.setPhotoContext(true), false, 'no 2D canvas: refused');
+      assert.deepEqual(look(), plain, 'a refusal changes nothing, so the object is never drawn over an unhatched photo');
+      globalThis.document.createElement = (tag) => Object.assign(new FakeElement(tag), tag !== 'canvas' ? {} : { getContext: (kind) => kind !== '2d' ? null : {
+        createImageData: (width, height) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) }),
+        putImageData: (image) => puts.push(image),
+      } });
+      let hatch;
+      try {
+        const enter = () => {
+          assert.equal(viewer.setPhotoContext(true), true);
+          hatch = holder.children[holder.children.indexOf(canvas) - 1];
+        };
+        enter();
+        assert.deepEqual([room().material.colorWrite, room().renderOrder, room().visible], [false, -1, true], 'the room writes depth, not colour, and draws first');
+        assert.equal(canvas.classList.contains('full-object-unknown'), false, 'the canvas is transparent over the photo');
+        assert.equal(hatch.tag, 'canvas', 'the hatch sits behind the scene canvas');
+        assert.deepEqual([hatch.style.left, hatch.style.top], [canvas.style.marginLeft, canvas.style.marginTop], 'the hatch covers the same photo frame');
+        const image = puts.at(-1), painted = [];
+        for (let i = 3; i < image.data.length; i += 4) if (image.data[i]) painted.push((i - 3) / 4);
+        assert.deepEqual([image.width, image.height], [720, 600], 'the photo frame at this pixel ratio');
+        assert.deepEqual(painted, [0], 'only the pixel the verified outline marks is hatched');
+        viewer.applyEdit({ offset: [0.1, 0, 0], yaw: 0.2 });
+        assert.equal(room().material.colorWrite, false, 'another arrangement of the same object keeps the context');
+        viewer.applyEdit({ offset: [0, 0, 0], yaw: 0 });
+        viewer.setPhotoContext(false);
+        const exits = [
+          () => viewer.setPhotoContext(false),
+          () => viewer.setPhotoFraming(false),
+          () => { viewer.inspectObject(true); viewer.inspectObject(false); },
+          () => viewer.setCamera({ position: [0, 0, 0], target: [0, 0, -3] }),
+          () => viewer.setInteractive(true),
+        ];
+        for (const [i, exit] of exits.entries()) {
+          viewer.setInteractive(false);
+          viewer.setPhotoFraming(true);
+          viewer.originalView();
+          const before = look();
+          enter();
+          exit();
+          viewer.setPhotoFraming(true);
+          assert.deepEqual({ ...look(), className: canvas.className.replace(' photo-context', '') }, before, `exit ${i} restores material, order and hatch class`);
+          assert.equal(canvas.classList.contains('photo-context'), false);
+          assert.equal(hatch.parent, null, `exit ${i} removes the hatch`);
+        }
+        viewer.setInteractive(false);
+        enter();
+      } finally { globalThis.document.createElement = makeElement; }
       assert.deepEqual(new Uint8Array(await viewer.outlineMaskBlob().arrayBuffer()), new Uint8Array(maskBytes), 'the photo overlay uses the checked mask bytes');
       viewer.dispose();
       assert.equal(viewer.outlineMaskBlob(), null);
+      assert.equal(hatch.parent, null, 'closing removes the hatch');
       // Entering inspection in a portrait viewport frames every object vertex.
       mode = 'wide';
       const portrait = new FakeElement('div');
