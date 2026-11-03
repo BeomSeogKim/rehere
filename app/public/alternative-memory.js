@@ -30,6 +30,15 @@ async function request(url, body) {
   } catch { return { status: 0, ok: false, body: null }; }
 }
 const unclear = (result) => result.status === 0 || result.status >= 500;
+// A long written source scrolls in its own focusable region, so the
+// attribution, status and actions after it stay within reach. The text is
+// complete and unchanged.
+function sourceText(text, label) {
+  const node = el('p', { className: 'memory-text source-text', textContent: text, tabIndex: 0 });
+  node.setAttribute('role', 'region');
+  node.setAttribute('aria-label', label);
+  return node;
+}
 
 // Movement of an estimated full object is checked only against the
 // photographed background kept in the scene. The server says whether a pose
@@ -117,7 +126,7 @@ export function mountAlternativeMemory(container, bridge) {
     sourceView.hidden = !written;
     sourceView.replaceChildren(...(!written ? [] : !written.available
       ? [el('p', { className: 'hint', textContent: SOURCE_REASONS[written.reason] ?? SOURCE_REASONS.unreadable })]
-      : [el('p', { className: 'memory-text', textContent: written.text }),
+      : [sourceText(written.text, 'Written source, full text'),
         ...attributionLines(written.attribution).map((line) => el('p', { className: 'hint', textContent: line })),
         ...(written.modelAllowed ? [] : [el('p', { className: 'hint', textContent: 'Model use is off for this written source.' })])]));
     text.hidden = useSource.checked;
@@ -152,7 +161,7 @@ export function mountAlternativeMemory(container, bridge) {
       cancel?.addEventListener('click', () => cancelPlan(proposal));
       review.replaceChildren(el('p', { className: 'hint', textContent: 'This proposal is no longer available under current sources or supporting recollections.' }), ...(retry ? [retry] : []), ...(cancel ? [cancel] : [])); return;
     }
-    const nodes = [el('p', { className: 'hint', textContent: `Stored proposal for ${bridge.nameOf(proposal.targetId)}. New alternative time: ${proposal.scope.timeMode === 'unknown' ? 'unknown' : 'explicitly re-confirm the parent assertion'}. The current scene is not its target.` }), el('p', { className: 'memory-text', textContent: proposal.statement.text }),
+    const nodes = [el('p', { className: 'hint', textContent: `Stored proposal for ${bridge.nameOf(proposal.targetId)}. New alternative time: ${proposal.scope.timeMode === 'unknown' ? 'unknown' : 'explicitly re-confirm the parent assertion'}. The current scene is not its target.` }), proposal.statement.source ? sourceText(proposal.statement.text, 'Proposal instruction from the written source, full text') : el('p', { className: 'memory-text', textContent: proposal.statement.text }),
       ...(proposal.statement.source ? [el('p', { className: 'hint', textContent: 'From this place’s written source.' })] : []),
       el('p', { className: 'hint', textContent: statusText(proposal) })];
     if (bridge.binding()?.edit?.fullObject && proposal.motion) {
