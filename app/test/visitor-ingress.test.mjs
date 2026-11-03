@@ -338,9 +338,9 @@ describe('the visitor listener', () => {
       assert.equal(page.status, 200);
       assert.equal(page.body.toString(), await readFile(path.join(PUBLIC, 'visit.html'), 'utf8'), 'the visit page, not the app page');
       assert.equal((await raw(visitorPort, 'GET', '/visitor-entry.js')).status, 200);
-      // The shared viewer has an owner-only dynamic import for full objects.
-      // Those versions cannot be shared, so the visitor must not serve it.
-      assert.equal((await raw(visitorPort, 'GET', '/object-outline-editor.js')).status, 404);
+      // The viewer imports only the mask reader; serving its static module
+      // does not mount the editor or authorize an owner route.
+      assert.equal((await raw(visitorPort, 'GET', '/object-outline-editor.js')).status, 200);
       // Every module the visit page can load is on the allowlist.
       const seen = new Set();
       const queue = ['visitor-entry.js'];
@@ -351,7 +351,6 @@ describe('the visitor listener', () => {
         const source = await readFile(path.join(PUBLIC, file), 'utf8');
         for (const match of source.matchAll(/(?:import|export)[^'"]*?from\s*['"](\.\/[^'"]+)['"]|import\(\s*['"](\.\/[^'"]+)['"]\s*\)/g)) {
           const dependency = (match[1] ?? match[2]).slice(2);
-          if (file === 'scene-viewer.js' && match[2] && dependency === 'object-outline-editor.js') continue;
           queue.push(dependency);
         }
       }

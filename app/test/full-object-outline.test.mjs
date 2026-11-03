@@ -6,6 +6,7 @@ import path from 'node:path';
 import { it } from 'node:test';
 import { ownerFetch, sceneRunner, startOwnerServer, SYNTHETIC_PHOTO } from './auth-helper.mjs';
 import { expectedInitialPose, validateObjectGlb } from '../full-objects.mjs';
+import { encodeMaskPng } from '../public/object-outline-editor.js';
 import { syntheticGlb } from './full-object-fixtures.js';
 
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -115,7 +116,8 @@ it('binds outline and generated object to their source, replays requests and rej
     const surfaceSha = job.derivedAssets.find((asset) => asset.name === 'surface.json').sha256;
     let collection = `${scene}/full-object/outlines`;
     assert.deepEqual(await (await ownerFetch(collection)).json(), { outlines: [] });
-    const mask = Buffer.from('synthetic-validator-only-mask');
+    const pixels = new Uint8Array(40 * 30); for (let y = 3; y < 25; y++) for (let x = 4; x < 20; x++) pixels[y * 40 + x] = 1;
+    const mask = Buffer.from(await encodeMaskPng(pixels, 40, 30));
     const requestId = randomUUID(); let route = `${scene}/full-object/outlines/${requestId}`;
     const headers = { 'content-type': 'image/png', 'x-source-id': sourceId, 'x-source-sha256': source.sha256, 'x-mask-sha256': sha(mask), 'x-image-width': '40', 'x-image-height': '30', 'x-crop-xyxy': '0,0,40,30', 'x-outline-confirmed': 'true', 'x-parent-surface-sha256': surfaceSha, 'x-base-version': '1' };
     const put = (changes = {}, bytes = mask) => ownerFetch(route, { method: 'PUT', headers: { ...headers, ...changes }, body: bytes });
@@ -210,7 +212,7 @@ it('binds outline and generated object to their source, replays requests and rej
     const confirmed = await confirmedResponse.json(); assert.equal(confirmed.version, 2); assert.equal(confirmed.fullObject.sha256, completed.object.sha256);
     assert.deepEqual(await (await post(`${builds}/${accepted.id}/confirm`, confirmation)).json(), confirmed);
     const reload = await (await ownerFetch(scene)).json(); assert.equal(reload.edit.fullObject.sha256, completed.object.sha256);
-    const edited = await post(`${scene}/edit`, { requestId: randomUUID(), baseVersion: 2, offset: [0.2, 0, 0], yaw: 0.3 });
+    const edited = await post(`${scene}/edit`, { requestId: randomUUID(), baseVersion: 2, offset: [0, 0, 0.2], yaw: 0 });
     assert.equal(edited.status, 200); assert.equal((await edited.json()).fullObject.sha256, completed.object.sha256);
     assert.equal((await ownerFetch(`${collection}/${randomUUID()}`, { method: 'PUT', headers, body: mask })).status, 409, 'new outline cannot use a stale base');
     const history = await (await ownerFetch(`${scene}/history`)).json();
@@ -219,7 +221,7 @@ it('binds outline and generated object to their source, replays requests and rej
     assert.equal((await post(`${scene}/undo`, { requestId: randomUUID(), baseVersion: 3, targetVersion: 1 })).status, 409);
     assert.equal((await post(`${scene}/proposals`, { requestId: randomUUID(), baseVersion: 3, text: 'Synthetic words', consent: true })).status, 409);
     const newView = { id: randomUUID(), kind: 'version', version: 3, variantId: null };
-    assert.equal((await post(`${scene}/shares/previews`, { ...previewRequest, requestId: randomUUID(), views: [newView], startViewId: newView.id })).status, 409);
+    assert.equal((await post(`${scene}/shares/previews`, { ...previewRequest, requestId: randomUUID(), views: [newView], startViewId: newView.id })).status, 201);
     const token = `rhv_${randomBytes(32).toString('base64url')}`;
     assert.equal((await post(`${scene}/shares`, { requestId: randomUUID(), previewId: legacyPreview.id, previewDigest: legacyPreview.digest, token, consent: true })).status, 201);
     assert.equal((await fetch(`${app.base}/api/visit`, { headers: { authorization: `Bearer ${token}` } })).status, 200);

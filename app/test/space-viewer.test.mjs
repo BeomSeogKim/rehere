@@ -606,6 +606,7 @@ describe('source-bound full object owner flow', () => {
     assert.deepEqual(revoked, made, 'a late load cannot revoke anything again');
     assert.equal(views[0].disposed, true);
     assert.equal(views.at(-1).binding.buildId, buildId, 'reopening uses the saved version binding');
+    assert.equal(view.find((node) => node.className === 'memory-edit')[0].hidden, true, 'no empty memory card for a saved full object');
     assert.equal(posts.length, 2);
     view.space.dispose();
     assert.deepEqual(revoked, made, 'disposing the new scene does not double revoke');
@@ -811,6 +812,7 @@ describe('place landing', () => {
     const landing = view.find((node) => node.className === 'place-landing')[0];
     assert.match(landing.textContent, /No saved change from a written memory for this view/);
     const memory = view.find((node) => node.className === 'memory-edit' && node.children[0]?.textContent === 'Change it from a memory')[0];
+    assert.equal(memory.hidden, false, 'a partial scene keeps its memory editor visible');
     let focused = false;
     memory.querySelector = () => memory.children[0];
     memory.children[0].focus = () => { focused = true; };

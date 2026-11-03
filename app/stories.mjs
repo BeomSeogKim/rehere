@@ -166,6 +166,10 @@ export class StoryStore {
     if (!(await r.sourcePolicies.canUse(draft, voice.id, 'place'))) throw fail(403, BLOCKED.voice);
     const resolved = savedView(manifest, request.view);
     if (!resolved) throw fail(404, 'This arrangement could not be found.');
+    if (resolved.edit.fullObject) {
+      await r.assertSceneFiles(manifest);
+      await r.fullObjects.validateBinding(manifest.draftId, manifest.id, resolved.edit.fullObject);
+    }
     // The revision the owner reviewed must still be the current one.
     if (request.view.kind === 'variant' && resolved.eraRevision !== request.view.eraRevision) {
       throw fail(409, 'The time assertion for this arrangement changed. Review it and try again.');
@@ -233,6 +237,13 @@ export class StoryStore {
     }
     const resolved = savedView(manifest, context.view);
     if (!resolved) return 'view';
+    if (context.edit.fullObject || resolved.edit.fullObject) {
+      if (JSON.stringify(context.edit) !== JSON.stringify(resolved.edit) || JSON.stringify(context.dependencies) !== JSON.stringify(resolved.dependencies)) return 'view';
+      try {
+        await r.assertSceneFiles(manifest);
+        await r.fullObjects.validateBinding(manifest.draftId, manifest.id, resolved.edit.fullObject);
+      } catch { return 'view'; }
+    }
     if (context.view.kind === 'variant' && resolved.eraRevision !== context.view.eraRevision) return 'era';
     return null;
   }

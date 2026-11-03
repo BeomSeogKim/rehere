@@ -91,7 +91,13 @@ export const quotable = (entry) => QUOTABLE.has(entry.status) && typeof entry.te
 // Every retained saved version that is still usable, newest first, then each
 // usable alternative. A version is chosen by its number, never inferred from a
 // matching position; its time stays unknown.
-export function viewChoices({ history = [], variants = [], currentVersion }) {
+// For an estimated full object, only the current version and alternatives
+// bound to that same object can be shown together: one viewer draws one object.
+export function viewChoices({ history = [], variants = [], currentVersion, fullObject = null }) {
+  if (fullObject) {
+    history = [];
+    variants = variants.filter((variant) => JSON.stringify(variant.edit?.fullObject ?? null) === JSON.stringify(fullObject));
+  }
   const versions = history
     .filter((entry) => Number.isInteger(entry.version) && entry.blocked !== true)
     .map((entry) => entry.version)
@@ -167,6 +173,7 @@ export function mountShares(container, bridge) {
   let history = [];
   let proposals = [];
   let singlePhotoScene = false;
+  let fullObjectBinding = null;
   let sceneSourceId = null;
   let memoryChoice = null;
   let stories = [];
@@ -293,7 +300,15 @@ export function mountShares(container, bridge) {
     memoryPermission.disabled = true;
     memoryPermission.removeAttribute('aria-describedby');
     memoryPermissionLabel.textContent = ' I have permission to share these words.';
-    const offered = singlePhotoScene ? selectedViews().flatMap((view) => {
+    // For an estimated full object, the server says which applied alternative
+    // words are currently eligible; nothing is derived or hashed here.
+    const offered = fullObjectBinding ? selectedViews().flatMap((view) => {
+      if (view.kind !== 'variant') return [];
+      const variant = (collaboration?.variants ?? []).find((item) => item.id === view.variantId && !item.blocked);
+      const words = variant?.shareMemoryWords;
+      if (!words || typeof words.proposalId !== 'string' || !/^[0-9a-f]{64}$/.test(words.statementSha256 ?? '') || typeof words.text !== 'string' || !words.text.trim()) return [];
+      return [{ viewId: view.id, proposalId: words.proposalId, statementSha256: words.statementSha256, text: words.text, label: `alternative “${variant.label}”` }];
+    }) : singlePhotoScene ? selectedViews().flatMap((view) => {
       if (view.kind !== 'version') return [];
       const entry = history.find((item) => item.version === view.version && item.kind === 'proposal' && item.blocked === false);
       const proposal = proposals.find((item) => item.id === entry?.proposalId && item.status === 'applied' && item.appliedVersion === view.version && !item.redacted);
@@ -304,15 +319,15 @@ export function mountShares(container, bridge) {
         || !Array.isArray(entry?.offset) || JSON.stringify(proposal.result?.transform?.offset) !== JSON.stringify(entry.offset)
         || proposal.result?.transform?.yaw !== entry.yaw || statement?.kind !== 'human_memory'
         || typeof statement.text !== 'string' || !statement.text.trim() || !/^[0-9a-f]{64}$/.test(statement.sha256 ?? '')) return [];
-      return [{ viewId: view.id, proposalId: proposal.id, statementSha256: statement.sha256, text: statement.text, version: view.version }];
+      return [{ viewId: view.id, proposalId: proposal.id, statementSha256: statement.sha256, text: statement.text, label: `saved version ${view.version}` }];
     }) : [];
     const choices = offered.map((item) => ({ item, box: el('input', { type: 'checkbox', checked: false }) }));
     memoryList.replaceChildren(...(choices.length ? choices.map(({ item, box }) => {
       const wordsId = `share-memory-words-${item.viewId}`;
       box.setAttribute('aria-describedby', wordsId);
       return el('div', {}, [
-        el('p', { id: wordsId, className: 'share-memory-words', textContent: `Saved version ${item.version}: “${item.text}”` }),
-        el('label', {}, [box, ` Include these words with saved version ${item.version}`]),
+        el('p', { id: wordsId, className: 'share-memory-words', textContent: `${item.label[0].toUpperCase()}${item.label.slice(1)}: “${item.text}”` }),
+        el('label', {}, [box, ` Include these words with ${item.label}`]),
       ]);
     }) : [el('p', { className: 'hint', textContent: 'No eligible words are available for the selected views.' })]));
     for (const { item, box } of choices) box.addEventListener('change', () => {
@@ -323,7 +338,7 @@ export function mountShares(container, bridge) {
       if (memoryChoice) memoryPermission.setAttribute('aria-describedby', `share-memory-words-${item.viewId}`);
       else memoryPermission.removeAttribute('aria-describedby');
       memoryPermissionLabel.textContent = memoryChoice
-        ? ` I have permission to share these words for saved version ${item.version}.`
+        ? ` I have permission to share these words for ${item.label}.`
         : ' I have permission to share these words.';
       discardPreview();
     });
@@ -422,7 +437,7 @@ export function mountShares(container, bridge) {
 
   function renderChoices() {
     const currentVersion = bridge.editor().version;
-    const choices = viewChoices({ history, variants: collaboration?.variants ?? [], currentVersion });
+    const choices = viewChoices({ history, variants: collaboration?.variants ?? [], currentVersion, fullObject: fullObjectBinding });
     const checked = new Set(viewBoxes.filter(({ box }) => box.checked === true).map(({ key }) => key));
     const fallback = `version:${currentVersion}`;
     viewBoxes = choices.map((choice) => ({ ...choice, box: el('input', { type: 'checkbox', checked: checked.has(choice.key) || (checked.size === 0 && choice.key === fallback) }) }));
@@ -706,6 +721,7 @@ export function mountShares(container, bridge) {
     const objects = Array.isArray(scene.body?.objects) ? scene.body.objects : null;
     singlePhotoScene = Boolean(scene.ok && scene.body?.status === 'ready' && Array.isArray(scene.body.box) && typeof scene.body.sourceId === 'string' && !objects);
     sceneSourceId = singlePhotoScene ? scene.body.sourceId : null;
+    fullObjectBinding = scene.ok && scene.body?.edit?.fullObject ? scene.body.edit.fullObject : null;
     targets = [
       { id: 'place', label: 'This place as a whole' },
       ...(objects

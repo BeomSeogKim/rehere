@@ -29,6 +29,7 @@ import { sha256 } from './sources.mjs';
 import { geometrySources } from './geometry-sources.mjs';
 import { COMPOSITION_OUTPUTS, parseCompositionPose, parseCompositionRequest, verifiedAsset } from './composition-assets.mjs';
 import { COMPOSITION_REPRESENTATION, canonicalPose, copyPose, isComposition } from './public/composition-scene.js';
+import { heldObjectMotion } from './full-objects.mjs';
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const RECONSTRUCTION_TIMEOUT_MS = 180_000;
@@ -1421,6 +1422,7 @@ export class ReconstructionStore {
       assertSceneUsable(manifest, 'place');
       if (manifest.edit.fullObject) await this.fullObjects.validateBinding(draftId, jobId, manifest.edit.fullObject);
       const edit = { version: manifest.edit.version + 1, offset: request.offset, yaw: request.yaw, ...(manifest.edit.fullObject && { fullObject: manifest.edit.fullObject }) };
+      if (edit.fullObject) await this.fullObjects.assertMotion(manifest, edit, manifest.edit);
       await this.saveVersion(manifest, edit, { requestId: request.requestId, baseVersion: request.baseVersion, ...edit, dependencies: currentDependencies(manifest) });
       return edit;
     });
@@ -1719,7 +1721,8 @@ export class ReconstructionStore {
     const [x1, y1, x2, y2] = box;
     const selection = [x1 / size.width, y1 / size.height, x2 / size.width, y2 / size.height];
     const targetSaved = target && arrangement.objects.find((item) => item.id === target.id);
-    const saved = targetSaved ? { offset: [...targetSaved.offset], yaw: targetSaved.yaw } : arrangement;
+    const saved = targetSaved ? { offset: [...targetSaved.offset], yaw: targetSaved.yaw }
+      : arrangement.fullObject ? { offset: [...arrangement.offset], yaw: arrangement.yaw } : arrangement;
     return { imagePath, selection, box, sourceId: manifest.sourceId, saved, context: twoObjects ? modelContext(manifest, targetId, arrangement) : null };
   }
 
@@ -1779,6 +1782,9 @@ export class ReconstructionStore {
         try {
           const scene = await this.editableScene(draftId, jobId);
           await this.assertSceneFiles(scene);
+          const bound = proposalBinding(scene, proposal);
+          if (!bound) return false;
+          if (bound.arrangement.fullObject) await this.fullObjects.validateBinding(draftId, jobId, bound.arrangement.fullObject);
           return scene.status === 'ready';
         } catch { return false; }
       };
@@ -1883,20 +1889,26 @@ export class ReconstructionStore {
         const checked = validatePlan(outcome.plan, {
           ...(photos ? { sourceIds: context.sourceIds, arrangement: base } : { sourceId }),
           ...(current.scope ? { alternative: { parentVariantId: current.scope.parentVariantId, baseEraRevision: current.scope.baseEraRevision } } : { baseVersion: current.baseVersion }),
-          saved: targetSaved, surface, ...(twoObjects && { targetId: current.targetId }),
+          saved: targetSaved, surface, fullObject: Boolean(base.fullObject), ...(twoObjects && { targetId: current.targetId }),
         });
         if (checked.error) {
           console.error(`proposal ${current.id} plan rejected: ${checked.code}`);
-          return { ...record, status: 'failed', error: checked.error };
+          return { ...record, status: 'failed', error: checked.error, ...(base.fullObject && { motion: heldObjectMotion(checked.error) }) };
         }
         const { result } = checked;
-        if (result.action === 'clarify') return { ...record, status: 'clarify', result, question: result.question };
+        if (result.action === 'clarify') return { ...record, status: 'clarify', result, question: result.question, ...(base.fullObject && { motion: heldObjectMotion(result.question) }) };
         // The candidate is the whole bound arrangement with one object changed.
         const arrangement = variantFields(manifest, base, current.targetId, result.transform);
         // A scoped result that changes nothing is never offered.
         if (current.scope && sameArrangement(arrangement, base)) {
           console.error(`proposal ${current.id} plan rejected: unchanged`);
           return { ...record, status: 'failed', error: PROPOSAL_MESSAGES.unchanged };
+        }
+        let motion;
+        if (base.fullObject) {
+          motion = await this.fullObjects.motion(manifest, arrangement);
+          if (motion.status !== 'checked') return { ...record, status: 'failed', error: motion.reason, motion };
+          if (signal.aborted || this.closed) return { ...record, status: 'interrupted', error: PROPOSAL_MESSAGES.interrupted, motion: heldObjectMotion(PROPOSAL_MESSAGES.interrupted) };
         }
         // It must keep the arrangement's rule.
         if (twoObjects) {
@@ -1919,7 +1931,7 @@ export class ReconstructionStore {
             return { ...record, status: 'failed', error: held };
           }
         }
-        return { ...record, status: 'ready', result };
+        return { ...record, status: 'ready', result, ...(motion && { motion }) };
       }); });
     } catch (error) {
       console.error(`proposal ${proposal.id} failed: ${error?.code ?? error?.name ?? 'error'}`);

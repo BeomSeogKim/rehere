@@ -247,6 +247,7 @@ export function validatePlan(plan, context) {
   // The first field, in fixed order, that must be null for this action but is not.
   const extra = (fields) => fields.find((field) => plan[field] !== null);
   const result = (transform) => ({ result: { ...plan, delta: delta && [...delta], anchor: anchor && { label: anchor.label, point: [...anchor.point] }, transform } });
+  const clarifyObject = (question) => ({ result: { ...plan, action: 'clarify', targetId: null, delta: null, yawDelta: null, anchor: null, question, transform: null } });
 
   if (action === 'clarify') {
     const field = extra(['targetId', 'delta', 'yawDelta', 'anchor']);
@@ -260,6 +261,7 @@ export function validatePlan(plan, context) {
     const field = extra(['yawDelta', 'anchor']);
     if (field) return reject(`translate_${field}_not_null`);
     if (!Array.isArray(delta) || delta.length !== 3 || !delta.every(finite)) return reject('translate_delta');
+    if (context.fullObject && delta[1] !== 0) return clarifyObject('Vertical movement is unsupported. Describe a sideways move or an explicit relative turn.');
     const offset = saved.offset.map((value, axis) => value + delta[axis]);
     if (offset.some((value) => Math.abs(value) > OFFSET_LIMIT)) return reject('translate_range', PROPOSAL_MESSAGES.range);
     return result({ offset, yaw: saved.yaw });
@@ -277,6 +279,7 @@ export function validatePlan(plan, context) {
   if (!filled(anchor.label, 120)) return reject('face_anchor_label');
   const { point } = anchor;
   if (!Array.isArray(point) || point.length !== 2 || !point.every((value) => finite(value) && value >= 0 && value <= 1)) return reject('face_anchor_point');
+  if (context.fullObject) return clarifyObject('The object’s historical front is unknown. Describe an explicit relative turn instead.');
   const yaw = anchorYaw(surface, point, saved.offset, expectedTargetId);
   if (yaw === null) return reject('face_anchor_on_object', PROPOSAL_MESSAGES.anchor);
   return result({ offset: [...saved.offset], yaw });

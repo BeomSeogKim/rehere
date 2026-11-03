@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { OBJECT_IDS, arrangementOf, assertObjectsConfirmed, isTwoObject } from './arrangements.mjs';
-import { captionsIntact, contributionAllows, reviewTarget, versionDependencies } from './collaboration.mjs';
+import { captionsIntact, contributionAllows, fullObjectMemoryWords, reviewTarget, versionDependencies } from './collaboration.mjs';
 import { photoAttested, readPlayback, readReviewPhoto } from './contribution-photos.mjs';
 import { RequestError } from './drafts.mjs';
 import { geometrySources } from './geometry-sources.mjs';
@@ -114,7 +114,7 @@ function parsePreview(body) {
     const words = body.memoryWords;
     if (!exactKeys(words, ['viewId', 'proposalId', 'statementSha256', 'permission']) || !isId(words.viewId) || !isId(words.proposalId)
       || typeof words.statementSha256 !== 'string' || !SHA.test(words.statementSha256) || words.permission !== true
-      || !views.some((view) => view.id === words.viewId && view.kind === 'version')) throw fail(400, UNREADABLE);
+      || !views.some((view) => view.id === words.viewId)) throw fail(400, UNREADABLE);
   }
   return {
     requestId: body.requestId, title: body.title, views, startViewId: body.startViewId, camera, contributionIds: [...quotes], synthetic: body.synthetic, storyIds: [...storyIds],
@@ -203,7 +203,7 @@ const variantsOf = (manifest) => manifest.collaboration?.variants ?? [];
 // transform, or for two objects both transforms and the optional rule.
 function editFields(manifest, edit) {
   if (isComposition(manifest)) return { version: edit.version, ...arrangementOf(edit) };
-  return isTwoObject(manifest) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw };
+  return isTwoObject(manifest) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw, ...(edit.fullObject && { fullObject: structuredClone(edit.fullObject) }) };
 }
 
 function initialEdit(manifest) {
@@ -221,7 +221,6 @@ export function savedView(manifest, view) {
     if (!Number.isInteger(view.version) || view.version < 1 || view.version > manifest.edit.version) return null;
     const edit = view.version === 1 ? initialEdit(manifest) : manifest.edits.find((item) => item.version === view.version);
     if (!edit) return null;
-    if (edit.fullObject) throw fail(409, 'Sharing this full-object version is not available yet.');
     return {
       edit: editFields(manifest, edit), dependencies: versionDependencies(manifest, view.version), era: null, eraRevision: null,
       label: `Saved version ${view.version}`,
@@ -230,9 +229,8 @@ export function savedView(manifest, view) {
   const variants = variantsOf(manifest);
   const variant = variants.find((item) => item.id === view.variantId);
   if (!variant) return null;
-  if (variant.edit?.fullObject || manifest.edits.some((item) => item.version === variant.parentVersion && item.fullObject)) {
-    throw fail(409, 'Sharing this full-object version is not available yet.');
-  }
+  const retained = manifest.edits.find((item) => item.version === variant.parentVersion)?.fullObject;
+  if (Boolean(retained) !== Boolean(variant.edit?.fullObject) || (retained && JSON.stringify(retained) !== JSON.stringify(variant.edit.fullObject))) return null;
   const label = variant.kind === 'baseline' ? 'Saved reconstruction' : `Alternative arrangement ${variants.filter((item) => item.kind !== 'baseline').indexOf(variant) + 1}`;
   return {
     edit: editFields(manifest, variant.edit), dependencies: [...variant.contributionIds],
@@ -366,6 +364,17 @@ export class ShareStore {
       if (issue) return issue;
     }
     for (const view of frozen.views) {
+      if (view.edit?.fullObject) {
+        const resolved = savedView(manifest, view);
+        if (!resolved || JSON.stringify(resolved.edit) !== JSON.stringify(view.edit) || JSON.stringify(resolved.dependencies) !== JSON.stringify(view.dependencies)) return 'changed';
+        try {
+          const assets = await this.reconstructions.fullObjects.boundAssets(manifest, view.edit.fullObject);
+          for (const [name, bytes] of [['object.glb', assets.glb], ['outline.png', assets.mask]]) {
+            const pinned = view.fullObjectAssets?.[name];
+            if (!pinned || pinned.size !== bytes.length || pinned.sha256 !== sha256(bytes)) return 'asset';
+          }
+        } catch { return 'asset'; }
+      }
       if (view.kind === 'version' && !savedView(manifest, view)) return 'changed';
       if (view.kind === 'variant') {
         const variant = variantsOf(manifest).find((item) => item.id === view.variantId);
@@ -387,7 +396,16 @@ export class ShareStore {
   // new model-processing grant for a deterministic share.
   async #memoryWords(manifest, selection, views) {
     if (Array.isArray(manifest.objects) || isComposition(manifest)) return null;
-    const view = views.find((item) => item.id === selection.viewId && item.kind === 'version');
+    const selected = views.find((item) => item.id === selection.viewId);
+    if (selected?.kind === 'variant') {
+      const child = variantsOf(manifest).find((item) => item.id === selected.variantId);
+      const words = await fullObjectMemoryWords(this.reconstructions, manifest, child);
+      if (!words || words.proposalId !== selection.proposalId || words.statementSha256 !== selection.statementSha256) return null;
+      for (const key of ['statementId', 'editSha256', 'receiptSha256']) if (selection[key] !== undefined && selection[key] !== words[key]) return null;
+      const { text, ...pins } = words;
+      return { text, pinned: { viewId: selected.id, variantId: child.id, ...pins } };
+    }
+    const view = selected?.kind === 'version' ? selected : null;
     if (!view || (selection.version !== undefined && selection.version !== view.version)) return null;
     const receipts = manifest.edits.filter((item) => item.version === view.version);
     const proposals = (manifest.proposals ?? []).filter((item) => item.id === selection.proposalId && !item.scope);
@@ -457,6 +475,14 @@ export class ShareStore {
       if (!resolved) throw fail(404, 'This version of the scene could not be found.');
       return { view, ...resolved };
     });
+    const fullObject = selected.find((item) => item.edit.fullObject)?.edit.fullObject;
+    if (fullObject && selected.some((item) => JSON.stringify(item.edit.fullObject) !== JSON.stringify(fullObject))) throw fail(400, 'Select full-object arrangements with the same object and outline.');
+    if (request.memoryWords && selected.find((item) => item.view.id === request.memoryWords.viewId)?.view.kind === 'variant' && !fullObject) throw fail(400, UNREADABLE);
+    let fullObjectAssets = null;
+    if (fullObject) {
+      const { glb, mask } = await this.reconstructions.fullObjects.boundAssets(manifest, fullObject);
+      fullObjectAssets = { 'object.glb': { sha256: sha256(glb), size: glb.length }, 'outline.png': { sha256: sha256(mask), size: mask.length } };
+    }
     const dependencyReason = this.#contributionIssue(manifest, selected.flatMap((item) => item.dependencies));
     if (dependencyReason) this.#throwReason(dependencyReason);
 
@@ -516,7 +542,12 @@ export class ShareStore {
       return {
         id: view.id,
         label,
-        edit: structuredClone(edit),
+        edit: edit.fullObject ? { offset: [...edit.offset], yaw: edit.yaw } : structuredClone(edit),
+        ...(edit.fullObject && { representation: 'source-photo-full-object-v1', fullObject: {
+          sha256: edit.fullObject.sha256, outlineSha256: edit.fullObject.outlineSha256, initial: structuredClone(edit.fullObject.initial),
+          asset: { viewId: view.id, name: 'object.glb', size: fullObjectAssets['object.glb'].size },
+          mask: { viewId: view.id, name: 'outline.png', size: fullObjectAssets['outline.png'].size },
+        } }),
         ...(memoryWords && view.id === request.memoryWords.viewId && { memoryWords: { text: memoryWords.text } }),
         era: publicEra,
         evidence: {
@@ -560,7 +591,7 @@ export class ShareStore {
     const frozen = {
       ...(isComposition(manifest) ? { sourceBindings: geometrySources(manifest) } : { sourceSha256: manifest.sourceSha256 }),
       assets,
-      views: selected.map(({ view, dependencies, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision })),
+      views: selected.map(({ view, edit, dependencies, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision, ...(edit.fullObject && { edit: structuredClone(edit), fullObjectAssets: structuredClone(fullObjectAssets) }) })),
       quotes: quotes.map((item) => ({ contributionId: item.id, textSha256: item.textSha256 })),
       stories: pinnedStories,
       ...(memoryWords && { memoryWords: memoryWords.pinned }),
@@ -639,8 +670,16 @@ export class ShareStore {
   // matches the frozen checksum. Never a source path or a sibling file.
   async #asset(manifest, frozen, viewId, name) {
     if (viewId === 'evidence') return this.#evidence(manifest, frozen, name);
+    const view = frozen.views.find((item) => item.id === viewId);
+    if (name === 'object.glb' || name === 'outline.png') {
+      if (!view?.edit?.fullObject || !view.fullObjectAssets?.[name]) return null;
+      const { glb, mask } = await this.reconstructions.fullObjects.boundAssets(manifest, view.edit.fullObject);
+      const body = name === 'object.glb' ? glb : mask, binding = view.fullObjectAssets[name];
+      if (body.length !== binding.size || sha256(body) !== binding.sha256) return null;
+      return { name, body, type: name === 'object.glb' ? 'model/gltf-binary' : 'image/png' };
+    }
     const types = sharedAssets(manifest);
-    if (!frozen.views.some((view) => view.id === viewId) || !Object.hasOwn(types, name)) return null;
+    if (!view || !Object.hasOwn(types, name)) return null;
     const file = path.join(this.reconstructions.jobDir(manifest.draftId, manifest.id), 'assets', name);
     const binding = frozen.assets[name];
     if (isComposition(manifest)) {
@@ -771,7 +810,7 @@ export class ShareStore {
         if (existing.previewId !== request.previewId || existing.digest !== request.previewDigest || !sameVerifier(existing.tokenVerifier, tokenVerifier)) {
           throw fail(409, 'This request was already used with different values.');
         }
-        if (isComposition(manifest)) {
+        if (isComposition(manifest) || existing.frozen.views.some((view) => view.edit?.fullObject)) {
           const reason = await this.#liveIssue(manifest, existing.frozen);
           if (reason) this.#throwReason(reason);
         }

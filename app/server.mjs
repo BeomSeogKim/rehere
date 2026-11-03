@@ -73,7 +73,7 @@ const STATIC_FILES = new Map([
 const VISITOR_FILES = new Map([
   ['/', ['visit.html', 'text/html; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
-  ...['visitor-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'composition-scene.js', 'composition-description.js', 'story-player.js', 'playback.js', 'arrangement.js']
+  ...['visitor-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'composition-scene.js', 'composition-description.js', 'story-player.js', 'playback.js', 'arrangement.js', 'object-outline-editor.js']
     .map((name) => [`/${name}`, [name, 'text/javascript; charset=utf-8']]),
 ]);
 // Visitors never record or share location.
@@ -106,7 +106,7 @@ const VENDOR_FILES = new Map([
   ['/vendor/THREE-LICENSE', ['LICENSE', 'text/plain; charset=utf-8']],
 ]);
 
-const OWNER_THREE_FILES = new Map([
+const GLTF_FILES = new Map([
   ['/vendor/loaders/GLTFLoader.js', ['examples/jsm/loaders/GLTFLoader.js', 'text/javascript; charset=utf-8']],
   ['/vendor/utils/BufferGeometryUtils.js', ['examples/jsm/utils/BufferGeometryUtils.js', 'text/javascript; charset=utf-8']],
   ['/vendor/utils/SkeletonUtils.js', ['examples/jsm/utils/SkeletonUtils.js', 'text/javascript; charset=utf-8']],
@@ -122,7 +122,7 @@ const PRIVATE_VENDOR_FILES = new Map([
 
 const SECURITY_HEADERS = {
   'content-security-policy':
-    "default-src 'self'; img-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; connect-src 'self' blob:; img-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
   'permissions-policy': 'microphone=(self), camera=(), geolocation=()',
@@ -166,6 +166,7 @@ const CAPTION_BODY_BYTES = 128 * 1024;
 const CONTRIBUTION_PHOTO_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/photo$/;
 const CONTRIBUTION_BUNDLE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/contributions\/bundle$/;
 const ERA_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/era$/;
+const BASELINE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/baseline$/;
 const REVISION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/(revisions|revision-context)$/;
 const VARIANT_PROPOSAL_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/variants\/([^/]+)\/proposals(?:\/([^/]+)(?:\/(cancel|apply))?)?$/;
 const NOT_FOUND = 'This scene could not be found.';
@@ -182,7 +183,7 @@ const PREVIEW_STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/s
 const STORIES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories$/;
 const STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)$/;
 const STORY_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)\/(audio\.wav|withdraw)$/;
-const SHARE_ASSETS = new Set(['surface.json', 'texture.jpg', 'texture-1.jpg', 'texture-2.jpg']);
+const SHARE_ASSETS = new Set(['surface.json', 'texture.jpg', 'texture-1.jpg', 'texture-2.jpg', 'object.glb', 'outline.png']);
 // A pinned contributor photo in a shared view: evidence/<n>.jpg.
 const sharedAsset = (viewId, name) => (UUID.test(viewId) && SHARE_ASSETS.has(name)) || (viewId === 'evidence' && /^[1-9][0-9]?\.jpg$/.test(name));
 // Accepts exactly one Authorization header holding a canonical visit token.
@@ -643,6 +644,17 @@ export function createAppServer({
       if (!reading) throw new RequestError(405, 'Method not allowed.');
       if (![draftId, jobId, contributionId, requestId].every((id) => UUID.test(id))) throw new RequestError(404, 'This caption change could not be found.');
       sendJson(res, 200, await collaboration.captionRequest(draftId, jobId, current, contributionId, requestId));
+      return;
+    }
+    const baselineMatch = BASELINE_PATH.exec(pathname);
+    if (baselineMatch) {
+      const [, draftId, jobId] = baselineMatch;
+      const current = await requireScope(draftId);
+      if (current.role !== 'owner') throw new RequestError(403, FORBIDDEN);
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      if (![draftId, jobId].every((id) => UUID.test(id))) throw new RequestError(404, NOT_FOUND);
+      const { created, variant } = await collaboration.baseline(draftId, jobId, current, await readJsonBody(req));
+      sendJson(res, created ? 201 : 200, variant);
       return;
     }
     const revisionMatch = REVISION_PATH.exec(pathname);
@@ -1203,9 +1215,9 @@ export function createAppServer({
       await sendStatic(req, res, path.join(THREE_DIR, name), type, transform);
       return;
     }
-    const ownerThreeFile = OWNER_THREE_FILES.get(pathname);
-    if (ownerThreeFile && reading) {
-      const [name, type] = ownerThreeFile;
+    const gltfFile = GLTF_FILES.get(pathname);
+    if (gltfFile && reading) {
+      const [name, type] = gltfFile;
       await sendStatic(req, res, path.join(THREE_DIR, name), type, (text) => text.replace("from 'three';", "from '/vendor/three.module.js';"));
       return;
     }
@@ -1215,7 +1227,7 @@ export function createAppServer({
       await sendStatic(req, res, path.join(BVH_DIR, name), type, transform);
       return;
     }
-    if (staticFile || vendorFile || ownerThreeFile || bvhFile || pathname.startsWith('/api/drafts')) {
+    if (staticFile || vendorFile || gltfFile || bvhFile || pathname.startsWith('/api/drafts')) {
       sendJson(res, 405, { error: 'Method not allowed.' });
       return;
     }
@@ -1257,6 +1269,12 @@ export function createAppServer({
       await sendStatic(req, res, path.join(THREE_DIR, name), type, transform);
       return;
     }
+    const gltfFile = GLTF_FILES.get(pathname);
+    if (gltfFile) {
+      const [name, type] = gltfFile;
+      await sendStatic(req, res, path.join(THREE_DIR, name), type, (text) => text.replace("from 'three';", "from '/vendor/three.module.js';"));
+      return;
+    }
     sendJson(res, 404, { error: VISITOR_NOT_FOUND });
   }
   const visitorServer = visitor && http.createServer((req, res) => {
@@ -1278,7 +1296,7 @@ export function createAppServer({
       }
       if (error instanceof RequestError) {
         // An unread request body may still be arriving; closing avoids reading it.
-        sendJson(res, error.status, { error: error.message }, { connection: 'close' });
+        sendJson(res, error.status, { error: error.message, ...(error.motion && { motion: error.motion }) }, { connection: 'close' });
         return;
       }
       // A fixed category only: an unexpected error's message can quote stored content.

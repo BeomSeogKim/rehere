@@ -4,11 +4,12 @@ import { constants as fsConstants } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inflateSync } from 'node:zlib';
 import { RequestError } from './drafts.mjs';
 import { verifiedAsset } from './composition-assets.mjs';
 import { safeJobDirectory } from './contribution-deletion-files.mjs';
-import { assertSceneUsable, currentDependencies } from './collaboration.mjs';
-import { validateSurface } from './public/photo-scene.js';
+import { assertSceneUsable, currentDependencies, dependencyIssue, issueMessage, versionDependencies } from './collaboration.mjs';
+import { editProblem, fullObjectBackground, validateSurface } from './public/photo-scene.js';
 
 const MAX_GLB = 128 * 1024 * 1024;
 const SHA = /^[0-9a-f]{64}$/;
@@ -20,6 +21,68 @@ const vector = (value, length) => Array.isArray(value) && value.length === lengt
 const same = (actual, expected) => Math.abs(actual - expected) <= 1e-6 * Math.max(1, Math.abs(expected));
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SPATIAL = fileURLToPath(new URL('./spatial/', import.meta.url));
+
+export const heldObjectMotion = (reason) => ({ status: 'held', scope: 'retained-geometry-only', reason });
+
+// Only the editor's opaque grayscale format is decoded here. Other admitted
+// outline encodings remain viewable but cannot establish movement clearance.
+function motionMask(bytes, width, height) {
+  if (bytes.length < 33 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a'
+      || bytes.readUInt32BE(16) !== width || bytes.readUInt32BE(20) !== height
+      || !bytes.subarray(24, 29).equals(Buffer.from([8, 0, 0, 0, 0]))) throw new Error('mask');
+  const chunks = [];
+  for (let at = 8; at < bytes.length;) {
+    if (at + 12 > bytes.length) throw new Error('mask');
+    const size = bytes.readUInt32BE(at), end = at + 12 + size;
+    if (end > bytes.length) throw new Error('mask');
+    if (bytes.toString('ascii', at + 4, at + 8) === 'IDAT') chunks.push(bytes.subarray(at + 8, at + 8 + size));
+    at = end;
+  }
+  const raw = inflateSync(Buffer.concat(chunks), { maxOutputLength: height * (width + 1) });
+  if (raw.length !== height * (width + 1)) throw new Error('mask');
+  const data = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const at = y * (width + 1);
+    if (raw[at] !== 0) throw new Error('mask');
+    for (let x = 0; x < width; x++) {
+      const n = raw[at + x + 1];
+      if (n !== 0 && n !== 255) throw new Error('mask');
+      data[y * width + x] = n ? 1 : 0;
+    }
+  }
+  return { width, height, data };
+}
+
+export function fullObjectMotion(bounds, initial, pose, background) {
+  if (editProblem(pose)) return heldObjectMotion('The proposed position or turn is unsupported.');
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  const [qx, qy, qz, qw] = initial.quaternion;
+  const c = Math.cos(pose.yaw), s = Math.sin(pose.yaw);
+  for (let corner = 0; corner < 8; corner++) {
+    const [x, y, z] = [0, 1, 2].map((axis) => (bounds[(corner >> axis) & 1][axis] - initial.modelPivot[axis]) * initial.scale);
+    const tx = 2 * (qy * z - qz * y), ty = 2 * (qz * x - qx * z), tz = 2 * (qx * y - qy * x);
+    const rx = x + qw * tx + qy * tz - qz * ty;
+    const ry = y + qw * ty + qz * tx - qx * tz;
+    const rz = z + qw * tz + qx * ty - qy * tx;
+    const point = [c * rx + s * rz, ry, -s * rx + c * rz].map((n, axis) => n + initial.position[axis] + pose.offset[axis]);
+    if (!point.every(Number.isFinite)) return heldObjectMotion('The object bounds could not be checked.');
+    point.forEach((n, axis) => { min[axis] = Math.min(min[axis], n); max[axis] = Math.max(max[axis], n); });
+  }
+  // Round outward so a floating-point difference from the renderer cannot
+  // turn a touching boundary into a positive clearance claim.
+  for (let axis = 0; axis < 3; axis++) {
+    const rounding = 64 * Number.EPSILON * Math.max(1, Math.abs(min[axis]), Math.abs(max[axis]));
+    min[axis] -= rounding; max[axis] += rounding;
+  }
+  if (!background.indices.length) return heldObjectMotion('The retained background could not be checked.');
+  for (let i = 0; i < background.indices.length; i += 3) {
+    const points = background.indices.slice(i, i + 3).map((index) => background.positions.slice(index * 3, index * 3 + 3).map(Math.fround));
+    if (points.some((p) => p.length !== 3 || !p.every(Number.isFinite))) return heldObjectMotion('The retained background could not be checked.');
+    const separated = [0, 1, 2].some((axis) => max[axis] < Math.min(...points.map((p) => p[axis])) || min[axis] > Math.max(...points.map((p) => p[axis])));
+    if (!separated) return heldObjectMotion('The object may overlap the retained photographed background.');
+  }
+  return { status: 'checked', scope: 'retained-geometry-only', reason: null };
+}
 
 function noUris(value) {
   if (!value || typeof value !== 'object') return;
@@ -299,7 +362,11 @@ export class FullObjectStore {
     if (!manifest || manifest.status !== 'ready' || manifest.objects || manifest.representation !== undefined
         || manifest.sourceId !== sourceId || manifest.sourceSha256 !== sourceSha256
         || (requireCurrent && manifest.edit?.version !== baseVersion)) throw new RequestError(409, UNAVAILABLE);
-    assertSceneUsable(manifest, purpose);
+    if (requireCurrent) assertSceneUsable(manifest, purpose);
+    else {
+      const issue = dependencyIssue(manifest, versionDependencies(manifest, baseVersion), purpose);
+      if (issue) throw new RequestError(409, issueMessage(issue));
+    }
     const original = await r.verifiedOriginal(draftId, sourceId, purpose);
     if (original.source.sha256 !== sourceSha256) throw new RequestError(409, UNAVAILABLE);
     const assets = path.join(r.jobDir(draftId, jobId), 'assets');
@@ -659,6 +726,37 @@ export class FullObjectStore {
       sourceSha256: record.sourceSha256, outlineId: record.outlineId, outlineSha256: record.outlineSha256, initial: record.object.initial };
     if (JSON.stringify(binding) !== JSON.stringify(expected)) throw new RequestError(409, UNAVAILABLE);
     return expected;
+  }
+
+  async boundAssets(manifest, binding) {
+    await this.validateBinding(manifest.draftId, manifest.id, binding);
+    const record = await this.buildRecord(manifest.draftId, manifest.id, binding.buildId);
+    const { mask } = await this.outline(manifest.draftId, manifest.id, binding.outlineId);
+    const glb = await boundedFile(path.join(this.buildFolder(manifest.draftId, manifest.id, binding.buildId), 'object.glb'), MAX_GLB);
+    if (sha256(glb) !== binding.sha256 || sha256(mask) !== binding.outlineSha256) throw new RequestError(409, UNAVAILABLE);
+    const parent = await this.parent(manifest.draftId, manifest.id, record.sourceId, record.sourceSha256, record.parentSurfaceSha256, record.baseVersion, 'place', false);
+    return { glb, mask, surface: parent.surface };
+  }
+
+  async motion(manifest, edit) {
+    try {
+      const { glb, mask, surface } = await this.boundAssets(manifest, edit.fullObject);
+      const binaryMask = motionMask(mask, ...surface.source.image_size);
+      return fullObjectMotion(validateObjectGlb(glb).bounds, edit.fullObject.initial, edit, fullObjectBackground(surface, binaryMask));
+    } catch { return heldObjectMotion('The object, outline or retained background could not be checked.'); }
+  }
+
+  async assertMotion(manifest, edit, parent) {
+    let motion;
+    const vertical = edit.offset[1] !== parent.offset[1];
+    if (vertical) motion = heldObjectMotion('Vertical movement is not supported for this object.');
+    else motion = await this.motion(manifest, edit);
+    if (motion.status !== 'checked') {
+      const error = new RequestError(vertical ? 400 : 409, motion.reason);
+      error.motion = motion;
+      throw error;
+    }
+    return motion;
   }
 
   async confirm(draftId, jobId, id, body) {

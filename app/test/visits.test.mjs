@@ -168,7 +168,7 @@ describe('visitor screen', () => {
     assert.doesNotMatch(v.container.textContent, /Fictional words about the counter/);
     v.view.dispose();
   });
-  it('keeps a long multiline statement compact by the scene while preserving its exact full text', async () => {
+  it('keeps a long multiline statement compact beside the scene while preserving its exact full text', async () => {
     const data = manifest();
     const text = `${'x'.repeat(1950)}\nA second synthetic line.`;
     assert.ok(text.length <= 2000);
@@ -177,15 +177,23 @@ describe('visitor screen', () => {
     const v = open(source({ manifest: async () => data }));
     await flush();
     const stage = v.find((node) => node.className === 'scene-stage')[0];
+    const inspector = v.find((node) => node.className === 'scene-inspector')[0];
     const compact = v.find((node) => node.className?.includes('visit-memory-summary'))[0];
     const full = v.find((node) => node.className?.includes('visit-memory-full'))[0];
-    assert.equal(compact.parent, stage);
+    assert.equal(compact.parent, inspector);
     assert.ok(compact.textContent.length < 400);
     assert.match(compact.textContent, /Excerpt:/);
     assert.equal(full.tag, 'details');
     assert.equal(full.open, false);
     assert.equal(full.children.find((node) => node.tag === 'p').textContent, text);
     assert.notEqual(full.parent, stage, 'expanded text cannot grow the stage');
+    // Switching between a view with words and one without must not change
+    // what sits above or around the 3D view, so the scene keeps its size.
+    const layout = () => stage.children.map((node) => `${node.tag}.${node.className}:${Boolean(node.hidden)}`);
+    const withWords = layout();
+    v.button('Mina’s recollection').dispatch('click');
+    assert.equal(compact.hidden, true);
+    assert.deepEqual(layout(), withWords);
     v.view.dispose();
   });
   it('loads the start view’s assets, checks access once more, then shows the scene from the saved camera', async () => {

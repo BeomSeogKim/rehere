@@ -299,7 +299,7 @@ export function mountStories(container, bridge) {
     // Saved-view choices change only from a complete fresh read; a failed
     // history or recollection read keeps the earlier choices and selection.
     if (historyResult.ok && Array.isArray(historyResult.body) && collabResult.ok && Array.isArray(collabResult.body?.variants)) {
-      choices = viewChoices({ history: historyResult.body, variants: collabResult.body.variants, currentVersion: bridge.editor().version });
+      choices = viewChoices({ history: historyResult.body, variants: collabResult.body.variants, currentVersion: bridge.editor().version, fullObject: bridge.fullObject ?? null });
       renderViews(keepView ? viewSelect.value : null);
     }
     renderList();

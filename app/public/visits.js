@@ -89,6 +89,38 @@ function eraText(era, labelOf) {
 // Shown beside the scene for every view, so it stays in sight while scrolling.
 const SCENE_NOTE = 'Shape and depth: a model estimate from this one photo, not a measurement. Areas the photo did not show are left empty.';
 const COMPOSITION_NOTE = 'Two photographed surfaces, placed by the owner. Position, orientation and relative scale are assumptions, not measurements or automatic photo alignment. Each photo’s depth remains a model estimate. Unseen areas stay empty.';
+const FULL_OBJECT_NOTE = 'The room and the object are estimates from one photo, not measurements. The object’s unseen sides were not photographed and its front is not known. Areas the photo did not show are left empty.';
+const FULL_OBJECT = 'source-photo-full-object-v1';
+const MAX_OBJECT_BYTES = 128 * 1024 * 1024;
+const MAX_OUTLINE_BYTES = 32 * 1024 * 1024;
+const SHA256 = /^[a-f0-9]{64}$/;
+
+// Every view of a full-object snapshot must name the same object; the viewer
+// draws one object and views differ only by its move and turn. Each view
+// addresses the bytes through its own view ID, so identity is compared on the
+// hashes, sizes and initial pose. The start view's own references are used.
+export function fullObjectOf(manifest) {
+  const views = manifest?.views ?? [];
+  if (!views.some((view) => view.representation === FULL_OBJECT)) return null;
+  const valid = (asset, name, limit) => asset?.name === name && typeof asset.viewId === 'string' && Number.isInteger(asset.size) && asset.size > 0 && asset.size <= limit;
+  const identity = (object) => JSON.stringify([object?.sha256, object?.outlineSha256, object?.initial, object?.asset?.size, object?.mask?.size]);
+  const start = views.find((view) => view.id === manifest.startViewId)?.fullObject;
+  if (!start || !SHA256.test(start.sha256 ?? '') || !SHA256.test(start.outlineSha256 ?? '')
+      || views.some((view) => view.representation !== FULL_OBJECT || !valid(view.fullObject?.asset, 'object.glb', MAX_OBJECT_BYTES)
+        || !valid(view.fullObject?.mask, 'outline.png', MAX_OUTLINE_BYTES) || identity(view.fullObject) !== identity(start))) throw new Error('representation');
+  return start;
+}
+
+// Reads one authorized asset in full and accepts it only with the exact
+// pinned length and SHA-256.
+async function verifiedBytes(response, size, sha256) {
+  if (!response.ok) throw new Error('asset');
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength !== size) throw new Error('asset');
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (value) => value.toString(16).padStart(2, '0')).join('');
+  if (digest !== sha256) throw new Error('asset');
+  return bytes;
+}
 const CORRECTED_SCENE_NOTE = 'Outlines: include a correction the owner made on this photo. Depth: the existing model estimate, not a measurement. This does not fix depth errors or add unseen surfaces. Areas the photo did not show are left empty.';
 // Two-object 3D views: one deliberate camera move to the chosen object's
 // photographed side, as that object is arranged in the selected saved view.
@@ -316,7 +348,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     photoUrls = [];
   }
 
-  async function render(manifest, surface, textureUrl, mine) {
+  async function render(manifest, surface, textureUrl, mine, fullObject = null) {
     const correctedOutline = manifest.outline?.kind === 'owner-corrected';
     const composition = isComposition(surface);
     const textureFor = (id) => composition ? textureUrl[surface.components.find((component) => component.id === id).texture] : textureUrl;
@@ -702,15 +734,15 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           el('p', { className: 'hint', textContent: manifest.synthetic ? 'Synthetic test material, shared by the owner.' : 'Shared by the owner.' }),
           el('div', { className: 'actions space-camera' }, [explore.button, back, compareButton]),
           explore.status,
-          memoryWords,
           compareBar,
           stageFrame,
           message,
           credit,
-          el('p', { className: 'hint', textContent: composition ? `${COMPOSITION_NOTE} ${surface.context ? 'Only the first source photo’s observed background is kept, fixed at its initial placement.' : 'Only two observed surfaces are shown; no background is included.'}` : correctedOutline ? CORRECTED_SCENE_NOTE : SCENE_NOTE }),
+          el('p', { className: 'hint', textContent: composition ? `${COMPOSITION_NOTE} ${surface.context ? 'Only the first source photo’s observed background is kept, fixed at its initial placement.' : 'Only two observed surfaces are shown; no background is included.'}` : fullObject ? FULL_OBJECT_NOTE : correctedOutline ? CORRECTED_SCENE_NOTE : SCENE_NOTE }),
         ]),
         el('div', { className: 'scene-inspector' }, [
           buttons,
+          memoryWords,
           fullMemoryWords,
           ...(objects ? [objectButtons, sideButton, sideStatus, evidenceBox] : []),
           details,
@@ -723,7 +755,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
 
     let created = null;
     try {
-      created = await createViewer(viewport, surface, textureUrl, `3D view: ${manifest.title}`);
+      created = await createViewer(viewport, surface, textureUrl, `3D view: ${manifest.title}`, fullObject ? { fullObject } : {});
     } catch (error) {
       if (mine !== generation) return;
       if (error?.message !== 'webgl') {
@@ -786,19 +818,44 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       if (mine !== generation) return;
       const composition = isComposition(manifest);
       if (composition !== isComposition(surface)) throw new Error('representation');
+      const pinned = fullObjectOf(manifest);
+      if (pinned && composition) throw new Error('representation');
       const names = composition ? ['texture-1.jpg', 'texture-2.jpg'] : ['texture.jpg'];
       const responses = await Promise.all(names.map((name) => timed((signal) => source.asset(start.id, name, signal), LOAD_TIMEOUT_MS, outer)));
       if (mine !== generation) return;
       if (responses.some((response) => !response.ok)) throw new Error('asset');
       const textures = await Promise.all(responses.map((response) => response.blob()));
       if (mine !== generation) return;
+      // The object and its outline arrive as authorized bytes and are checked
+      // here, then again by the viewer; no token ever enters a URL.
+      let objectParts = null;
+      if (pinned) {
+        const [glbResponse, maskResponse] = await Promise.all([
+          timed((signal) => source.asset(pinned.asset.viewId, 'object.glb', signal), LOAD_TIMEOUT_MS, outer),
+          timed((signal) => source.asset(pinned.mask.viewId, 'outline.png', signal), LOAD_TIMEOUT_MS, outer),
+        ]);
+        if (mine !== generation) return;
+        objectParts = await Promise.all([
+          verifiedBytes(glbResponse, pinned.asset.size, pinned.sha256),
+          verifiedBytes(maskResponse, pinned.mask.size, pinned.outlineSha256),
+        ]);
+        if (mine !== generation) return;
+      }
       const stillAllowed = await timed((signal) => source.check(signal), HEARTBEAT_TIMEOUT_MS, outer);
       if (mine !== generation) return;
       if (!stillAllowed) throw new Error('revoked');
       const loaded = textures.map((texture) => URL.createObjectURL(texture));
       urls.push(...loaded);
       const textureInput = composition ? Object.fromEntries(names.map((name, index) => [name, loaded[index]])) : loaded[0];
-      await render(manifest, surface, textureInput, mine);
+      let fullObject = null;
+      if (objectParts) {
+        const assetUrl = URL.createObjectURL(new Blob([objectParts[0]], { type: 'model/gltf-binary' }));
+        urls.push(assetUrl);
+        const maskUrl = URL.createObjectURL(new Blob([objectParts[1]], { type: 'image/png' }));
+        urls.push(maskUrl);
+        fullObject = { sha256: pinned.sha256, outlineSha256: pinned.outlineSha256, initial: pinned.initial, assetUrl, maskUrl };
+      }
+      await render(manifest, surface, textureInput, mine, fullObject);
     } catch {
       if (mine === generation) unavailable();
     }

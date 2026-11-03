@@ -8,7 +8,7 @@
 import { copyPose, isComposition, poseProblem } from './composition-scene.js';
 import { poseAxes, poseValues, poseWithAxis } from './composition-editor.js';
 import { formatTransform } from './memory-edit.js';
-import { mountAlternativeMemory } from './alternative-memory.js';
+import { MOTION_LIMIT, heldMotion, mountAlternativeMemory } from './alternative-memory.js';
 import { copyArrangement, objectState, withObject } from './arrangement.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import { register, registerElement, unregister } from './playback.js';
@@ -222,6 +222,13 @@ export function transformProblem(transform) {
   if (offset.some((value) => Math.abs(value) > OFFSET_LIMIT)) return `Each position value must be between -${OFFSET_LIMIT} and ${OFFSET_LIMIT}.`;
   if (!Number.isFinite(yaw) || Math.abs(yaw) > Math.PI) return 'The turn must be between -180 and 180 degrees.';
   return null;
+}
+
+// What the movement check says about a full-object parent. An unchecked
+// starting pose can still be viewed; it is never presented as clear.
+export function parentMotionText(motion) {
+  const held = heldMotion(motion);
+  return held ? `The starting position has not been confirmed as clear of the photo (${held}). It can still be viewed. ${MOTION_LIMIT}` : `The starting position does not overlap what is kept from the photo. ${MOTION_LIMIT}`;
 }
 
 export function eraProblem(era) {
@@ -1708,6 +1715,8 @@ export function mountCollaboration(container, bridge) {
   let pendingReview = null;
   let reviewGeneration = 0;
   const eraAttempt = attempts();
+  // The one prepared starting-alternative request, kept while its outcome is unknown.
+  let baselinePending = null;
   // Forms are kept while their record is unchanged, so typed input and a
   // prepared retry survive refreshes and editor state changes.
   let reviewForm = null;
@@ -2230,6 +2239,17 @@ export function mountCollaboration(container, bridge) {
     if (shownNow && showing.drawn) current.append(el('span', { className: 'hint', textContent: `Shown on the scene now: ${shownNow}` }));
     if (showing?.kind === 'variant') current.append(el('button', { type: 'button', className: 'secondary', textContent: 'Back to the current scene', onclick: () => { viewIntent += 1; stopShowing(); render(); } }));
     choices.append(current);
+    if (bridge.fullObject && !revisionForm) {
+      const startsCurrent = state.variants.some((variant) => !variant.blocked && !variant.revision && !variant.contributionIds?.length && variant.parentVersion === editor.version);
+      if (!startsCurrent || baselinePending) {
+        const start = el('button', { type: 'button', className: 'secondary', textContent: baselinePending ? 'Retry saving the starting alternative' : 'Save the current scene as a starting alternative', disabled: busy || Boolean(pendingReview) || (!editor.clean && !baselinePending) });
+        start.addEventListener('click', () => startBaseline());
+        choices.append(el('li', {}, [
+          el('span', { className: 'hint', textContent: 'Memory changes to this estimated object are saved as new alternatives. Saving a starting alternative copies the current scene; the current scene stays unchanged.' }),
+          start,
+        ]));
+      }
+    }
     for (const variant of state.variants) {
       const item = el('li', {}, [el('span', { className: 'space-choice-label', textContent: variant.label })]);
       // A blocked alternative's details are redacted by the server; only its
@@ -2275,6 +2295,42 @@ export function mountCollaboration(container, bridge) {
     }
     compare.replaceChildren(choices, ...(revisionForm ? [revisionForm.node] : []));
     revisionForm?.sync?.();
+  }
+
+  // Saves the current full-object scene as an alternative to revise. An unknown
+  // outcome keeps the same request ID, so a retry cannot make a second copy.
+  async function startBaseline() {
+    if (disposed || busy || pendingReview || revisionForm) return;
+    const editor = bridge.editor();
+    if (!editor.clean && !baselinePending) { message.textContent = 'Save or reset the current scene before starting an alternative.'; return; }
+    baselinePending ??= { requestId: crypto.randomUUID(), baseVersion: editor.version };
+    const body = baselinePending;
+    busy = true;
+    message.textContent = 'Saving a starting alternative…';
+    render();
+    const result = await postJson(`${bridge.jobUrl}/variants/baseline`, body);
+    if (disposed) return;
+    busy = false;
+    if (unclear(result) || (result.ok && typeof result.body?.id !== 'string')) {
+      message.textContent = withReason(result, 'Rehere could not confirm whether the starting alternative was saved. Retry it; the same request cannot create a second copy.');
+      render();
+      return;
+    }
+    baselinePending = null;
+    if (!result.ok) {
+      message.textContent = withReason(result, 'The starting alternative could not be saved. The current scene may have changed; refresh and try again.');
+      render();
+      return;
+    }
+    const intent = viewIntent;
+    const read = await refresh();
+    if (disposed) return;
+    const saved = read && state.variants.find((variant) => variant.id === result.body.id && !variant.blocked);
+    if (saved && intent === viewIntent && bridge.editor().clean) show('variant', saved.id, saved.edit);
+    message.textContent = saved
+      ? `Saved “${saved.label}” as a starting alternative. Make a revised alternative from it; the current scene is unchanged.`
+      : 'The starting alternative was saved, but it could not be shown. Refresh the alternatives to check.';
+    render();
   }
 
   async function beginRevision(parent, { memoryProposalId = null } = {}) {
@@ -2358,7 +2414,7 @@ export function mountCollaboration(container, bridge) {
     const bindTarget = () => {
       const edit = mine.context.edit;
       const base = edit.objects ? objectState(edit, mine.targetId) : edit;
-      const axes = isComposition(edit) ? poseAxes.slice(0, 6) : [['Left / right', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], ['Down / up', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], ['Away / toward', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], ['Turn (degrees)', -180, 180, 1]];
+      const axes = isComposition(edit) ? poseAxes.slice(0, 6) : [['Left / right', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], [edit.fullObject ? 'Down / up (kept from the parent)' : 'Down / up', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], ['Away / toward', -OFFSET_LIMIT, OFFSET_LIMIT, 0.01], ['Turn (degrees)', -180, 180, 1]];
       const values = base ? isComposition(edit) ? poseValues(base).slice(0, 6) : [...base.offset, base.yaw * 180 / Math.PI] : axes.map(() => '');
       mine.edited = axes.map(() => false);
       mine.inputs = axes.map(([name, min, max, step], axis) => {
@@ -2375,12 +2431,14 @@ export function mountCollaboration(container, bridge) {
       const hidden = !mine.context || mine.unavailable || mine.stale;
       const locked = mine.loading || mine.saving || Boolean(mine.pending) || Boolean(mine.memoryPending) || busy || hidden;
       description.hidden = fields.hidden = timeNote.hidden = hidden;
-      description.textContent = hidden ? '' : `Parent: “${variantLabel(mine.parentId)}”. ${mine.context.edit.objects && bridge.targets ? bridge.targets.describe(mine.context.edit) : formatTransform(mine.context.edit)}`;
+      description.textContent = hidden ? '' : `Parent: “${variantLabel(mine.parentId)}”. ${mine.context.edit.objects && bridge.targets ? bridge.targets.describe(mine.context.edit) : formatTransform(mine.context.edit)}${mine.context.edit.fullObject ? ` ${parentMotionText(mine.context.motion)}` : ''}`;
       timeNote.textContent = hidden ? '' : `Parent time: ${describeEra(mine.context.latestEra, variantLabel)}.${mine.context.latestEra?.statement ? ` Based on: ${mine.context.latestEra.statement}` : ''} A retained relative reference stays relative to the same alternative; no date is inferred.`;
       timeConfirm.hidden = hidden || time.value !== 'reconfirm-parent';
       mode.disabled = locked;
       memoryHolder.hidden = mode.value !== 'memory' || (hidden && !mine.memory?.hasPending());
       [...mine.inputs, target, time, reaffirm].forEach((input) => { input.disabled = locked; });
+      // An estimated full object keeps the parent's height in this release.
+      if (mine.context?.edit?.fullObject && mine.inputs[1]) mine.inputs[1].disabled = true;
       if (!hidden && mine.context.edit.objects && !mine.targetId) mine.inputs.forEach((input) => { input.disabled = true; });
       if (mode.value === 'memory') mine.inputs.forEach((input) => { input.disabled = true; input.poseField.hidden = true; });
       else mine.inputs.forEach((input) => { input.poseField.hidden = false; });
@@ -2491,6 +2549,15 @@ export function mountCollaboration(container, bridge) {
       if (!alive()) return;
       mine.saving = false;
       const child = result.body;
+      // A held movement is a definite refusal with nothing written: the form
+      // stays open so the pose can be changed and previewed again.
+      if ([400, 409].includes(result.status) && result.body?.motion?.status === 'held') {
+        mine.pending = null;
+        clearPreview();
+        note.textContent = `Not saved. This move could not be confirmed: ${heldMotion(result.body.motion)} ${MOTION_LIMIT}`;
+        mine.sync();
+        return;
+      }
       const accepted = result.ok && typeof child?.id === 'string' && child.id !== mine.parentId && child.edit?.version === null && child.revision?.parentVariantId === mine.parentId;
       if (unclear(result) || (result.ok && !accepted) || (retrying && [401, 403, 409].includes(result.status))) {
         note.textContent = withReason(result, 'Rehere could not confirm whether this revision was saved. Retry the earlier save with the same request; new changes stay paused.');

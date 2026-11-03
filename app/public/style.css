@@ -409,7 +409,6 @@ button[aria-pressed="true"] { background: var(--accent); color: var(--accent-tex
     }
     .scene-workspace:not(.scene-inspector .scene-workspace) > .scene-stage { position: sticky; top: 16px; }
     .scene-workspace:not(.scene-inspector .scene-workspace) > .scene-stage .space-viewport { height: min(calc(100vh - 260px), 760px); }
-    .scene-workspace:not(.scene-inspector .scene-workspace) > .scene-stage:has(> .visit-memory-summary:not([hidden])) .space-viewport { height: min(calc(100vh - 380px), 640px); }
     .scene-workspace:not(.scene-inspector .scene-workspace) > .scene-stage .memory-comparison-frame.is-comparing .space-viewport { height: min(58vh, 620px); }
     .scene-workspace:not(.scene-inspector .scene-workspace):has(> .scene-stage > .object-review:not([hidden])) { grid-template-columns: minmax(0, 1fr); }
     .scene-workspace:not(.scene-inspector .scene-workspace) > .scene-stage .memory-comparison-frame.is-object-review .space-viewport { height: min(45vh, 460px); }

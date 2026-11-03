@@ -65,9 +65,32 @@ confirmed outline on the photo with the estimated shape before explicitly
 using it as a new saved version. Hidden sides, colour and the photo position
 are estimates; no background is invented for the selected area. The worker
 is disabled by default and needs the separately provisioned
-[supervised object setup](spatial/full_object_runner.md). Memory changes,
-contributions and visitor sharing are not available for a full-object version;
-existing supported versions remain separate.
+[supervised object setup](spatial/full_object_runner.md).
+
+For an accepted full-object version, choose **Save the current scene as a
+starting alternative**, then show it and choose **Make a revised alternative**
+and **Remembered instruction**. Sending the photo and writing requires explicit
+model consent and the same public-photo restrictions described below. Review
+the photo, parent and proposed change before explicitly saving a new child.
+The child preserves the accepted object, outline and source; its parent and
+main version stay unchanged. Direct proposals and proposal application on the
+main full-object version, and main undo, remain unavailable.
+
+Full-object moves and relative turns use arbitrary scene units; the historical
+front and physical scale remain unknown. Vertical changes are refused, and
+requests to face a photo landmark ask for clarification. Movement is checked
+conservatively against retained photographed background only. Possible overlap
+or unverifiable geometry holds the change without an override. This does not
+establish floor contact, unseen-space or whole-room clearance, or a safe path
+between poses. A viewable starting alternative is not certified safe.
+
+Keep the child's time deliberately **Unknown**, or explicitly confirm an era
+as an owner assertion. An eligible recording with human-confirmed captions can
+be attached to that exact saved child and time revision. Preview and explicitly
+share the parent and child together; both must retain the same object and
+outline. The fixed visit preserves their poses, time assertions and selected
+story; switching views stops audio. Later private edits do not update it, while
+current source restrictions, withdrawal and revocation can stop access.
 
 Scoped contributors can submit writing, a real recording, or both, with an
 optional photo. Each material retains its own original, source facts and
@@ -314,7 +337,7 @@ editing of inferred visible surfaces; no historical layout is claimed.
 Two-object arrangements additionally check intersections between the two
 named visible surfaces before saving. See [the two-object guide](OBJECTS.md)
 for contact handling, bounded checks and the geometry that remains unknown.
-One-foreground scenes do not have that intersection gate.
+One-foreground partial scenes do not have that named-object intersection gate.
 
 | Endpoint | Purpose |
 |---|---|
@@ -378,8 +401,8 @@ earlier saved position creates a new version and preserves intervening history,
 statements and originals. Provider failure produces an explicit failed state;
 there is no prerecorded or local keyword-parser substitute for a model call.
 
-The main planner edits the current saved version. To plan from a particular
-saved alternative instead, show it and choose **Make a revised alternative**
+For partial scenes, the main planner edits the current saved version. To plan
+from a particular saved alternative instead, show it and choose **Make a revised alternative**
 then **Remembered instruction**. Its plan uses that parent's arrangement and
 explicit time choice; approval creates a new child without overwriting main
 or parent. See [alternative memory proposals](COLLABORATION.md#revise-an-alternative-from-a-remembered-instruction)

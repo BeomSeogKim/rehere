@@ -6,7 +6,7 @@ import path from 'node:path';
 import { it } from 'node:test';
 import { startOwnerServer } from './auth-helper.mjs';
 
-it('serves the pinned GLTF loader only on the owner listener', async () => {
+it('serves the exact pinned GLTF closure on both listeners without opening owner modules', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rehere-object-static-'));
   const app = await startOwnerServer({ dataDir, visitorOrigin: 'https://visit.example' });
   try {
@@ -29,7 +29,7 @@ it('serves the pinned GLTF loader only on the owner listener', async () => {
         });
         request.on('error', reject);
       });
-      assert.equal(status, 404, route);
+      assert.equal(status, 200, route);
     }
   } finally {
     await app.close();

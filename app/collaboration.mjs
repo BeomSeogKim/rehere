@@ -308,7 +308,7 @@ export function proposalBinding(manifest, proposal) {
 // The whole arrangement a change to one object gives: only that object moves,
 // and a composition keeps the base's exact scale.
 export function variantFields(manifest, base, targetId, pose) {
-  if (!isTwoObject(manifest)) return { offset: [...pose.offset], yaw: pose.yaw };
+  if (!isTwoObject(manifest)) return { offset: [...pose.offset], yaw: pose.yaw, ...(base.fullObject && { fullObject: structuredClone(base.fullObject) }) };
   if (!isComposition(manifest)) return withTarget(base, targetId, pose);
   return withTarget(base, targetId, { ...copyPose(base.objects.find((item) => item.id === targetId)), ...pose });
 }
@@ -317,6 +317,7 @@ function proposalCandidate(manifest, proposal) {
   if (proposal.status !== 'ready' || !proposal.result?.transform) return null;
   const binding = proposalBinding(manifest, proposal);
   if (!binding || binding.stale) return null;
+  if (binding.arrangement.fullObject && proposal.motion?.status !== 'checked') return null;
   return { version: null, ...variantFields(manifest, binding.arrangement, proposal.targetId, proposal.result.transform) };
 }
 
@@ -359,7 +360,7 @@ function parseTransform(transform, twoObjects, composition = false) {
 }
 
 // The saved edit fields of a scene version, in its own shape.
-const editFields = (edit) => (Array.isArray(edit.objects) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw });
+const editFields = (edit) => (Array.isArray(edit.objects) ? arrangementOf(edit) : { offset: [...edit.offset], yaw: edit.yaw, ...(edit.fullObject && { fullObject: structuredClone(edit.fullObject) }) });
 
 // photoReviewed and voiceReviewed are accepted only as extra keys; whether
 // each is required or refused depends on the contribution, checked by the caller.
@@ -506,7 +507,9 @@ function parentArrangement(manifest, variant) {
   const edit = variant?.edit;
   if (!isTwoObject(manifest)) {
     if (!transformValid(edit) || Object.hasOwn(edit, 'objects')) throw fail(409, REVISION_UNREADABLE);
-    return { offset: [...edit.offset], yaw: edit.yaw };
+    const retained = manifest.edits.find((item) => item.version === variant.parentVersion)?.fullObject;
+    if (Boolean(retained) !== Boolean(edit.fullObject) || (retained && JSON.stringify(retained) !== JSON.stringify(edit.fullObject))) throw fail(409, REVISION_UNREADABLE);
+    return { offset: [...edit.offset], yaw: edit.yaw, ...(edit.fullObject && { fullObject: structuredClone(edit.fullObject) }) };
   }
   const composition = isComposition(manifest);
   const shaped = Array.isArray(edit?.objects) && edit.objects.length === OBJECT_IDS.length && edit.objects.every((item, index) => item?.id === OBJECT_IDS[index])
@@ -719,9 +722,7 @@ function projectEra(variant, blocked) {
 // `sourceBlocked` is true when the scene's photo has no current place use;
 // every variant then counts as blocked.
 function projectVariant(manifest, variant, sourceBlocked) {
-  if (variant.edit?.fullObject || manifest.edits.some((item) => item.version === variant.parentVersion && item.fullObject)) {
-    throw fail(409, 'Alternatives for this full-object version are not available yet.');
-  }
+  parentArrangement(manifest, variant);
   const blocked = sourceBlocked || dependenciesBlocked(manifest, variant.contributionIds);
   // An owner revision takes the ordinal its shares and stories use (shares.mjs
   // savedView); variants are only appended or replaced in place, so it is stable.
@@ -751,13 +752,41 @@ function projectVariant(manifest, variant, sourceBlocked) {
 
 const collaborationOf = (manifest) => manifest.collaboration ?? { revision: 0, contributions: [], variants: [], receipts: [] };
 
+// Discovery and snapshot validation use the same exact applied-child predicate;
+// offering words never grants permission to publish them.
+export async function fullObjectMemoryWords(reconstructions, manifest, child) {
+  try {
+    if (!child?.edit.fullObject || child.kind !== 'revision' || !child.revision.proposalId) return null;
+    const collaboration = collaborationOf(manifest), revision = child.revision;
+    const parent = collaboration.variants.find((item) => item.id === revision.parentVariantId);
+    const proposals = (manifest.proposals ?? []).filter((item) => item.id === revision.proposalId);
+    const receipts = collaboration.receipts.filter((item) => item.action === 'proposal-revision' && item.variantId === child.id && item.target === revision.proposalId);
+    if (!parent || proposals.length !== 1 || receipts.length !== 1) return null;
+    const [proposal] = proposals;
+    if (proposal.status !== 'applied' || proposal.appliedVariantId !== child.id
+        || proposal.scope?.parentVariantId !== parent.id || proposal.scope.baseEraRevision !== revision.parentEraRevision
+        || !['translate', 'rotate'].includes(proposal.result?.action) || proposal.result.sourceId !== manifest.sourceId
+        || proposal.result.parentVariantId !== parent.id || proposal.result.baseEraRevision !== revision.parentEraRevision
+        || JSON.stringify(variantFields(manifest, parentArrangement(manifest, parent), null, proposal.result.transform)) !== JSON.stringify(parentArrangement(manifest, child))
+        || JSON.stringify(child.contributionIds) !== JSON.stringify(parent.contributionIds)) return null;
+    if (dependencyIssue(manifest, child.contributionIds) || !child.contributionIds.every((id) => contributionAllows(collaboration.contributions.find((item) => item.id === id), 'share'))) return null;
+    const uses = await reconstructions.sceneSourceUses(manifest);
+    if (!uses.place || !uses.share) return null;
+    const original = await reconstructions.verifiedOriginal(manifest.draftId, manifest.sourceId, 'share');
+    if (original.source.origin?.kind !== 'public') return null;
+    await reconstructions.assertSceneFiles(manifest);
+    await reconstructions.fullObjects.validateBinding(manifest.draftId, manifest.id, child.edit.fullObject);
+    const projected = await reconstructions.projectProposal(manifest, proposal), statement = projected.statement;
+    if (projected.redacted || statement?.kind !== 'human_memory' || !isId(statement.id) || typeof statement.text !== 'string' || !statement.text.trim() || sha256(statement.text) !== statement.sha256) return null;
+    return { proposalId: proposal.id, statementSha256: statement.sha256, text: statement.text, statementId: statement.id,
+      editSha256: sha256(JSON.stringify(child.edit)), receiptSha256: sha256(JSON.stringify(receipts[0])) };
+  } catch { return null; }
+}
+
 // A new contribution record; the first one also freezes the saved scene as the
 // baseline to compare against: its whole current arrangement and rule for a
 // two-object scene.
 function addContribution(manifest, collaboration, principal, request, now, extra = {}) {
-  if (manifest.edit?.fullObject && collaboration.variants.length === 0) {
-    throw fail(409, 'Contributions to this full-object version are not available yet.');
-  }
   const contribution = {
     id: extra.id ?? randomUUID(),
     requestId: request.requestId,
@@ -898,7 +927,15 @@ export class CollaborationStore {
     return {
       revision: collaboration.revision,
       contributions: collaboration.contributions.filter((item) => owner || item.principalId === principal.id).map((item) => projectContribution(manifest, item, principal, !uses.place)),
-      variants: owner ? collaboration.variants.map((item) => projectVariant(manifest, item, !uses.place)) : [],
+      variants: owner ? await Promise.all(collaboration.variants.map(async (item) => {
+        if (item.edit.fullObject && uses.place && !dependenciesBlocked(manifest, item.contributionIds)) {
+          await this.reconstructions.fullObjects.validateBinding(draftId, jobId, item.edit.fullObject);
+        }
+        return {
+          ...projectVariant(manifest, item, !uses.place),
+          ...(item.edit.fullObject && { shareMemoryWords: await fullObjectMemoryWords(this.reconstructions, manifest, item).then((words) => words && ({ proposalId: words.proposalId, statementSha256: words.statementSha256, text: words.text })) }),
+        };
+      })) : [],
       blocked: !uses.place || contributionBlocked,
       modelBlocked: !uses.model || modelBlocked(manifest),
       blockedReason: !uses.place ? 'source' : contributionBlocked ? 'contribution' : null,
@@ -1442,7 +1479,6 @@ export class CollaborationStore {
       let edit = null;
       let editReceipt = null;
       if (request.transform) {
-        if (manifest.edit?.fullObject) throw fail(409, 'Contribution-based changes to this full-object version are not available yet.');
         this.#ready(manifest);
         if (!contributionAllows(contribution, 'place')) throw fail(403, 'This contribution was not shared with permission to change the place.');
         if (!photoAttested(manifest, contribution)) throw fail(409, contribution.voice ? UNAVAILABLE_MATERIAL : UNAVAILABLE_PHOTO);
@@ -1452,7 +1488,8 @@ export class CollaborationStore {
         assertDependencies(manifest, parent);
         const dependencies = [contribution.id, ...parent.filter((id) => id !== contribution.id)];
         const adopt = request.decision === 'adopt';
-        let fields = request.transform;
+        let fields = manifest.edit.fullObject ? variantFields(manifest, manifest.edit, null, request.transform) : request.transform;
+        if (manifest.edit.fullObject) await this.reconstructions.fullObjects.assertMotion(manifest, fields, manifest.edit);
         if (twoObjects) {
           assertObjectsConfirmed(manifest);
           // Only the named object changes; a contribution can never clear the rule.
@@ -1588,9 +1625,7 @@ export class CollaborationStore {
       const collaboration = collaborationOf(manifest);
       const variant = collaboration.variants.find((item) => item.id === variantId);
       if (!variant) throw fail(404, 'This version of the scene could not be found.');
-      if (variant.edit?.fullObject || manifest.edits.some((item) => item.version === variant.parentVersion && item.fullObject)) {
-        throw fail(409, 'Time assertions for this full-object version are not available yet.');
-      }
+      if (variant.edit.fullObject) await this.#revisable(manifest, variant);
       const sourceBlocked = await this.#sourceBlocked(manifest);
       if (this.#receipt(collaboration, request, 'era', principal.id, variantId)) return projectVariant(manifest, variant, sourceBlocked);
       if (request.baseRevision !== variant.eraRevision) throw fail(409, 'The time for this version changed. Reload it before saving.');
@@ -1623,15 +1658,42 @@ export class CollaborationStore {
   // of every original photo and derived file, and every contribution the
   // arrangement inherits. Model permission is never needed.
   async #revisable(manifest, variant) {
-    if (variant.edit?.fullObject || manifest.edits.some((item) => item.version === variant.parentVersion && item.fullObject)) {
-      throw fail(409, 'Alternatives for this full-object version are not available yet.');
-    }
     if (!REVISABLE_KINDS.has(variant.kind)) throw fail(409, REVISION_UNREADABLE);
     this.#ready(manifest);
     assertObjectsConfirmed(manifest);
     if (await this.#sourceBlocked(manifest)) throw fail(409, SOURCE_STOPPED_MESSAGE);
     await this.reconstructions.assertSceneFiles(manifest);
+    if (variant.edit.fullObject) await this.reconstructions.fullObjects.validateBinding(manifest.draftId, manifest.id, variant.edit.fullObject);
     assertDependencies(manifest, variant.contributionIds);
+  }
+
+  async baseline(draftId, jobId, principal, body) {
+    this.#owner(principal, draftId);
+    if (!exactKeys(body, ['requestId', 'baseVersion']) || !isId(body.requestId) || !Number.isInteger(body.baseVersion) || body.baseVersion < 1) throw fail(400, UNREADABLE);
+    await this.reconstructions.recover();
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId), collaboration = collaborationOf(manifest);
+      const replay = this.#receipt(collaboration, body, 'baseline', principal.id, String(body.baseVersion));
+      if (replay) {
+        const variant = collaboration.variants.find((item) => item.id === replay.variantId && item.kind === 'baseline');
+        if (!variant) throw fail(409, REVISION_UNREADABLE);
+        await this.#revisable(manifest, variant);
+        return { created: false, variant: projectVariant(manifest, variant, false) };
+      }
+      if (!manifest.edit?.fullObject || manifest.edit.version !== body.baseVersion) throw fail(409, 'Reload the accepted full-object version before saving a comparison.');
+      const existing = collaboration.variants.find((item) => item.kind === 'baseline' && item.parentVersion === body.baseVersion && sameArrangement(editFields(item.edit), editFields(manifest.edit)));
+      if (!existing) this.#revisionCapacity(collaboration);
+      const variant = existing ?? {
+        id: randomUUID(), kind: 'baseline', label: 'Saved reconstruction', parentVersion: body.baseVersion,
+        edit: { version: body.baseVersion, ...editFields(manifest.edit) }, contributionIds: currentDependencies(manifest),
+        createdAt: new Date().toISOString(), createdBy: principal.id, eraAssertions: [], eraRevision: 0,
+      };
+      await this.#revisable(manifest, variant);
+      await this.#save(manifest, { ...collaboration, variants: existing ? collaboration.variants : [...collaboration.variants, variant] }, {
+        requestId: body.requestId, action: 'baseline', principalId: principal.id, target: String(body.baseVersion), digest: digest(body), variantId: variant.id,
+      }).write();
+      return { created: !existing, variant: projectVariant(manifest, variant, false) };
+    });
   }
 
   // What an owner revision would start from, checked as a save would be.
@@ -1646,6 +1708,7 @@ export class CollaborationStore {
       return {
         parentVariantId: parent.id, eraRevision: parent.eraRevision, latestEra: projectEra(parent, false),
         edit: { version: parent.edit.version, ...parentArrangement(manifest, parent) }, contributionIds: [...parent.contributionIds], revisionAllowed: true,
+        ...(parent.edit.fullObject && { motion: await this.reconstructions.fullObjects.motion(manifest, parent.edit), capabilities: { actions: ['translate', 'rotate', 'clarify'], front: 'unknown' } }),
       };
     });
   }
@@ -1722,6 +1785,7 @@ export class CollaborationStore {
     const base = parentArrangement(manifest, parent);
     const fields = variantFields(manifest, base, targetId, pose);
     if (sameArrangement(fields, base)) throw fail(409, 'This revision does not change the selected arrangement. Nothing was saved.');
+    if (base.fullObject) await this.reconstructions.fullObjects.assertMotion(manifest, fields, base);
     if (isTwoObject(manifest)) {
       assertRelationship(manifest, fields);
       await this.reconstructions.assertVisibleArrangement(manifest, fields);
@@ -1799,7 +1863,9 @@ export class CollaborationStore {
     this.#owner(principal, draftId);
     await this.reconstructions.recover();
     const manifest = await this.#scene(draftId, jobId);
-    if (!collaborationOf(manifest).variants.some((item) => item.id === parentId)) throw fail(404, VARIANT_NOT_FOUND);
+    const parent = collaborationOf(manifest).variants.find((item) => item.id === parentId);
+    if (!parent) throw fail(404, VARIANT_NOT_FOUND);
+    if (parent.edit.fullObject && (await this.reconstructions.sceneSourceUses(manifest)).place && !dependenciesBlocked(manifest, parent.contributionIds)) await this.#revisable(manifest, parent);
     const scoped = (manifest.proposals ?? []).filter((item) => item.scope?.parentVariantId === parentId).reverse();
     return this.reconstructions.projectProposals(manifest, scoped);
   }
@@ -1846,6 +1912,7 @@ export class CollaborationStore {
         throw fail(409, 'The time for this arrangement changed after this proposal was made. Ask for a new proposal.');
       }
       if (proposal.status !== 'ready') throw fail(409, 'Only a ready proposal can be saved.');
+      if (parent.edit.fullObject && (!['translate', 'rotate'].includes(proposal.result?.action) || proposal.motion?.status !== 'checked')) throw fail(409, 'This proposal does not have a supported checked movement.');
       if (request.baseEraRevision !== parent.eraRevision) throw fail(409, 'The time for this arrangement changed. Review it again before saving the revision.');
       if (['face_anchor', 'face_object'].includes(proposal.result.action) && request.frontConfirmed !== true) {
         throw fail(409, 'Confirm that the visible side of the object is its front before saving this turn.');

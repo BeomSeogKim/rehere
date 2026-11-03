@@ -846,7 +846,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const revert = el('button', { type: 'button', className: 'secondary', textContent: 'Revert to saved' });
     const reset = el('button', { type: 'button', className: 'secondary', textContent: 'Reset object position' });
     const reload = el('button', { type: 'button', className: 'secondary', textContent: 'Load saved version', hidden: true });
-    const memorySection = el('section', { className: 'memory-edit' });
+    // The main memory editor is not mounted for an estimated full object, so its
+    // section is hidden rather than shown as an empty card.
+    const memorySection = el('section', { className: 'memory-edit', hidden: Boolean(savedFullObject) });
     const collaborationSection = el('section', { className: 'memory-edit collab-owner' });
     const sharesSection = el('section', { className: 'memory-edit share-owner' });
     const storiesSection = el('section', { className: 'memory-edit story-owner' });
@@ -1771,7 +1773,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     ]);
     const otherActions = el('details', { className: 'source-details' }, [
       el('summary', { textContent: 'More ways to continue' }),
-      ...(savedFullObject ? [el('p', { textContent: 'Memory changes, contributions and visitor sharing are not yet available for this estimated object.' })] : [nextActions(memorySection, collaborationSection, sharesSection)]),
+      ...(savedFullObject ? [el('p', { textContent: 'Memory changes to this estimated object are saved as separate alternatives under “Compare saved scenes”. Start one from the current scene; the current scene itself stays unchanged.' })] : [nextActions(memorySection, collaborationSection, sharesSection)]),
     ]);
     const workspace = sceneWorkspace(
         [cameraActions, explore.status, photoSide.status, comparisonBar, objectReviewHeading, objectReviewLabel, comparisonFrame, objectReview, viewMessage, ...photoCredit(job), el('p', { className: 'hint', textContent: savedFullObject ? 'The room and object are estimates from the photo. The object’s unseen sides were not photographed; empty areas remain unknown.' : SCENE_NOTE })],
@@ -1798,6 +1800,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       else lockedBy.delete(name);
       showEdit();
     };
+    // An estimated full object is changed only through saved alternatives, so
+    // the main memory editor is not mounted for it.
     if (!savedFullObject) {
     memoryEdit = mountMemoryEdit(memorySection, {
       jobUrl: `${base}/${jobId}`,
@@ -1834,16 +1838,26 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         showEdit();
       },
     });
+    }
     collaborationPanel = mountCollaboration(collaborationSection, {
       jobUrl: `${base}/${jobId}`,
+      fullObject: Boolean(savedFullObject),
       // New alternatives or recollections change story and sharing choices.
       onChanged: () => { sharesPanel?.refreshOptions(); storiesPanel?.refresh(); },
       editor: editorFor('collaboration'),
       memorySources: [sourceFor(job.sourceId)],
       memoryTextureUrl: assetUrl(jobId, 'texture.jpg'),
       revisionGuide: (transform, point) => viewer?.showGuide(transform, point) ?? null,
-      // True only when the 3D view actually drew the transform.
+      // True only when the 3D view actually drew the transform. A full-object
+      // alternative bound to a different object than this viewer's is never
+      // drawn with the wrong geometry.
       showTransform(transform) {
+        if (savedFullObject && transform && JSON.stringify(transform.fullObject ?? null) !== JSON.stringify(savedFullObject)) {
+          proposalPreview = null;
+          showEdit();
+          viewer?.showGuide(null, null);
+          return false;
+        }
         proposalPreview = transform;
         showEdit();
         viewer?.showGuide(null, null);
@@ -1877,6 +1891,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
 
     storiesPanel = mountStories(storiesSection, {
       jobUrl: `${base}/${jobId}`,
+      fullObject: savedFullObject,
       sources: Array.isArray(draft.sources) ? draft.sources : [],
       editor: () => session.saved,
       durationHintMs,
@@ -1888,7 +1903,6 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       editor: () => session.saved,
       getCamera: () => viewer?.getCamera() ?? null,
     });
-    }
 
     let created = null;
     try {

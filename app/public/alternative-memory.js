@@ -17,6 +17,15 @@ async function request(url, body) {
 }
 const unclear = (result) => result.status === 0 || result.status >= 500;
 
+// Movement of an estimated full object is checked only against the
+// photographed background kept in the scene. The server says whether a pose
+// passed; anything else is treated as held.
+export const MOTION_LIMIT = 'This check only looks at whether the object would overlap the parts of the photo kept in the scene. It does not check the floor, hidden parts of the room, or the path the object would take, and it is not a safety check.';
+export function heldMotion(motion) {
+  if (motion?.status === 'checked' && motion.scope === 'retained-geometry-only') return null;
+  return typeof motion?.reason === 'string' && motion.reason.trim() ? motion.reason.trim() : 'The movement could not be checked.';
+}
+
 // This panel has only alternative-scoped proposal routes. Main version editing
 // and manual alternative revision keep their own controls and request shapes.
 export function mountAlternativeMemory(container, bridge) {
@@ -67,6 +76,12 @@ export function mountAlternativeMemory(container, bridge) {
           if (isComposition(parent) ? poseProblem(object) || object.scale !== before.scale : editProblem(object)) return 'The proposed pose is outside the supported bounds.';
         }
       } else if (editProblem(candidate)) return 'The proposed pose is outside the supported bounds.';
+      if (parent.fullObject) {
+        if (!same(candidate.fullObject, parent.fullObject)) return 'This proposal does not keep the same estimated object.';
+        if (candidate.offset[1] !== parent.offset[1]) return 'Height changes are not supported for this estimated object.';
+        const held = heldMotion(proposal.motion);
+        if (held) return `This move cannot be saved yet: ${held} ${MOTION_LIMIT}`;
+      }
     } catch { return 'The whole parent arrangement could not be verified.'; }
     return bridge.problem?.(candidate) ?? null;
   }
@@ -107,6 +122,10 @@ export function mountAlternativeMemory(container, bridge) {
       review.replaceChildren(el('p', { className: 'hint', textContent: 'This proposal is no longer available under current sources or supporting recollections.' }), ...(retry ? [retry] : []), ...(cancel ? [cancel] : [])); return;
     }
     const nodes = [el('p', { className: 'hint', textContent: `Stored proposal for ${bridge.nameOf(proposal.targetId)}. New alternative time: ${proposal.scope.timeMode === 'unknown' ? 'unknown' : 'explicitly re-confirm the parent assertion'}. The current scene is not its target.` }), el('p', { className: 'memory-text', textContent: proposal.statement.text }), el('p', { className: 'hint', textContent: statusText(proposal) })];
+    if (bridge.binding()?.edit?.fullObject && proposal.motion) {
+      const held = heldMotion(proposal.motion);
+      nodes.push(el('p', { className: 'hint', textContent: held ? `This move could not be confirmed: ${held} ${MOTION_LIMIT}` : `This move does not overlap what is kept from the photo. ${MOTION_LIMIT}` }));
+    }
     if (ACTIVE.has(proposal.status) || cancelAttempt) {
       const cancel = el('button', { type: 'button', className: 'secondary', textContent: cancelAttempt ? 'Retry canceling the earlier plan' : 'Cancel this alternative plan', disabled: busy || (!cancelAttempt && Boolean(createAttempt || applyAttempt)) });
       cancel.addEventListener('click', () => cancelPlan(proposal)); nodes.push(cancel);
@@ -236,7 +255,8 @@ export function mountAlternativeMemory(container, bridge) {
   text.addEventListener('input', () => { clearPreview(); render(); });
   consent.addEventListener('change', () => { clearPreview(); render(); });
   plan.addEventListener('click', create); refresh.addEventListener('click', read);
-  container.replaceChildren(el('h4', { textContent: 'Revise this alternative from a remembered instruction' }),
+  const fullObjectNote = el('p', { className: 'hint', hidden: !bridge.binding()?.edit?.fullObject, textContent: 'For this estimated object, a plan can move it left or right, toward or away, or turn it. Its height stays as in the parent, and its front is not known, so a request to face something asks you for an explicit turn instead.' });
+  container.replaceChildren(el('h4', { textContent: 'Revise this alternative from a remembered instruction' }), fullObjectNote,
     el('p', { className: 'hint', textContent: 'Plan sends your instruction, the permitted source photo selections and this parent’s object layout to Meta. Parent time wording, contributors’ words and recordings are not added. Dates in your message do not change the selected unknown or re-confirmed time. Use public or synthetic photos only. The model cannot choose another parent, change the time, or infer relative size.' }), text,
     el('label', {}, [consent, ' Send this instruction and the permitted photo/layout context to Meta to propose one change to this alternative']),
     el('div', { className: 'actions' }, [plan, refresh]), note, list, review);
