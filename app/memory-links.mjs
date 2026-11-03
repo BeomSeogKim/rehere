@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { OBJECT_IDS } from './arrangements.mjs';
 import { RequestError } from './drafts.mjs';
+import { validStatementSource } from './sources.mjs';
+export { validStatementSource } from './sources.mjs';
 
 // Owner links from a place's whole saved written memory to one confirmed
 // scene object: pure validation, request parsing and the availability of
@@ -90,4 +92,29 @@ export function memoryLinkView(link, written) {
   if (!written.view.available) return view(false, written.view.reason);
   if (written.sha256 !== link.sourceSha256) return view(false, 'checksum');
   return view(true, null);
+}
+
+// Written-source dependencies stay separate from contributor identities.
+// An absent field is legacy; malformed retained lineage is unavailable.
+export function sourceDependenciesOf(holder) {
+  if (!Object.hasOwn(holder, 'sourceDependencies')) return [];
+  const refs = holder.sourceDependencies;
+  if (!Array.isArray(refs) || refs.length > 1 || !refs.every((ref) => exactKeys(ref, ['kind', 'sourceId', 'sourceSha256'])
+    && ref.kind === 'written-source' && isId(ref.sourceId) && isSha(ref.sourceSha256))) return null;
+  return refs.map((ref) => ({ ...ref }));
+}
+
+export function inheritedSourceDependencies(parent, statement = null) {
+  const refs = sourceDependenciesOf(parent);
+  if (refs === null) return null;
+  if (statement === null) return refs;
+  if (!validStatementSource(statement)) return null;
+  const found = refs.find((ref) => ref.sourceId === statement.sourceId);
+  if (found && found.sourceSha256 !== statement.sourceSha256) return null;
+  if (!found) refs.push({ kind: 'written-source', ...statement });
+  return refs.length <= 1 ? refs : null;
+}
+
+export function sourceDependencyFields(holder) {
+  return Object.hasOwn(holder, 'sourceDependencies') ? { sourceDependencies: structuredClone(holder.sourceDependencies) } : {};
 }

@@ -1,7 +1,7 @@
 import { proposalBlockedReason } from './memory-edit.js';
 import { buildBlockedReason } from './photo-scene.js';
 
-export const TEXT_LIMITS = Object.freeze({ provider: 120, reference: 2000, estimatedPeriod: 160 });
+export const TEXT_LIMITS = Object.freeze({ provider: 120, attributedCreator: 120, reference: 2000, estimatedPeriod: 160 });
 
 export const ORIGIN_LABELS = Object.freeze({
   unknown: 'Not specified',
@@ -22,6 +22,9 @@ const PERMISSIONS = Object.keys(PERMISSION_LABELS);
 export function createSourceDetails() {
   return {
     provider: '',
+    // Written sources only: who the words are attributed to, as the owner
+    // states it. It is not the provider (who supplied the material).
+    attributedCreator: '',
     originKind: 'unknown',
     reference: '',
     permissions: { place: false, model: false, share: false },
@@ -73,8 +76,9 @@ export function detailsProblem(details) {
 
 // File.lastModified is when the file was last written, not when the photo was
 // taken or the file created, so it maps only to fileModifiedAt.
-export function toSourceInput(details, file = null) {
+export function toSourceInput(details, file = null, { attribution = false } = {}) {
   const lastModified = file?.lastModified;
+  const creator = attribution ? details.attributedCreator.trim() : '';
   return {
     provider: details.provider.trim(),
     origin: { kind: details.originKind, reference: details.reference.trim() },
@@ -85,6 +89,7 @@ export function toSourceInput(details, file = null) {
       fileModifiedAt: Number.isFinite(lastModified) && lastModified > 0 ? new Date(lastModified).toISOString() : null,
       estimatedPeriod: details.estimatedPeriod.trim(),
     },
+    ...(creator && { attributedCreator: creator }),
   };
 }
 
@@ -93,7 +98,7 @@ export function toSourceInput(details, file = null) {
 export function buildMetadata({ photos, text, textDetails, voice, voiceDetails }) {
   return {
     photos: photos.map((photo) => toSourceInput(photo.details, photo.file)),
-    text: text.trim() ? toSourceInput(textDetails) : null,
+    text: text.trim() ? toSourceInput(textDetails, null, { attribution: true }) : null,
     voice: voice ? toSourceInput(voiceDetails) : null,
   };
 }
@@ -125,6 +130,7 @@ export function describeSource(record) {
   }
   const { dates, permissions } = record;
   const rows = [
+    ...(record.kind === 'text' && record.attributedCreator ? [{ label: 'Attributed to (as stated by the owner)', value: record.attributedCreator }] : []),
     { label: 'Provided by', value: record.provider || 'Not specified' },
     { label: 'Source type', value: ORIGIN_LABELS[record.origin.kind] ?? ORIGIN_LABELS.unknown },
   ];
@@ -182,7 +188,7 @@ function textInput(doc, details, key, onChange) {
 // Builds collapsible controls that read and write `details` in place, so the
 // state stays with the owning photo, text or recording across re-renders.
 // `state.open` remembers whether the panel was expanded.
-export function renderSourceControls(doc, { details, state, label, file = null, onChange = null, describedBy = null }) {
+export function renderSourceControls(doc, { details, state, label, file = null, onChange = null, describedBy = null, attribution = false }) {
   const root = doc.createElement('details');
   root.className = 'source-details';
   root.open = Boolean(state.open);
@@ -245,6 +251,7 @@ export function renderSourceControls(doc, { details, state, label, file = null, 
 
   root.append(
     summary,
+    ...(attribution ? [field(doc, 'Words attributed to', textInput(doc, details, 'attributedCreator', refresh), 'Optional. Who wrote or said these words, as you state it. Rehere does not verify it. Leave blank if unknown.')] : []),
     field(doc, 'Provided by', provider, 'A name or label for your own reference. Rehere does not verify it.'),
     field(doc, 'Source type', origin),
     field(doc, 'Reference', textInput(doc, details, 'reference', refresh), 'A link or note about where it came from.'),

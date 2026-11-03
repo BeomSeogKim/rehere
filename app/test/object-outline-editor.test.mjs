@@ -175,9 +175,13 @@ describe('object outline editor component', () => {
     assert.equal(view.selected(), 0);
   });
 
-  it('paints, requires the explicit check, and confirms once with the exact mask bytes', async () => {
+  it('paints, requires the explicit check, and confirms once with the exact mask bytes', { timeout: 5000 }, async () => {
     let release;
-    const view = mount({ onConfirm: () => new Promise((resolve) => { release = resolve; }) });
+    // onConfirm runs only after the mask is encoded and hashed; wait for that
+    // call itself rather than a fixed number of turns.
+    let called;
+    const confirming = new Promise((resolve) => { called = resolve; });
+    const view = mount({ onConfirm: () => new Promise((resolve) => { release = resolve; called(); }) });
     view.load();
     view.stroke(2, 2);
     view.stroke(3, 2);
@@ -188,7 +192,7 @@ describe('object outline editor component', () => {
     view.tick();
     view.button('Use this outline').dispatch('click');
     view.button('Use this outline').dispatch('click');
-    await settle();
+    await confirming;
     assert.equal(view.calls.confirm.length, 1, 'one call per attempt while pending');
     assert.equal(view.button('Use this outline').disabled, true);
     view.stroke(5, 5);
@@ -209,14 +213,18 @@ describe('object outline editor component', () => {
     assert.equal(view.selected(), 2);
   });
 
-  it('keeps the drawing after a refused or failed confirmation and retries with identical bytes', async () => {
+  it('keeps the drawing after a refused or failed confirmation and retries with identical bytes', { timeout: 5000 }, async () => {
     const answers = [() => false, () => Promise.reject(new Error('offline')), () => true];
-    const view = mount({ onConfirm: () => answers.shift()() });
+    // Each attempt's onConfirm call is awaited before its result is checked.
+    let entered;
+    const view = mount({ onConfirm: () => { entered(); return answers.shift()(); } });
     view.load();
     view.stroke(4, 1);
     view.tick();
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      const entry = new Promise((resolve) => { entered = resolve; });
       view.button('Use this outline').dispatch('click');
+      await entry;
       await settle();
       if (attempt < 2) {
         assert.match(view.status(), /not used\. Your drawing is kept/);
@@ -283,14 +291,18 @@ describe('object outline editor component', () => {
     assert.match(view.position(), /Zoom 200%/);
   });
 
-  it('locks Cancel, zoom and editing while a confirmation is in flight, and unlocks them after a refusal', async () => {
+  it('locks Cancel, zoom and editing while a confirmation is in flight, and unlocks them after a refusal', { timeout: 5000 }, async () => {
     let release;
-    const view = mount({ onConfirm: () => new Promise((resolve) => { release = resolve; }) });
+    // onConfirm runs only after the mask is encoded and hashed; wait for that
+    // call itself rather than a fixed number of turns.
+    let called;
+    const confirming = new Promise((resolve) => { called = resolve; });
+    const view = mount({ onConfirm: () => new Promise((resolve) => { release = resolve; called(); }) });
     view.load();
     view.stroke(1, 1);
     view.tick();
     view.button('Use this outline').dispatch('click');
-    await settle();
+    await confirming;
     for (const text of ['Cancel', 'Zoom in', 'Undo', 'Small brush', 'Draw a shape']) assert.equal(view.button(text).disabled, true, `${text} is locked while pending`);
     view.button('Cancel').disabled = false;
     view.button('Cancel').dispatch('click');
@@ -304,16 +316,20 @@ describe('object outline editor component', () => {
     assert.equal(view.calls.cancel, 1);
   });
 
-  it('cancels without writing and dispose ignores a late confirmation', async () => {
+  it('cancels without writing and dispose ignores a late confirmation', { timeout: 5000 }, async () => {
     let release;
-    const view = mount({ onConfirm: () => new Promise((resolve) => { release = resolve; }) });
+    // onConfirm runs only after the mask is encoded and hashed; wait for that
+    // call itself rather than a fixed number of turns.
+    let called;
+    const confirming = new Promise((resolve) => { called = resolve; });
+    const view = mount({ onConfirm: () => new Promise((resolve) => { release = resolve; called(); }) });
     view.load();
     view.button('Cancel').dispatch('click');
     assert.deepEqual([view.calls.cancel, view.calls.confirm.length], [1, 0]);
     view.stroke(1, 1);
     view.tick();
     view.button('Use this outline').dispatch('click');
-    await settle();
+    await confirming;
     assert.equal(view.button('Cancel').disabled, true, 'Cancel is unavailable while the write is in flight');
     const before = view.status();
     view.component.dispose();

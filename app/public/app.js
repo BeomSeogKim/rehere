@@ -227,7 +227,7 @@ function missingSlot(photo, index) {
 }
 
 function renderTextSource() {
-  els.textSource.replaceChildren(renderSourceControls(document, { ...textSource, label: 'the written memory' }));
+  els.textSource.replaceChildren(renderSourceControls(document, { ...textSource, label: 'the written memory', attribution: true }));
 }
 
 function renderVoiceSource() {

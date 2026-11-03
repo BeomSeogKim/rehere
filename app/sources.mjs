@@ -55,8 +55,10 @@ function nullable(value, valid) {
   return value;
 }
 
-function sourceInput(value) {
-  const input = object(value, ['provider', 'origin', 'permissions', 'dates']);
+function sourceInput(value, textSource = false) {
+  const creator = textSource && value !== null && typeof value === 'object' && Object.hasOwn(value, 'attributedCreator');
+  const input = object(value, ['provider', 'origin', 'permissions', 'dates', ...(creator ? ['attributedCreator'] : [])]);
+  const attributedCreator = creator ? text(input.attributedCreator, 120).trim() : '';
   const origin = object(input.origin, ['kind', 'reference']);
   const permissions = object(input.permissions, PURPOSES);
   const dates = object(input.dates, ['capturedOn', 'fileCreatedAt', 'fileModifiedAt', 'estimatedPeriod']);
@@ -64,6 +66,7 @@ function sourceInput(value) {
   if (!PURPOSES.every((purpose) => typeof permissions[purpose] === 'boolean')) fail();
   return {
     provider: text(input.provider, 120),
+    ...(attributedCreator && { attributedCreator }),
     origin: { kind: origin.kind, reference: text(origin.reference, 2000) },
     permissions: { place: permissions.place, model: permissions.model, share: permissions.share },
     dates: {
@@ -88,15 +91,15 @@ export function parseSourceMetadata(raw, { photoCount, hasText, hasVoice }) {
     let photos = Array.from({ length: photoCount }, unknownSource);
     if (Object.hasOwn(metadata, 'photos')) {
       if (!Array.isArray(metadata.photos) || metadata.photos.length !== photoCount) fail();
-      photos = metadata.photos.map(sourceInput);
+      photos = metadata.photos.map((value) => sourceInput(value));
     }
-    const optional = (value, present) => {
+    const optional = (value, present, textSource = false) => {
       if (value === undefined || value === null) return present ? unknownSource() : null;
-      return present ? sourceInput(value) : fail();
+      return present ? sourceInput(value, textSource) : fail();
     };
     return {
       photos,
-      text: optional(metadata.text, hasText),
+      text: optional(metadata.text, hasText, true),
       voice: optional(metadata.voice, hasVoice),
     };
   } catch (error) {
@@ -129,4 +132,11 @@ export function canUseSource(draft, sourceId, purpose) {
   if (!PURPOSES.includes(purpose) || !Array.isArray(draft?.sources)) return false;
   const source = draft.sources.find((item) => item?.id === sourceId);
   return source?.permissions?.[purpose] === true;
+}
+
+export function validStatementSource(ref) {
+  return ref !== null && typeof ref === 'object' && !Array.isArray(ref) && Object.keys(ref).length === 2
+    && Object.hasOwn(ref, 'sourceId') && Object.hasOwn(ref, 'sourceSha256')
+    && typeof ref.sourceId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(ref.sourceId)
+    && typeof ref.sourceSha256 === 'string' && /^[0-9a-f]{64}$/.test(ref.sourceSha256);
 }

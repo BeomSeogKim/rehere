@@ -138,6 +138,7 @@ const canonical = (value) =>
 export function detailsFromSourceInput(input) {
   return {
     provider: input?.provider ?? '',
+    attributedCreator: input?.attributedCreator ?? '',
     originKind: input?.origin?.kind ?? 'unknown',
     reference: input?.origin?.reference ?? '',
     permissions: { place: input?.permissions?.place === true, model: input?.permissions?.model === true, share: input?.permissions?.share === true },

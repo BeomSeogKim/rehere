@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { RequestError } from './drafts.mjs';
+import { validStatementSource } from './sources.mjs';
 import { objectSurfaceMeshes, surfaceMeshes } from './public/photo-scene.js';
 import { copyArrangement, copyPose, faceObjectPose, isComposition, poseProblem, rotatePoseYaw } from './public/composition-scene.js';
 
@@ -83,10 +84,13 @@ const TIME_MODES = ['unknown', 'reconfirm-parent'];
 // A memory proposal for one object of a selected saved alternative. The time
 // mode is the owner's own choice; the model never chooses a time.
 export function parseVariantProposalRequest(body, targetIds) {
-  const request = readable(body, ['requestId', 'baseEraRevision', 'targetId', 'timeMode', 'text', 'consent'],
-    ({ requestId, baseEraRevision, targetId, timeMode, text, consent }) =>
+  const sourced = body !== null && typeof body === 'object' && Object.hasOwn(body, 'statementSource');
+  const field = sourced ? 'statementSource' : 'text';
+  const request = readable(body, ['requestId', 'baseEraRevision', 'targetId', 'timeMode', field, 'consent'],
+    ({ requestId, baseEraRevision, targetId, timeMode, text, statementSource, consent }) =>
       isRequestId(requestId) && Number.isInteger(baseEraRevision) && baseEraRevision >= 0 && targetIds.includes(targetId)
-      && TIME_MODES.includes(timeMode) && typeof text === 'string' && text.trim() !== '' && Array.from(text).length <= TEXT_LIMIT
+      && TIME_MODES.includes(timeMode) && (sourced ? validStatementSource(statementSource)
+        : typeof text === 'string' && text.trim() !== '' && Array.from(text).length <= TEXT_LIMIT)
       && typeof consent === 'boolean');
   if (request.consent !== true) throw new RequestError(403, 'Sending the photo and message to the model needs explicit consent.');
   return request;
@@ -112,13 +116,14 @@ export const parseUndoRequest = (body, { twoObjects = false } = {}) =>
 
 // A main proposal is bound to a main version; a scoped one only to its
 // `scope` ({ kind: 'variant', parentVariantId, baseEraRevision, timeMode }).
-export function newProposal({ id, requestId, baseVersion, text, statementId, now, targetId = null, scope = null }) {
+export function newProposal({ id, requestId, baseVersion, text, statementId, now, targetId = null, scope = null, statementSource = null }) {
   return {
     id,
     requestId,
     ...(scope ? { scope: { ...scope } } : { baseVersion }),
     ...(targetId !== null && { targetId }),
-    statement: { id: statementId, kind: 'human_memory', text, sha256: createHash('sha256').update(text, 'utf8').digest('hex'), modelConsent: true },
+    statement: { id: statementId, kind: 'human_memory', text, sha256: createHash('sha256').update(text, 'utf8').digest('hex'), modelConsent: true,
+      ...(statementSource && { source: { ...statementSource } }) },
     createdAt: now,
     updatedAt: now,
     status: 'queued',

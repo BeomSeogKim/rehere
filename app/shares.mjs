@@ -2,8 +2,9 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { OBJECT_IDS, arrangementOf, assertObjectsConfirmed, isTwoObject } from './arrangements.mjs';
-import { captionsIntact, contributionAllows, fullObjectMemoryWords, reviewTarget, versionDependencies } from './collaboration.mjs';
+import { captionsIntact, contributionAllows, fullObjectMemoryWords, reviewTarget, versionDependencies, variantSourceDependencies } from './collaboration.mjs';
 import { photoAttested, readPlayback, readReviewPhoto } from './contribution-photos.mjs';
+import { sourceDependencyFields, sourceDependenciesOf } from './memory-links.mjs';
 import { RequestError } from './drafts.mjs';
 import { geometrySources } from './geometry-sources.mjs';
 import { COMPOSITION_OUTPUTS, verifiedAsset } from './composition-assets.mjs';
@@ -37,6 +38,7 @@ const QUOTABLE = new Set(['submitted', 'adopted', 'alternative']);
 export const UNAVAILABLE = 'This shared place is not available.';
 const REASONS = {
   source: [403, 'The photo is not marked as public material with permission to build and share the place.'],
+  written: [403, 'A written source used by a selected arrangement is no longer available for sharing.'],
   grant: [403, 'A contribution used by a selected view or quote was not shared with permission to build and share the place.'],
   withdrawn: [409, 'A contribution used by a selected view or quote was withdrawn.'],
   unavailable: [409, 'A contributed photo or recording used by a selected view, quote or recording is not available for this use right now. Make a new preview later.'],
@@ -228,12 +230,12 @@ export function savedView(manifest, view) {
   }
   const variants = variantsOf(manifest);
   const variant = variants.find((item) => item.id === view.variantId);
-  if (!variant) return null;
+  if (!variant || variantSourceDependencies(manifest, variant) === null) return null;
   const retained = manifest.edits.find((item) => item.version === variant.parentVersion)?.fullObject;
   if (Boolean(retained) !== Boolean(variant.edit?.fullObject) || (retained && JSON.stringify(retained) !== JSON.stringify(variant.edit.fullObject))) return null;
   const label = variant.kind === 'baseline' ? 'Saved reconstruction' : `Alternative arrangement ${variants.filter((item) => item.kind !== 'baseline').indexOf(variant) + 1}`;
   return {
-    edit: editFields(manifest, variant.edit), dependencies: [...variant.contributionIds],
+    edit: editFields(manifest, variant.edit), dependencies: [...variant.contributionIds], ...sourceDependencyFields(variant),
     era: variant.eraAssertions.at(-1) ?? null, eraRevision: variant.eraRevision, label,
   };
 }
@@ -364,6 +366,9 @@ export class ShareStore {
       if (issue) return issue;
     }
     for (const view of frozen.views) {
+      const currentView = savedView(manifest, view);
+      if (!currentView || JSON.stringify(sourceDependenciesOf(currentView)) !== JSON.stringify(sourceDependenciesOf(view))) return 'changed';
+      if (await this.reconstructions.sourceDependencyIssue(manifest, view, 'share')) return 'written';
       if (view.edit?.fullObject) {
         const resolved = savedView(manifest, view);
         if (!resolved || JSON.stringify(resolved.edit) !== JSON.stringify(view.edit) || JSON.stringify(resolved.dependencies) !== JSON.stringify(view.dependencies)) return 'changed';
@@ -402,8 +407,8 @@ export class ShareStore {
       const words = await fullObjectMemoryWords(this.reconstructions, manifest, child);
       if (!words || words.proposalId !== selection.proposalId || words.statementSha256 !== selection.statementSha256) return null;
       for (const key of ['statementId', 'editSha256', 'receiptSha256']) if (selection[key] !== undefined && selection[key] !== words[key]) return null;
-      const { text, ...pins } = words;
-      return { text, pinned: { viewId: selected.id, variantId: child.id, ...pins } };
+      const { text, attribution, ...pins } = words;
+      return { text, ...(Object.hasOwn(words, 'attribution') && { attribution }), pinned: { viewId: selected.id, variantId: child.id, ...pins } };
     }
     const view = selected?.kind === 'version' ? selected : null;
     if (!view || (selection.version !== undefined && selection.version !== view.version)) return null;
@@ -483,6 +488,7 @@ export class ShareStore {
       const { glb, mask } = await this.reconstructions.fullObjects.boundAssets(manifest, fullObject);
       fullObjectAssets = { 'object.glb': { sha256: sha256(glb), size: glb.length }, 'outline.png': { sha256: sha256(mask), size: mask.length } };
     }
+    for (const view of selected) if (await this.reconstructions.sourceDependencyIssue(manifest, view, 'share')) this.#throwReason('written');
     const dependencyReason = this.#contributionIssue(manifest, selected.flatMap((item) => item.dependencies));
     if (dependencyReason) this.#throwReason(dependencyReason);
 
@@ -548,7 +554,7 @@ export class ShareStore {
           asset: { viewId: view.id, name: 'object.glb', size: fullObjectAssets['object.glb'].size },
           mask: { viewId: view.id, name: 'outline.png', size: fullObjectAssets['outline.png'].size },
         } }),
-        ...(memoryWords && view.id === request.memoryWords.viewId && { memoryWords: { text: memoryWords.text } }),
+        ...(memoryWords && view.id === request.memoryWords.viewId && { memoryWords: { text: memoryWords.text, ...(Object.hasOwn(memoryWords, 'attribution') && { attribution: memoryWords.attribution }) } }),
         era: publicEra,
         evidence: {
           arrangement: arrangementOrigin(manifest, view),
@@ -591,7 +597,7 @@ export class ShareStore {
     const frozen = {
       ...(isComposition(manifest) ? { sourceBindings: geometrySources(manifest) } : { sourceSha256: manifest.sourceSha256 }),
       assets,
-      views: selected.map(({ view, edit, dependencies, eraRevision }) => ({ id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision, ...(edit.fullObject && { edit: structuredClone(edit), fullObjectAssets: structuredClone(fullObjectAssets) }) })),
+      views: selected.map(({ view, edit, dependencies, eraRevision, ...resolved }) => ({ ...sourceDependencyFields(resolved), id: view.id, kind: view.kind, version: view.version, variantId: view.variantId, dependencies, eraRevision, ...(edit.fullObject && { edit: structuredClone(edit), fullObjectAssets: structuredClone(fullObjectAssets) }) })),
       quotes: quotes.map((item) => ({ contributionId: item.id, textSha256: item.textSha256 })),
       stories: pinnedStories,
       ...(memoryWords && { memoryWords: memoryWords.pinned }),
@@ -810,7 +816,7 @@ export class ShareStore {
         if (existing.previewId !== request.previewId || existing.digest !== request.previewDigest || !sameVerifier(existing.tokenVerifier, tokenVerifier)) {
           throw fail(409, 'This request was already used with different values.');
         }
-        if (isComposition(manifest) || existing.frozen.views.some((view) => view.edit?.fullObject)) {
+        if (isComposition(manifest) || existing.frozen.views.some((view) => view.edit?.fullObject || Object.hasOwn(view, 'sourceDependencies'))) {
           const reason = await this.#liveIssue(manifest, existing.frozen);
           if (reason) this.#throwReason(reason);
         }

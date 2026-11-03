@@ -295,6 +295,11 @@ off. A supplied source entry has this shape:
 }
 ```
 
+Owner intake accepts an optional `attributedCreator` string on `text` metadata
+only, up to 120 UTF-16 units before trimming; an empty value is omitted.
+It is an owner-asserted creator label, distinct from `provider`, the supplier.
+An omitted creator stays unknown. Neither label verifies identity or authorship.
+
 Origin kinds are `own`, `public`, `other` and `unknown`. Supplied objects
 require the documented fields and reject unknown fields, invalid calendar
 dates, wrong types and mismatched material counts. Metadata is stored
@@ -403,10 +408,31 @@ there is no prerecorded or local keyword-parser substitute for a model call.
 
 For partial scenes, the main planner edits the current saved version. To plan
 from a particular saved alternative instead, show it and choose **Make a revised alternative**
-then **Remembered instruction**. Its plan uses that parent's arrangement and
-explicit time choice; approval creates a new child without overwriting main
-or parent. See [alternative memory proposals](COLLABORATION.md#revise-an-alternative-from-a-remembered-instruction)
-for model grants, scoped recovery and preview requirements.
+then **Remembered instruction**. Choose **Use this place's written source (whole text)**
+to use its existing saved writing, or write an instruction using the unchanged
+2,000-code-point limit. The source option uses the whole verified retained text,
+up to 10,000 UTF-16 units, bound to its source ID and SHA-256; it never truncates
+or substitutes client text. Existing token and cost limits still apply.
+Its plan uses the parent's arrangement and explicit time choice; review and
+approval create a new child without overwriting main or parent.
+
+A source-backed proposal and its child retain that exact written-source
+binding, alongside inherited contribution dependencies. Later children, stories
+and fixed visits keep it. The source's model permission is required for new
+generation and new apply, alongside the existing photo and contribution checks.
+An exact replay of an already committed apply, deterministic display, stories
+and visits do not require a new model grant. Model consent and permission to
+share the words remain separate choices.
+
+Removing place use, stopping the source or losing its verified bytes blocks
+the dependent private child and story. Removing share use blocks its fixed
+visits and shared stories even when the words are not selected for sharing;
+private owner display remains available while place use is allowed. Parent and
+main remain unchanged unless independently dependent on that source. Shared
+source-backed words retain the owner-asserted creator and origin/reference,
+without treating the supplier or owner as the speaker. See
+[alternative memory proposals](COLLABORATION.md#revise-an-alternative-from-a-remembered-instruction)
+for scoped recovery and preview requirements.
 
 A collapsed "Saved proposals" list shows every stored proposal with its
 target, request time (or "time unknown"), status and the start of its
@@ -424,6 +450,7 @@ All routes below extend `/api/drafts/<id>/reconstructions/<job>`:
 | Endpoint | Purpose |
 |---|---|
 | `POST /proposals` | Request a plan with `requestId`, `baseVersion`, `text` and explicit `consent` |
+| `POST /variants/<variant>/proposals` | Scoped plan with `requestId`, `baseEraRevision`, `targetId`, `timeMode`, `consent`, and exactly one of `text` or `statementSource { sourceId, sourceSha256 }` |
 | `GET /proposals` | Saved statements and proposal states |
 | `GET /proposals/<proposal>` | Poll one proposal |
 | `POST /proposals/<proposal>/cancel` | Cancel using `requestId` |

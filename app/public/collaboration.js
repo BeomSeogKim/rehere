@@ -2590,6 +2590,8 @@ export function mountCollaboration(container, bridge) {
         binding: () => ({ parentVariantId: mine.parentId, baseEraRevision: mine.context.eraRevision, edit: mine.context.edit,
           targetId: mine.context.edit.objects ? mine.targetId : 'selected-foreground', timeMode: time.value,
           ready: alive() && mode.value === 'memory' && !mine.unavailable && !mine.stale && Boolean(time.value) && (!mine.context.edit.objects || Boolean(mine.targetId)) && (time.value !== 'reconfirm-parent' || reaffirm.checked) }),
+        // The place's written source as revision-context resolved it, if any.
+        writtenSource: () => mine.context?.writtenSource ?? null,
         nameOf: (id) => bridge.targets?.nameOf(id) ?? 'the selected foreground',
         blocked: () => {
           const sources = bridge.memorySources ?? [];

@@ -1,3 +1,4 @@
+import { inheritedSourceDependencies, sourceDependenciesOf, validStatementSource } from './memory-links.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -287,6 +288,40 @@ export function proposalDependencies(manifest, proposal) {
   if (!proposal.scope) return versionDependencies(manifest, proposal.baseVersion);
   const parent = collaborationOf(manifest).variants.find((item) => item.id === proposal.scope.parentVariantId);
   return parent ? [...parent.contributionIds] : null;
+}
+
+// A missing legacy field is empty only when the retained parent/proposal
+// chain also has no written source. Removing a derived field cannot detach it.
+export function variantSourceDependencies(manifest, variant, seen = new Set()) {
+  const refs = sourceDependenciesOf(variant);
+  if (refs === null || seen.has(variant.id)) return null;
+  if (variant.kind !== 'revision') return refs;
+  seen.add(variant.id);
+  const parent = collaborationOf(manifest).variants.find((item) => item.id === variant.revision?.parentVariantId);
+  if (!parent) return null;
+  const inherited = variantSourceDependencies(manifest, parent, seen);
+  if (inherited === null) return null;
+  let statement = null;
+  if (variant.revision.proposalId) {
+    const proposal = (manifest.proposals ?? []).find((item) => item.id === variant.revision.proposalId);
+    if (!proposal || proposal.status !== 'applied' || proposal.appliedVariantId !== variant.id
+        || proposal.scope?.parentVariantId !== parent.id) return null;
+    if (Object.hasOwn(proposal.statement ?? {}, 'source')) {
+      statement = proposal.statement.source;
+      if (!validStatementSource(statement) || statement.sourceSha256 !== proposal.statement.sha256) return null;
+    }
+  }
+  const expected = inheritedSourceDependencies({ sourceDependencies: inherited }, statement);
+  return expected !== null && JSON.stringify(refs) === JSON.stringify(expected) ? refs : null;
+}
+
+export function proposalSourceDependencies(manifest, proposal) {
+  const parent = proposal.scope ? collaborationOf(manifest).variants.find((item) => item.id === proposal.scope.parentVariantId) : {};
+  if (!parent) return null;
+  const sourced = Object.hasOwn(proposal.statement ?? {}, 'source');
+  if (sourced && !validStatementSource(proposal.statement.source)) return null;
+  const inherited = proposal.scope ? variantSourceDependencies(manifest, parent) : [];
+  return inherited === null ? null : inheritedSourceDependencies({ sourceDependencies: inherited }, sourced ? proposal.statement.source : null);
 }
 
 // What a proposal is checked against at every step: the main version and its
@@ -721,9 +756,10 @@ function projectEra(variant, blocked) {
 
 // `sourceBlocked` is true when the scene's photo has no current place use;
 // every variant then counts as blocked.
-function projectVariant(manifest, variant, sourceBlocked) {
+async function projectVariant(reconstructions, manifest, variant, sourceBlocked) {
   parentArrangement(manifest, variant);
-  const blocked = sourceBlocked || dependenciesBlocked(manifest, variant.contributionIds);
+  const blocked = sourceBlocked || dependenciesBlocked(manifest, variant.contributionIds)
+    || Boolean(await reconstructions.sourceDependencyIssue(manifest, variant));
   // An owner revision takes the ordinal its shares and stories use (shares.mjs
   // savedView); variants are only appended or replaced in place, so it is stable.
   const ordinal = collaborationOf(manifest).variants.filter((item) => item.kind !== 'baseline').findIndex((item) => item.id === variant.id) + 1;
@@ -769,6 +805,9 @@ export async function fullObjectMemoryWords(reconstructions, manifest, child) {
         || proposal.result.parentVariantId !== parent.id || proposal.result.baseEraRevision !== revision.parentEraRevision
         || JSON.stringify(variantFields(manifest, parentArrangement(manifest, parent), null, proposal.result.transform)) !== JSON.stringify(parentArrangement(manifest, child))
         || JSON.stringify(child.contributionIds) !== JSON.stringify(parent.contributionIds)) return null;
+    const expectedSources = inheritedSourceDependencies(parent, Object.hasOwn(proposal.statement, 'source') ? proposal.statement.source : null);
+    if (expectedSources === null || JSON.stringify(sourceDependenciesOf(child)) !== JSON.stringify(expectedSources)
+        || await reconstructions.sourceDependencyIssue(manifest, child, 'share')) return null;
     if (dependencyIssue(manifest, child.contributionIds) || !child.contributionIds.every((id) => contributionAllows(collaboration.contributions.find((item) => item.id === id), 'share'))) return null;
     const uses = await reconstructions.sceneSourceUses(manifest);
     if (!uses.place || !uses.share) return null;
@@ -779,7 +818,8 @@ export async function fullObjectMemoryWords(reconstructions, manifest, child) {
     const projected = await reconstructions.projectProposal(manifest, proposal), statement = projected.statement;
     if (projected.redacted || statement?.kind !== 'human_memory' || !isId(statement.id) || typeof statement.text !== 'string' || !statement.text.trim() || sha256(statement.text) !== statement.sha256) return null;
     return { proposalId: proposal.id, statementSha256: statement.sha256, text: statement.text, statementId: statement.id,
-      editSha256: sha256(JSON.stringify(child.edit)), receiptSha256: sha256(JSON.stringify(receipts[0])) };
+      editSha256: sha256(JSON.stringify(child.edit)), receiptSha256: sha256(JSON.stringify(receipts[0])),
+      ...(Object.hasOwn(statement, 'source') && { attribution: statement.attribution }) };
   } catch { return null; }
 }
 
@@ -916,31 +956,33 @@ export class CollaborationStore {
   async get(draftId, jobId, principal) {
     this.#scope(principal, draftId);
     await this.reconstructions.recover();
-    const manifest = await this.#scene(draftId, jobId);
-    this.#ready(manifest);
-    const collaboration = collaborationOf(manifest);
-    const owner = principal.role === 'owner';
-    const uses = await this.reconstructions.sceneSourceUses(manifest);
-    const contributionBlocked = usageBlocked(manifest);
-    // Contributors' own testimony stays theirs and is projected as before;
-    // only spatial use follows the photo's current restrictions.
-    return {
-      revision: collaboration.revision,
-      contributions: collaboration.contributions.filter((item) => owner || item.principalId === principal.id).map((item) => projectContribution(manifest, item, principal, !uses.place)),
-      variants: owner ? await Promise.all(collaboration.variants.map(async (item) => {
-        if (item.edit.fullObject && uses.place && !dependenciesBlocked(manifest, item.contributionIds)) {
-          await this.reconstructions.fullObjects.validateBinding(draftId, jobId, item.edit.fullObject);
-        }
-        return {
-          ...projectVariant(manifest, item, !uses.place),
-          ...(item.edit.fullObject && { shareMemoryWords: await fullObjectMemoryWords(this.reconstructions, manifest, item).then((words) => words && ({ proposalId: words.proposalId, statementSha256: words.statementSha256, text: words.text })) }),
-        };
-      })) : [],
-      blocked: !uses.place || contributionBlocked,
-      modelBlocked: !uses.model || modelBlocked(manifest),
-      blockedReason: !uses.place ? 'source' : contributionBlocked ? 'contribution' : null,
-      currentVersion: manifest.edit.version,
-    };
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      this.#ready(manifest);
+      const collaboration = collaborationOf(manifest);
+      const owner = principal.role === 'owner';
+      const uses = await this.reconstructions.sceneSourceUses(manifest);
+      const contributionBlocked = usageBlocked(manifest);
+      // Contributors' own testimony stays theirs and is projected as before;
+      // only spatial use follows the photo's current restrictions.
+      return {
+        revision: collaboration.revision,
+        contributions: collaboration.contributions.filter((item) => owner || item.principalId === principal.id).map((item) => projectContribution(manifest, item, principal, !uses.place)),
+        variants: owner ? await Promise.all(collaboration.variants.map(async (item) => {
+          if (item.edit.fullObject && uses.place && !dependenciesBlocked(manifest, item.contributionIds)) {
+            await this.reconstructions.fullObjects.validateBinding(draftId, jobId, item.edit.fullObject);
+          }
+          return {
+            ...await projectVariant(this.reconstructions, manifest, item, !uses.place),
+            ...(item.edit.fullObject && { shareMemoryWords: await fullObjectMemoryWords(this.reconstructions, manifest, item).then((words) => words && ({ proposalId: words.proposalId, statementSha256: words.statementSha256, text: words.text, ...(Object.hasOwn(words, 'attribution') && { attribution: words.attribution }) })) }),
+          };
+        })) : [],
+        blocked: !uses.place || contributionBlocked,
+        modelBlocked: !uses.model || modelBlocked(manifest),
+        blockedReason: !uses.place ? 'source' : contributionBlocked ? 'contribution' : null,
+        currentVersion: manifest.edit.version,
+      };
+    });
   }
 
   async submit(draftId, jobId, principal, body) {
@@ -1562,13 +1604,13 @@ export class CollaborationStore {
     return projectContribution(manifest, contribution, principal, sourceBlocked);
   }
 
-  #reviewResult(manifest, collaboration, contributionId, receipt, sourceBlocked, principal) {
+  async #reviewResult(manifest, collaboration, contributionId, receipt, sourceBlocked, principal) {
     const contribution = collaboration.contributions.find((item) => item.id === contributionId);
     const variant = receipt.variantId && collaboration.variants.find((item) => item.id === receipt.variantId);
     const edit = manifest.edits.find((item) => item.requestId === receipt.requestId && item.kind === 'contribution');
     return {
       contribution: projectContribution(manifest, contribution, principal, sourceBlocked),
-      variant: variant ? projectVariant(manifest, variant, sourceBlocked) : null,
+      variant: variant ? await projectVariant(this.reconstructions, manifest, variant, sourceBlocked) : null,
       // The adopted geometry is withheld while that version cannot be used.
       edit: edit && !sourceBlocked && !dependencyIssue(manifest, versionDependencies(manifest, edit.version)) ? { version: edit.version, ...editFields(edit) } : null,
     };
@@ -1627,15 +1669,17 @@ export class CollaborationStore {
       if (!variant) throw fail(404, 'This version of the scene could not be found.');
       if (variant.edit.fullObject) await this.#revisable(manifest, variant);
       const sourceBlocked = await this.#sourceBlocked(manifest);
-      if (this.#receipt(collaboration, request, 'era', principal.id, variantId)) return projectVariant(manifest, variant, sourceBlocked);
+      if (this.#receipt(collaboration, request, 'era', principal.id, variantId)) return await projectVariant(this.reconstructions, manifest, variant, sourceBlocked);
       if (request.baseRevision !== variant.eraRevision) throw fail(409, 'The time for this version changed. Reload it before saving.');
       if (sourceBlocked) throw fail(409, SOURCE_STOPPED_MESSAGE);
       // A time label never makes a withdrawn dependency usable again.
       assertDependencies(manifest, variant.contributionIds);
+      await this.reconstructions.assertSourceDependencies(manifest, variant);
       if (request.relativeToVariantId !== null) {
         const other = collaboration.variants.find((item) => item.id === request.relativeToVariantId);
         if (!other || other.id === variantId) throw fail(400, 'The other version for this time relation could not be found.');
         assertDependencies(manifest, other.contributionIds);
+        await this.reconstructions.assertSourceDependencies(manifest, other);
       }
       const { requestId, baseRevision, ...era } = request;
       const assertion = { id: randomUUID(), requestId, ...era, assertedBy: principal.id, assertedAt: new Date().toISOString() };
@@ -1649,7 +1693,7 @@ export class CollaborationStore {
       const staled = staleVariantProposals(proposals, variantId, assertion.assertedAt);
       const changed = staled.some((item, index) => item !== proposals[index]);
       const stored = await this.reconstructions.update(manifest, { collaboration: next, ...(changed && { proposals: staled }) });
-      return projectVariant(stored, next.variants.find((item) => item.id === variantId), false);
+      return await projectVariant(this.reconstructions, stored, next.variants.find((item) => item.id === variantId), false);
     });
   }
 
@@ -1665,6 +1709,7 @@ export class CollaborationStore {
     await this.reconstructions.assertSceneFiles(manifest);
     if (variant.edit.fullObject) await this.reconstructions.fullObjects.validateBinding(manifest.draftId, manifest.id, variant.edit.fullObject);
     assertDependencies(manifest, variant.contributionIds);
+    await this.reconstructions.assertSourceDependencies(manifest, variant);
   }
 
   async baseline(draftId, jobId, principal, body) {
@@ -1678,7 +1723,7 @@ export class CollaborationStore {
         const variant = collaboration.variants.find((item) => item.id === replay.variantId && item.kind === 'baseline');
         if (!variant) throw fail(409, REVISION_UNREADABLE);
         await this.#revisable(manifest, variant);
-        return { created: false, variant: projectVariant(manifest, variant, false) };
+        return { created: false, variant: await projectVariant(this.reconstructions, manifest, variant, false) };
       }
       if (!manifest.edit?.fullObject || manifest.edit.version !== body.baseVersion) throw fail(409, 'Reload the accepted full-object version before saving a comparison.');
       const existing = collaboration.variants.find((item) => item.kind === 'baseline' && item.parentVersion === body.baseVersion && sameArrangement(editFields(item.edit), editFields(manifest.edit)));
@@ -1692,7 +1737,7 @@ export class CollaborationStore {
       await this.#save(manifest, { ...collaboration, variants: existing ? collaboration.variants : [...collaboration.variants, variant] }, {
         requestId: body.requestId, action: 'baseline', principalId: principal.id, target: String(body.baseVersion), digest: digest(body), variantId: variant.id,
       }).write();
-      return { created: !existing, variant: projectVariant(manifest, variant, false) };
+      return { created: !existing, variant: await projectVariant(this.reconstructions, manifest, variant, false) };
     });
   }
 
@@ -1705,8 +1750,10 @@ export class CollaborationStore {
       const parent = collaborationOf(manifest).variants.find((item) => item.id === parentId);
       if (!parent) throw fail(404, VARIANT_NOT_FOUND);
       await this.#revisable(manifest, parent);
+      const writtenSource = await this.reconstructions.writtenSourceContext(draftId);
       return {
         parentVariantId: parent.id, eraRevision: parent.eraRevision, latestEra: projectEra(parent, false),
+        ...(writtenSource && { writtenSource }),
         edit: { version: parent.edit.version, ...parentArrangement(manifest, parent) }, contributionIds: [...parent.contributionIds], revisionAllowed: true,
         ...(parent.edit.fullObject && { motion: await this.reconstructions.fullObjects.motion(manifest, parent.edit), capabilities: { actions: ['translate', 'rotate', 'clarify'], front: 'unknown' } }),
       };
@@ -1730,7 +1777,7 @@ export class CollaborationStore {
         const child = collaboration.variants.find((item) => item.id === replay.variantId && item.kind === 'revision');
         if (!child) throw fail(409, REVISION_UNREADABLE);
         await this.#revisable(manifest, child);
-        return { created: false, variant: projectVariant(manifest, child, false) };
+        return { created: false, variant: await projectVariant(this.reconstructions, manifest, child, false) };
       }
       const parent = collaboration.variants.find((item) => item.id === parentId);
       if (!parent) throw fail(404, VARIANT_NOT_FOUND);
@@ -1745,7 +1792,7 @@ export class CollaborationStore {
       });
       if (this.reconstructions.closed) throw fail(503, SHUTTING_DOWN);
       const stored = await write();
-      return { created: true, variant: projectVariant(stored, child, false) };
+      return { created: true, variant: await projectVariant(this.reconstructions, stored, child, false) };
     });
   }
 
@@ -1757,12 +1804,13 @@ export class CollaborationStore {
 
   // The parent's latest time, when it can be confirmed again exactly: a
   // relation is kept or the confirmation is refused; it is never dropped.
-  #reconfirmable(manifest, collaboration, parent) {
+  async #reconfirmable(manifest, collaboration, parent) {
     const latest = parent.eraAssertions.at(-1);
     if (!latest || latest.kind === 'unknown') throw fail(400, 'The selected arrangement has no confirmed time to confirm again. Keep the time unknown instead.');
     if (latest.relativeToVariantId !== null) {
       const other = collaboration.variants.find((item) => item.id === latest.relativeToVariantId);
-      if (!other || dependenciesBlocked(manifest, other.contributionIds)) {
+      if (!other || dependenciesBlocked(manifest, other.contributionIds)
+          || await this.reconstructions.sourceDependencyIssue(manifest, other)) {
         throw fail(409, 'The arrangement this time is relative to is not available now, so the time cannot be confirmed again. Keep the time unknown instead.');
       }
     }
@@ -1779,7 +1827,7 @@ export class CollaborationStore {
     const now = new Date().toISOString();
     const eraAssertions = [];
     if (timeMode === 'reconfirm-parent') {
-      const { kind, label, start, end, statement, relation, relativeToVariantId } = this.#reconfirmable(manifest, collaboration, parent);
+      const { kind, label, start, end, statement, relation, relativeToVariantId } = await this.#reconfirmable(manifest, collaboration, parent);
       eraAssertions.push({ id: randomUUID(), requestId, kind, label, start, end, statement, relation, relativeToVariantId, confirmed: true, assertedBy: principal.id, assertedAt: now });
     }
     const base = parentArrangement(manifest, parent);
@@ -1798,6 +1846,7 @@ export class CollaborationStore {
       parentVersion: parent.parentVersion,
       edit: { version: null, ...fields },
       contributionIds: [...parent.contributionIds],
+      ...(Object.hasOwn(parent, 'sourceDependencies') && { sourceDependencies: sourceDependenciesOf(parent) }),
       createdAt: now,
       createdBy: principal.id,
       eraAssertions,
@@ -1820,7 +1869,11 @@ export class CollaborationStore {
       const existing = proposals.find((item) => item.requestId === request.requestId);
       if (existing) {
         const same = existing.scope?.parentVariantId === parentId && existing.scope.baseEraRevision === request.baseEraRevision
-          && existing.scope.timeMode === request.timeMode && existing.targetId === request.targetId && existing.statement.text === request.text;
+          && existing.scope.timeMode === request.timeMode && existing.targetId === request.targetId
+          && (request.statementSource ? validStatementSource(existing.statement.source)
+            && existing.statement.source.sourceId === request.statementSource.sourceId
+            && existing.statement.source.sourceSha256 === request.statementSource.sourceSha256
+            : !Object.hasOwn(existing.statement, 'source') && existing.statement.text === request.text);
         if (!same) throw fail(409, 'This proposal request was already used with a different message, arrangement or time.');
         return { replay: true, proposal: existing };
       }
@@ -1831,8 +1884,10 @@ export class CollaborationStore {
       if (request.baseEraRevision !== parent.eraRevision) throw fail(409, 'The time for this arrangement changed. Review it again before asking for a proposal.');
       // Nothing is sent for a proposal that could never be saved.
       this.#revisionCapacity(collaboration);
-      if (request.timeMode === 'reconfirm-parent') this.#reconfirmable(manifest, collaboration, parent);
+      if (request.timeMode === 'reconfirm-parent') await this.#reconfirmable(manifest, collaboration, parent);
       const base = parentArrangement(manifest, parent);
+      await this.reconstructions.assertSourceDependencies(manifest, parent, 'model');
+      const written = request.statementSource ? await this.reconstructions.resolveStatementSource(manifest, request.statementSource) : null;
       if (dependencyIssue(manifest, parent.contributionIds, 'model')) throw fail(403, MODEL_BLOCKED_MESSAGE);
       let original = null;
       let photos = null;
@@ -1847,27 +1902,29 @@ export class CollaborationStore {
       if (this.reconstructions.closed) throw fail(503, SHUTTING_DOWN);
       if (this.reconstructions.activeProposal) throw fail(409, 'Another proposal is being prepared right now. Try again when it finishes.');
       const proposal = newProposal({
-        id: randomUUID(), statementId: randomUUID(), now: new Date().toISOString(), requestId: request.requestId, text: request.text, targetId: request.targetId,
+        id: randomUUID(), statementId: randomUUID(), now: new Date().toISOString(), requestId: request.requestId, text: written ? written.text : request.text, statementSource: request.statementSource ?? null, targetId: request.targetId,
         scope: { kind: 'variant', parentVariantId: parent.id, baseEraRevision: parent.eraRevision, timeMode: request.timeMode },
       });
       const dispatch = this.reconstructions.proposalDispatch(manifest, request.targetId, base, { original, photos });
       return { ...(await this.reconstructions.beginProposal(manifest, proposals, proposal, dispatch)), manifest };
     });
-    if (accepted.replay) return { created: false, proposal: await this.reconstructions.projectProposal(await this.#scene(draftId, jobId), accepted.proposal) };
+    if (accepted.replay) return this.reconstructions.serialize(async () => ({ created: false, proposal: await this.reconstructions.projectProposal(await this.#scene(draftId, jobId), accepted.proposal) }));
     this.reconstructions.launchProposal(draftId, jobId, accepted);
-    return { created: true, proposal: await this.reconstructions.projectProposal(accepted.manifest, accepted.proposal) };
+    return this.reconstructions.serialize(async () => ({ created: true, proposal: await this.reconstructions.projectProposal(accepted.manifest, accepted.proposal) }));
   }
 
   // One saved alternative's own proposals, newest first; never main's.
   async variantProposals(draftId, jobId, principal, parentId) {
     this.#owner(principal, draftId);
     await this.reconstructions.recover();
-    const manifest = await this.#scene(draftId, jobId);
-    const parent = collaborationOf(manifest).variants.find((item) => item.id === parentId);
-    if (!parent) throw fail(404, VARIANT_NOT_FOUND);
-    if (parent.edit.fullObject && (await this.reconstructions.sceneSourceUses(manifest)).place && !dependenciesBlocked(manifest, parent.contributionIds)) await this.#revisable(manifest, parent);
-    const scoped = (manifest.proposals ?? []).filter((item) => item.scope?.parentVariantId === parentId).reverse();
-    return this.reconstructions.projectProposals(manifest, scoped);
+    return this.reconstructions.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const parent = collaborationOf(manifest).variants.find((item) => item.id === parentId);
+      if (!parent) throw fail(404, VARIANT_NOT_FOUND);
+      if (parent.edit.fullObject && (await this.reconstructions.sceneSourceUses(manifest)).place && !dependenciesBlocked(manifest, parent.contributionIds)) await this.#revisable(manifest, parent);
+      const scoped = (manifest.proposals ?? []).filter((item) => item.scope?.parentVariantId === parentId).reverse();
+      return this.reconstructions.projectProposals(manifest, scoped);
+    });
   }
 
   async variantProposal(draftId, jobId, principal, parentId, proposalId) {
@@ -1902,7 +1959,7 @@ export class CollaborationStore {
         const child = collaboration.variants.find((item) => item.id === replay.variantId && item.kind === 'revision');
         if (!child) throw fail(409, REVISION_UNREADABLE);
         await this.#revisable(manifest, child);
-        return { created: false, proposal: await this.reconstructions.projectProposal(manifest, proposal), variant: projectVariant(manifest, child, false) };
+        return { created: false, proposal: await this.reconstructions.projectProposal(manifest, proposal), variant: await projectVariant(this.reconstructions, manifest, child, false) };
       }
       if (proposal.status === 'applied') throw fail(409, 'This proposal was already saved as a new alternative.');
       const parent = collaboration.variants.find((item) => item.id === parentId);
@@ -1920,6 +1977,11 @@ export class CollaborationStore {
       // Saving a model result is new model use: every scene photo and inherited contribution must still allow it.
       if (!(await this.reconstructions.sceneSourceUses(manifest)).model) throw fail(403, MODEL_STOPPED_MESSAGE);
       if (dependencyIssue(manifest, parent.contributionIds, 'model')) throw fail(403, MODEL_BLOCKED_MESSAGE);
+      await this.reconstructions.assertSourceDependencies(manifest, { sourceDependencies: proposalSourceDependencies(manifest, proposal) }, 'model');
+      if (Object.hasOwn(proposal.statement, 'source')) {
+        const written = await this.reconstructions.resolveStatementSource(manifest, proposal.statement.source);
+        if (written.text !== proposal.statement.text || written.sourceSha256 !== proposal.statement.sha256) throw fail(409, 'The written source changed or could not be verified.');
+      }
       // Every stored scene photo must still be recorded as public material.
       const photos = await this.reconstructions.assertSceneSources(manifest, 'model');
       if (photos.some(({ source }) => source.origin?.kind !== 'public')) throw fail(403, PUBLIC_ONLY_MESSAGE);
@@ -1927,13 +1989,15 @@ export class CollaborationStore {
         requestId: request.requestId, targetId: isTwoObject(manifest) ? proposal.targetId : null, pose: proposal.result.transform,
         timeMode: proposal.scope.timeMode, proposalId,
       }, principal);
+      const sourceDependencies = proposalSourceDependencies(manifest, proposal);
+      if (sourceDependencies?.length || Object.hasOwn(parent, 'sourceDependencies')) child.sourceDependencies = sourceDependencies;
       const applied = { ...proposal, status: 'applied', appliedVariantId: child.id, updatedAt: child.createdAt };
       const { next } = this.#save(manifest, { ...collaboration, variants: [...collaboration.variants, child] }, {
         requestId: request.requestId, action: 'proposal-revision', principalId: principal.id, target: proposalId, digest: digest(request), variantId: child.id,
       });
       if (this.reconstructions.closed) throw fail(503, SHUTTING_DOWN);
       const stored = await this.reconstructions.update(manifest, { collaboration: next, proposals: proposals.map((item) => (item.id === proposalId ? applied : item)) });
-      return { created: true, proposal: await this.reconstructions.projectProposal(stored, applied), variant: projectVariant(stored, child, false) };
+      return { created: true, proposal: await this.reconstructions.projectProposal(stored, applied), variant: await projectVariant(this.reconstructions, stored, child, false) };
     });
   }
 }

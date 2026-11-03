@@ -16,6 +16,26 @@ const LOAD_TIMEOUT_MS = 20_000;
 export const UNAVAILABLE = 'This shared view is not available.';
 const DEVICE_NOTE = 'Closing access stops this page from showing the scene. Copies already saved on a device cannot be removed from here.';
 
+// Server-provided attribution of source-backed words, exactly
+// { creator: string|null, originKind, reference: string }; absent for legacy
+// words. A malformed value withholds the words rather than showing them
+// without their attribution.
+const ORIGIN_WORDS = { public: 'Public source', own: 'Own source', other: 'Someone else’s source', unknown: 'Source type not specified' };
+const attributionOf = (words) => {
+  if (!Object.hasOwn(words, 'attribution')) return { valid: true, lines: [] };
+  const a = words.attribution;
+  if (!a || typeof a !== 'object' || !(a.creator === null || typeof a.creator === 'string') || !Object.hasOwn(ORIGIN_WORDS, a.originKind) || typeof a.reference !== 'string') return { valid: false, lines: [] };
+  return { valid: true, lines: [a.creator ? `Attributed to ${a.creator}` : 'From this place’s written source', ...(a.reference ? [a.reference] : []), `${ORIGIN_WORDS[a.originKind]}; attribution as given by the owner, not verified.`] };
+};
+// The view's shared words with their attribution lines, or null when there are
+// none or they cannot be shown with their attribution.
+const sharedWords = (view) => {
+  const words = view?.memoryWords;
+  if (!words || typeof words.text !== 'string') return null;
+  const attribution = attributionOf(words);
+  return attribution.valid ? { text: words.text, lines: attribution.lines } : null;
+};
+
 function el(tag, { onclick, ...props } = {}, children = []) {
   const node = document.createElement(tag);
   Object.assign(node, props);
@@ -179,7 +199,7 @@ function viewDetails(view, labelOf, summary = [], nameOf = objectNames(null)) {
   }
   for (const photo of view.evidence?.photos ?? []) nodes.push(el('p', { className: 'hint', textContent: `Source photo for ${photo.objectId === 'object-1' ? 'A' : 'B'}: provided by ${photo.providerLabel || 'an unnamed provider'}; ${photo.attributedCaptureDate ? `date given by them: ${photo.attributedCaptureDate}` : 'date unknown'}.` }));
   if (isComposition(view.edit)) nodes.push(el('p', { className: 'hint', textContent: 'This saved layout and relative size are owner assumptions. The two photos were not automatically registered.' }));
-  nodes.push(el('p', { className: 'hint', textContent: view.evidence?.arrangement === 'memory' && typeof view.memoryWords?.text === 'string'
+  nodes.push(el('p', { className: 'hint', textContent: view.evidence?.arrangement === 'memory' && sharedWords(view)
     ? "Arrangement: the owner approved a model's proposed placement change based on these shared words. This is not verified history."
     : arrangementText(view.evidence?.arrangement) }));
   for (const support of view.evidence?.support ?? []) {
@@ -528,15 +548,17 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       currentId = id;
       sideStatus.textContent = '';
       const view = views.get(id);
-      memoryWords.hidden = typeof view.memoryWords?.text !== 'string';
+      const shared = sharedWords(view);
+      memoryWords.hidden = !shared;
       fullMemoryWords.hidden = memoryWords.hidden;
       fullMemoryWords.open = false;
-      const words = memoryWords.hidden ? '' : view.memoryWords.text;
+      const words = shared?.text ?? '';
       const compact = Array.from(words.replace(/\s+/g, ' ').trim());
       const excerpt = compact.length > 80 ? `${compact.slice(0, 80).join('')}…` : compact.join('');
       memoryWords.replaceChildren(...(memoryWords.hidden ? [] : [
         el('h3', { textContent: 'Words shared about this change' }),
         el('p', { textContent: `Excerpt: “${excerpt}”` }),
+        ...shared.lines.map((line) => el('p', { className: 'hint', textContent: line })),
         el('p', { className: 'hint', textContent: 'The owner approved a model-proposed placement change based on these words. They are not verified history.' }),
       ]));
       fullMemoryWords.replaceChildren(...(fullMemoryWords.hidden ? [] : [

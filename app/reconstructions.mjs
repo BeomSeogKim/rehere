@@ -9,7 +9,7 @@ import { attestPhotos, contributionsDir } from './contribution-photos.mjs';
 import { cleanupContributionFiles, removeManifestTemps, safeJobDirectory } from './contribution-deletion-files.mjs';
 import {
   assertSceneUsable, issueMessage, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, proposalBinding, sameArrangement,
-  usageBlocked, variantFields, versionDependencies,
+  usageBlocked, variantFields, versionDependencies, proposalSourceDependencies, variantSourceDependencies,
 } from './collaboration.mjs';
 import { LIMITS, RequestError } from './drafts.mjs';
 import {
@@ -22,7 +22,7 @@ import { objectSurfaceMeshes } from './public/photo-scene.js';
 import { checkRelationship } from './public/scene-relations.js';
 import {
   MEMORY_LINKS_BYTES, MEMORY_LINKS_FILE, MEMORY_RECEIPTS_MAX, emptyMemoryEntry, memoryLinkView, memoryRequestDigest, parseMemoryLinkRequest,
-  validMemoryLinks, writtenSourceView,
+  validMemoryLinks, writtenSourceView, sourceDependenciesOf, validStatementSource,
 } from './memory-links.mjs';
 import { SourcePolicies, allows } from './source-policies.mjs';
 import { sha256 } from './sources.mjs';
@@ -321,6 +321,7 @@ function sameValues(a, b) {
 }
 
 export const SOURCE_BLOCKED_MESSAGE = 'The owner stopped using this photo or turned off its place use, so no version of this scene can be used.';
+const WRITTEN_REDACTED_PROPOSAL = 'A written source used by this proposal is no longer available, so its content is no longer shown.';
 const SOURCE_REDACTED_PROPOSAL = 'This proposal used a photo that is no longer available for place use, so its content is no longer shown.';
 
 // Internal request, collaboration and share records stay on disk; clients see
@@ -727,6 +728,48 @@ export class ReconstructionStore {
     const policy = source ? { permissions: source.permissions, stopped: source.policy.stopped } : null;
     const use = (purpose) => Boolean(policy) && allows(policy, purpose);
     return { place: use('place'), model: use('model'), share: use('share') };
+  }
+
+  async writtenSourceContext(draftId) {
+    const draft = await this.drafts.get(draftId);
+    const source = draft?.textSourceId && await this.sourcePolicies.effectiveSource(draft, draft.textSourceId);
+    const policy = source && { permissions: source.permissions, stopped: source.policy.stopped };
+    const written = writtenSourceView(draft, Boolean(policy) && allows(policy, 'place'));
+    if (!written) return undefined;
+    const available = written.view.available;
+    return {
+      ...written.view, sourceSha256: available ? written.sha256 : null,
+      attribution: available ? { creator: source.attributedCreator || null, originKind: source.origin.kind, reference: source.origin.reference }
+        : { creator: null, originKind: 'unknown', reference: '' },
+      modelAllowed: available && allows(policy, 'model'),
+    };
+  }
+
+  async sourceDependencyIssue(manifest, holder, purpose = 'place') {
+    const variant = manifest.collaboration?.variants?.find((item) => item.id === holder.id);
+    const refs = variant ? variantSourceDependencies(manifest, variant) : sourceDependenciesOf(holder);
+    if (refs === null) return 'unavailable';
+    if (refs.length === 0) return null;
+    const written = await this.writtenSourceContext(manifest.draftId);
+    for (const ref of refs) {
+      if (!written?.available || written.sourceId !== ref.sourceId || written.sourceSha256 !== ref.sourceSha256) return 'unavailable';
+      if (!(await this.sourcePolicies.canUse(await this.drafts.get(manifest.draftId), ref.sourceId, purpose))) return purpose === 'model' ? 'model' : 'unavailable';
+    }
+    return null;
+  }
+
+  async assertSourceDependencies(manifest, holder, purpose = 'place') {
+    const issue = await this.sourceDependencyIssue(manifest, holder, purpose);
+    if (issue) throw new RequestError(issue === 'model' ? 403 : 409, issue === 'model'
+      ? 'Model use is off for this written source.' : 'A written source used by this arrangement is unavailable.');
+  }
+
+  async resolveStatementSource(manifest, ref, purpose = 'model') {
+    if (!validStatementSource(ref)) throw new RequestError(400, 'The written source reference could not be read.');
+    const written = await this.writtenSourceContext(manifest.draftId);
+    if (!written?.available || written.sourceId !== ref.sourceId || written.sourceSha256 !== ref.sourceSha256) throw new RequestError(409, 'The written source changed or could not be verified.');
+    await this.assertSourceDependencies(manifest, { sourceDependencies: [{ kind: 'written-source', ...ref }] }, purpose);
+    return written;
   }
 
   async sceneSourceUses(manifest) {
@@ -1605,9 +1648,21 @@ export class ReconstructionStore {
   // message and plan of every proposal of its scenes; disk records stay intact.
   async projectProposals(manifest, proposals) {
     const { place } = await this.sceneSourceUses(manifest);
-    return proposals.map((item) => (place ? projectProposal(manifest, item) : {
-      ...item, statement: { ...item.statement, text: null }, result: null, question: null, status: 'stale', error: SOURCE_REDACTED_PROPOSAL, redacted: true,
-      ...(item.scope && { candidate: null }),
+    return Promise.all(proposals.map(async (item) => {
+      const refs = proposalSourceDependencies(manifest, item);
+      const sourceIssue = refs === null || await this.sourceDependencyIssue(manifest, { sourceDependencies: refs });
+      let written = null;
+      if (!sourceIssue && item.statement && Object.hasOwn(item.statement, 'source')) {
+        written = await this.resolveStatementSource(manifest, item.statement.source, 'place').catch(() => null);
+        if (!written || written.text !== item.statement.text || written.sourceSha256 !== item.statement.sha256) written = null;
+      }
+      const invalidStatement = item.statement && Object.hasOwn(item.statement, 'source') && !written;
+      if (place && !sourceIssue && !invalidStatement) {
+        const projected = projectProposal(manifest, item);
+        return written ? { ...projected, statement: { ...projected.statement, attribution: written.attribution } } : projected;
+      }
+      return { ...item, statement: { ...item.statement, text: null }, result: null, question: null, status: 'stale', error: sourceIssue || invalidStatement ? WRITTEN_REDACTED_PROPOSAL : SOURCE_REDACTED_PROPOSAL, redacted: true,
+        ...(item.scope && { candidate: null }) };
     }));
   }
 
@@ -1687,6 +1742,7 @@ export class ReconstructionStore {
     }
     this.activeProposal = {
       id: proposal.id, draftId: manifest.draftId, jobId: manifest.id, ...(dispatch.photos ? { sourceIds: dispatch.context.sourceIds } : { sourceId: dispatch.sourceId }),
+      sourceIds: [...new Set([...(dispatch.photos ? dispatch.context.sourceIds : [dispatch.sourceId]), ...(proposalSourceDependencies(manifest, proposal) ?? []).map((ref) => ref.sourceId)])],
       controller: new AbortController(), done: null,
     };
     return { proposal, start: true, ...dispatch };
@@ -1789,17 +1845,27 @@ export class ReconstructionStore {
         } catch { return false; }
       };
       // Dependencies of what the proposal is bound to: main, or its parent alternative.
-      const bindingIssue = (manifest, current) => {
+      const bindingIssue = async (manifest, current) => {
+        const refs = proposalSourceDependencies(manifest, current);
+        if (refs === null) return 'written';
+        const sourceIssue = await this.sourceDependencyIssue(manifest, { sourceDependencies: refs }, 'model');
+        if (sourceIssue) return sourceIssue === 'model' ? 'written-model' : 'written';
+        if (current.statement && Object.hasOwn(current.statement, 'source')) {
+          const written = await this.resolveStatementSource(manifest, current.statement.source).catch(() => null);
+          if (!written || written.text !== current.statement.text || written.sourceSha256 !== current.statement.sha256) return 'written';
+        }
         const binding = proposalBinding(manifest, current);
         return binding ? dependencyIssue(manifest, binding.dependencies, 'model') : 'unavailable';
       };
+      const bindingMessage = (issue) => issue === 'written-model' ? 'Model use is off for this written source.'
+        : issue === 'written' ? WRITTEN_REDACTED_PROPOSAL : issueMessage(issue);
       // Grants are checked again at dispatch: a withdrawal may have arrived since creation.
-      const started = await this.serialize(async () => { const allowed = await modelAllowed(); const whole = await intact(); return this.changeProposal(draftId, jobId, proposal.id, (current, manifest) => {
+      const started = await this.serialize(async () => { const allowed = await modelAllowed(); const whole = await intact(); return this.changeProposal(draftId, jobId, proposal.id, async (current, manifest) => {
         if (current.status !== 'queued') return null;
         if (!allowed) return { status: 'failed', error: PROPOSAL_MESSAGES.restricted };
         if (!whole) return { status: 'failed', error: PROPOSAL_MESSAGES.scene };
-        const issue = bindingIssue(manifest, current);
-        if (issue) return { status: 'failed', error: issueMessage(issue) };
+        const issue = await bindingIssue(manifest, current);
+        if (issue) return { status: 'failed', error: bindingMessage(issue) };
         return { status: 'processing' };
       }); });
       if (started.status !== 'processing') return;
@@ -1844,9 +1910,9 @@ export class ReconstructionStore {
           await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: PROPOSAL_MESSAGES.scene }));
           return null;
         }
-        const issue = bindingIssue(manifest, current);
+        const issue = await bindingIssue(manifest, current);
         if (issue) {
-          await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: issueMessage(issue) }));
+          await this.changeProposal(draftId, jobId, proposal.id, () => ({ status: 'failed', error: bindingMessage(issue) }));
           return null;
         }
         // Each outbound request the model makes is admitted here, under the
@@ -1855,7 +1921,7 @@ export class ReconstructionStore {
           if (signal.aborted || this.closed || !(await modelAllowed()) || !(await intact())) return null;
           const scene = await this.editableScene(draftId, jobId);
           const now = (scene.proposals ?? []).find((item) => item.id === proposal.id);
-          if (now?.status !== 'processing' || bindingIssue(scene, now)) return null;
+          if (now?.status !== 'processing' || await bindingIssue(scene, now)) return null;
           if (photos) await this.compositionAssets(scene);
           return { value: start() };
         });
@@ -1878,8 +1944,8 @@ export class ReconstructionStore {
         const binding = proposalBinding(manifest, current);
         if (!binding) return { ...record, status: 'failed', error: issueMessage('unavailable') };
         if (binding.stale) return { ...record, status: 'stale' };
-        const issue = dependencyIssue(manifest, binding.dependencies, 'model');
-        if (issue) return { ...record, status: 'failed', error: issueMessage(issue) };
+        const issue = await bindingIssue(manifest, current);
+        if (issue) return { ...record, status: 'failed', error: bindingMessage(issue) };
         if (!outcome?.ok) {
           return { ...record, status: 'failed', error: PROPOSAL_MESSAGES[outcome?.reason] ?? PROPOSAL_MESSAGES.provider };
         }
@@ -2371,15 +2437,18 @@ export class ReconstructionStore {
       }
       if (!manifest) continue;
       const photo = geometrySources(manifest).some((entry) => entry.sourceId === sourceId);
+      const writtenUse = (holder) => (sourceDependenciesOf(holder) ?? []).some((ref) => ref.sourceId === sourceId);
+      const derived = (manifest.collaboration?.variants ?? []).some(writtenUse);
       const storyIds = (manifest.stories?.items ?? [])
-        .filter((story) => story.status === 'ready' && (photo || story.context.voice.sourceId === sourceId)).map((story) => story.id);
-      if (!photo && storyIds.length === 0) continue;
-      if (photo && manifest.status === 'ready') impacts.scenes += 1;
+        .filter((story) => story.status === 'ready' && (photo || writtenUse(story.context) || story.context.voice.sourceId === sourceId)).map((story) => story.id);
+      if (!photo && !derived && storyIds.length === 0) continue;
+      if ((photo || derived) && manifest.status === 'ready') impacts.scenes += 1;
       if (photo && (manifest.status === 'queued' || manifest.status === 'processing')) impacts.processing += 1;
-      if (photo) impacts.processing += (manifest.proposals ?? []).filter((item) => ACTIVE_PROPOSAL.has(item.status)).length;
+      impacts.processing += (manifest.proposals ?? []).filter((item) => ACTIVE_PROPOSAL.has(item.status)
+        && (photo || (proposalSourceDependencies(manifest, item) ?? []).some((ref) => ref.sourceId === sourceId))).length;
       impacts.stories += storyIds.length;
       impacts.snapshots += (manifest.shares?.snapshots ?? []).filter((item) => !item.revokedAt && Date.parse(item.expiresAt) > now
-        && (photo || (item.frozen.stories ?? []).some((pinned) => storyIds.includes(pinned.storyId)))).length;
+        && (photo || item.frozen.views.some(writtenUse) || (item.frozen.stories ?? []).some((pinned) => storyIds.includes(pinned.storyId)))).length;
     }
     if (this.activeStory?.draftId === draftId && this.activeStory.sourceIds.includes(sourceId)) impacts.processing += 1;
     if (this.activeOutline?.draftId === draftId && this.activeOutline.sourceId === sourceId) impacts.processing += 1;

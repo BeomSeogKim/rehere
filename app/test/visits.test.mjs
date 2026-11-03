@@ -153,6 +153,28 @@ describe('visitor screen', () => {
     assert.deepEqual(currentCamera(), CAMERA);
     v.view.dispose();
   });
+  it('shows the server attribution of source-backed words, and withholds words whose attribution is malformed', async () => {
+    const data = manifest();
+    data.views[1].evidence.arrangement = 'memory';
+    data.views[1].memoryWords = { text: 'Synthetic source words.', attribution: { creator: 'Synthetic Author', originKind: 'public', reference: 'Synthetic reference, p. 1' } };
+    const v = open(source({ manifest: async () => data }));
+    await flush();
+    v.button('Mina’s recollection').dispatch('click');
+    const text = v.container.textContent;
+    assert.match(text, /Attributed to Synthetic Author/);
+    assert.match(text, /Synthetic reference, p\. 1/);
+    assert.match(text, /Public source; attribution as given by the owner, not verified\./);
+    v.view.dispose();
+    const bad = manifest();
+    bad.views[1].evidence.arrangement = 'memory';
+    bad.views[1].memoryWords = { text: 'Synthetic source words.', attribution: { creator: 'Synthetic Author', originKind: 'invented', reference: '' } };
+    const w = open(source({ manifest: async () => bad }));
+    await flush();
+    w.button('Mina’s recollection').dispatch('click');
+    assert.doesNotMatch(w.container.textContent, /Synthetic source words/);
+    assert.doesNotMatch(w.container.textContent, /based on these shared words/);
+    w.view.dispose();
+  });
   it('clears shared words when a later access check fails', async () => {
     const data = manifest();
     data.views[0].evidence.arrangement = 'memory';

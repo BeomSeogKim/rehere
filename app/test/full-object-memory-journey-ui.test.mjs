@@ -208,6 +208,34 @@ describe('full-object sharing choices', () => {
     assert.equal(offered.length, 1);
     assert.equal(offered[0].textContent, 'Alternative “Turned toward the window”: “It was turned toward the window.”');
   });
+
+  it('shows the server attribution beside source-backed share words, and does not offer malformed ones', async () => {
+    const CHILD = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', OTHER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const sourced = { proposalId: PROPOSAL, statementSha256: 'c'.repeat(64), text: 'Synthetic source words.', attribution: { creator: null, originKind: 'own', reference: '' } };
+    const malformed = { proposalId: PROPOSAL, statementSha256: 'd'.repeat(64), text: 'Synthetic other words.', attribution: { creator: 7, originKind: 'own', reference: '' } };
+    const child = { ...baselineVariant(), id: CHILD, label: 'Source-backed child', edit: { version: null, offset: [0, 0, 0], yaw: 0.5, fullObject: structuredClone(B) }, shareMemoryWords: sourced };
+    const other = { ...baselineVariant(), id: OTHER, label: 'Malformed child', edit: { version: null, offset: [0, 0, 0], yaw: 0.2, fullObject: structuredClone(B) }, shareMemoryWords: malformed };
+    routes[`GET ${JOB_URL}/collaboration`] = () => Promise.resolve(json(200, { contributions: [], variants: [{ ...baselineVariant(), shareMemoryWords: null }, child, other], blocked: false }));
+    routes[`GET ${JOB_URL}/history`] = () => Promise.resolve(json(200, [{ version: 4, kind: 'manual', blocked: false }]));
+    routes[`GET ${JOB_URL}/stories`] = () => Promise.resolve(json(200, { stories: [] }));
+    routes[`GET ${JOB_URL}/proposals`] = () => Promise.resolve(json(200, []));
+    routes[`GET ${JOB_URL}`] = () => Promise.resolve(json(200, { status: 'ready', box: [0, 0, 10, 10], sourceId: B.sourceId, edit: { version: 4, offset: [0, 0, 0], yaw: 0, fullObject: B } }));
+    routes[`GET ${JOB_URL}/shares`] = () => Promise.resolve(json(200, []));
+    const root = new FakeElement('section');
+    mounted.push(mountShares(root, { sharesUrl: `${JOB_URL}/shares`, jobUrl: JOB_URL, editor: () => ({ version: 4, offset: [0, 0, 0], yaw: 0 }), getCamera: () => null }));
+    await settle();
+    for (const label of [' Source-backed child', ' Malformed child']) {
+      const box = root.findAll((node) => node.tag === 'label' && node.textContent === label)[0].children.find((item) => item.tag === 'input');
+      box.checked = true; box.dispatch('change');
+    }
+    const offered = root.findAll((node) => node.className === 'share-memory-words');
+    assert.equal(offered.length, 1, 'malformed attribution is not offered');
+    assert.equal(offered[0].textContent, 'Alternative “Source-backed child”: “Synthetic source words.”');
+    const text = root.textContent;
+    assert.match(text, /From this place’s written source/);
+    assert.match(text, /Own source; attribution as given by the owner, not verified\./);
+    assert.doesNotMatch(text, /Synthetic other words/);
+  });
 });
 
 describe('full-object visitor view', () => {

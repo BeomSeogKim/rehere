@@ -692,7 +692,8 @@ export function createAppServer({
         return;
       }
       if (!proposalId) {
-        const body = strictBody(await readJsonBody(req), ['requestId', 'baseEraRevision', 'targetId', 'timeMode', 'text', 'consent']);
+        const raw = await readJsonBody(req);
+        const body = strictBody(raw, ['requestId', 'baseEraRevision', 'targetId', 'timeMode', Object.hasOwn(raw ?? {}, 'statementSource') ? 'statementSource' : 'text', 'consent']);
         const { created, proposal } = await collaboration.createVariantProposal(draftId, jobId, current, parentId, body);
         sendJson(res, created ? 202 : 200, proposal);
         return;

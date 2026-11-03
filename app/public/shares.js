@@ -131,6 +131,18 @@ export function previewProblem({ title, views, startViewId, camera, contribution
 
 const STATUS_TEXT = { active: 'Active', revoked: 'Revoked', suspended: 'Suspended', expired: 'Expired' };
 
+// Server-provided attribution of source-backed words, exactly
+// { creator: string|null, originKind, reference: string }; absent for legacy
+// words. A malformed value withholds the words rather than showing them
+// without their attribution.
+const ORIGIN_WORDS = { public: 'Public source', own: 'Own source', other: 'Someone else’s source', unknown: 'Source type not specified' };
+const attributionOf = (words) => {
+  if (!Object.hasOwn(words, 'attribution')) return { valid: true, lines: [] };
+  const a = words.attribution;
+  if (!a || typeof a !== 'object' || !(a.creator === null || typeof a.creator === 'string') || !Object.hasOwn(ORIGIN_WORDS, a.originKind) || typeof a.reference !== 'string') return { valid: false, lines: [] };
+  return { valid: true, lines: [a.creator ? `Attributed to ${a.creator}` : 'From this place’s written source', ...(a.reference ? [a.reference] : []), `${ORIGIN_WORDS[a.originKind]}; attribution as given by the owner, not verified.`] };
+};
+
 function el(tag, { onclick, ...props } = {}, children = []) {
   const node = document.createElement(tag);
   Object.assign(node, props);
@@ -307,7 +319,9 @@ export function mountShares(container, bridge) {
       const variant = (collaboration?.variants ?? []).find((item) => item.id === view.variantId && !item.blocked);
       const words = variant?.shareMemoryWords;
       if (!words || typeof words.proposalId !== 'string' || !/^[0-9a-f]{64}$/.test(words.statementSha256 ?? '') || typeof words.text !== 'string' || !words.text.trim()) return [];
-      return [{ viewId: view.id, proposalId: words.proposalId, statementSha256: words.statementSha256, text: words.text, label: `alternative “${variant.label}”` }];
+      const attribution = attributionOf(words);
+      if (!attribution.valid) return [];
+      return [{ viewId: view.id, proposalId: words.proposalId, statementSha256: words.statementSha256, text: words.text, label: `alternative “${variant.label}”`, attribution: attribution.lines }];
     }) : singlePhotoScene ? selectedViews().flatMap((view) => {
       if (view.kind !== 'version') return [];
       const entry = history.find((item) => item.version === view.version && item.kind === 'proposal' && item.blocked === false);
@@ -327,6 +341,7 @@ export function mountShares(container, bridge) {
       box.setAttribute('aria-describedby', wordsId);
       return el('div', {}, [
         el('p', { id: wordsId, className: 'share-memory-words', textContent: `${item.label[0].toUpperCase()}${item.label.slice(1)}: “${item.text}”` }),
+        ...(item.attribution ?? []).map((line) => el('p', { className: 'hint', textContent: line })),
         el('label', {}, [box, ` Include these words with ${item.label}`]),
       ]);
     }) : [el('p', { className: 'hint', textContent: 'No eligible words are available for the selected views.' })]));

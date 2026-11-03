@@ -4,6 +4,7 @@ import path from 'node:path';
 import { MAX_PCM_BYTES, SAMPLE_RATE, pcmWav } from './audio-derivative.mjs';
 import { OBJECT_IDS, assertObjectsConfirmed, isTwoObject, objectMarker } from './arrangements.mjs';
 import { contributionAllows, dependenciesBlocked } from './collaboration.mjs';
+import { sourceDependencyFields, sourceDependenciesOf } from './memory-links.mjs';
 import { RequestError } from './drafts.mjs';
 import { savedView } from './shares.mjs';
 import { geometrySources } from './geometry-sources.mjs';
@@ -39,6 +40,7 @@ const DECODE_MESSAGES = {
 const BLOCKED = {
   withdrawn: 'This story was withdrawn.',
   photo: 'The photo this story belongs to is no longer available for this use.',
+  written: 'A written source used by this arrangement is no longer available for this use.',
   voice: 'The recording is no longer available for this use.',
   contribution: 'A recollection this arrangement depends on was withdrawn or is not permitted.',
   view: 'The arrangement this story belongs to is no longer available.',
@@ -174,6 +176,7 @@ export class StoryStore {
     if (request.view.kind === 'variant' && resolved.eraRevision !== request.view.eraRevision) {
       throw fail(409, 'The time assertion for this arrangement changed. Review it and try again.');
     }
+    await r.assertSourceDependencies(manifest, resolved);
     if (dependenciesBlocked(manifest, resolved.dependencies)) throw fail(409, BLOCKED.contribution);
     const era = resolved.era && (({ id, requestId, ...rest }) => rest)(resolved.era);
     return {
@@ -182,6 +185,7 @@ export class StoryStore {
         label: resolved.label,
         edit: resolved.edit,
         dependencies: resolved.dependencies,
+        ...sourceDependencyFields(resolved),
         era,
         target: request.targetId ?? STORY_TARGET.id,
         ...(request.targetId && { targetLabel: manifest.objects.find((item) => item.id === request.targetId).label }),
@@ -227,6 +231,7 @@ export class StoryStore {
     for (const photo of context.photos ?? [context.photo]) if (!(await r.sourcePolicies.canUse(draft, photo.sourceId, purpose))) return 'photo';
     if (!voice || voice.sha256 !== context.voice.sha256 || !(await r.sourcePolicies.canUse(draft, voice.id, purpose))) return 'voice';
     if (dependenciesBlocked(manifest, context.dependencies)) return 'contribution';
+    if (await r.sourceDependencyIssue(manifest, context, purpose)) return 'written';
     if (purpose === 'share') {
       const contributions = manifest.collaboration?.contributions ?? [];
       const shareable = (id) => {
@@ -236,7 +241,7 @@ export class StoryStore {
       if (!context.dependencies.every(shareable)) return 'contribution';
     }
     const resolved = savedView(manifest, context.view);
-    if (!resolved) return 'view';
+    if (!resolved || JSON.stringify(sourceDependenciesOf(resolved)) !== JSON.stringify(sourceDependenciesOf(context))) return 'view';
     if (context.edit.fullObject || resolved.edit.fullObject) {
       if (JSON.stringify(context.edit) !== JSON.stringify(resolved.edit) || JSON.stringify(context.dependencies) !== JSON.stringify(resolved.dependencies)) return 'view';
       try {
