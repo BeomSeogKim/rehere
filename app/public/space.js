@@ -92,6 +92,8 @@ function photographedSideControls() {
   return { button: el('button', { type: 'button', className: 'secondary', textContent: 'See photographed side', disabled: true }), status: el('p', { className: 'hint', role: 'status' }) };
 }
 
+const OBJECT_PHOTO_LABEL = 'Photo · The drawn line outlines the selected object; it is not part of the photo.';
+const OBJECT_ESTIMATE_LABEL = 'Estimated shape · Dark areas are unknown: where the selected object covered the photo, and gaps in the estimated room.';
 const SCENE_NOTE = 'A partial scene from one photo. Only surfaces visible in the photo exist: dark gaps, hidden areas and the backs of objects are unknown and left empty. Depth is a relative model estimate, not a measurement.';
 
 function el(tag, { onclick, ...props } = {}, children = []) {
@@ -1528,18 +1530,22 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       const photo = el('img', { className: 'visit-compare-photo', alt: 'Photo copy used for this object estimate', hidden: true });
       const mask = el('img', { className: 'object-review-mask', alt: '', hidden: true });
       mask.setAttribute('aria-hidden', 'true');
+      // The same verified mask drawn again through a display-only filter, so the
+      // selection boundary stays visible over light photographed pixels.
+      const outline = el('img', { className: 'object-review-outline', alt: '', hidden: true });
+      outline.setAttribute('aria-hidden', 'true');
       const wasInteractive = Boolean(viewer?.isInteractive());
       if (wasInteractive) viewer.setInteractive(false, { focus: false });
       viewport.hidden = true;
       cameraActions.hidden = explore.status.hidden = photoSide.status.hidden = true;
-      comparisonFrame.append(holder, photo, mask);
+      comparisonFrame.append(holder, photo, mask, outline);
       const stage = { holder, photo, mask, maskUrl: null, wasInteractive, closed: false };
       const cleanupStage = () => {
         if (stage.closed) return;
         stage.closed = true;
         photo.onload = photo.onerror = mask.onload = mask.onerror = null;
-        photo.hidden = mask.hidden = true;
-        photo.removeAttribute('src'); mask.removeAttribute('src');
+        photo.hidden = mask.hidden = outline.hidden = true;
+        photo.removeAttribute('src'); mask.removeAttribute('src'); outline.removeAttribute('src');
         if (stage.maskUrl) URL.revokeObjectURL(stage.maskUrl);
         stage.maskUrl = null;
         if (objectStageCleanup === cleanupStage) objectStageCleanup = null;
@@ -1583,8 +1589,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         }
         shown = view;
         photo.hidden = view !== 'photo';
-        mask.hidden = view !== 'photo';
-        objectReviewLabel.textContent = view === 'photo' ? 'Photo · The light area marks the selected outline.' : 'Estimated shape · The dark cutout marks the selected photo area; its hidden background is unknown.';
+        mask.hidden = outline.hidden = view !== 'photo';
+        objectReviewLabel.textContent = view === 'photo' ? OBJECT_PHOTO_LABEL : OBJECT_ESTIMATE_LABEL;
         comparisonFrame.classList.toggle('is-photo', view === 'photo');
         photoChoice.setAttribute('aria-pressed', String(view === 'photo'));
         estimateChoice.setAttribute('aria-pressed', String(view === 'estimate'));
@@ -1596,13 +1602,13 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       };
       photoChoice.setAttribute('aria-pressed', 'false');
       estimateChoice.setAttribute('aria-pressed', 'true');
-      objectReviewLabel.textContent = 'Estimated shape · The dark cutout marks the selected photo area; its hidden background is unknown.';
+      objectReviewLabel.textContent = OBJECT_ESTIMATE_LABEL;
       photoChoice.addEventListener('click', () => showObjectView('photo'));
       estimateChoice.addEventListener('click', () => showObjectView('estimate'));
       const hideObjectPhoto = () => {
         if (shown === 'photo' && viewerReady) showObjectView('estimate');
-        photo.hidden = true; mask.hidden = true; photoReady = false; photoChoice.disabled = true; shown = 'estimate';
-        objectReviewLabel.textContent = 'Estimated shape · The dark cutout marks the selected photo area; its hidden background is unknown.';
+        photo.hidden = true; mask.hidden = true; outline.hidden = true; photoReady = false; photoChoice.disabled = true; shown = 'estimate';
+        objectReviewLabel.textContent = OBJECT_ESTIMATE_LABEL;
         comparisonFrame.classList.toggle('is-photo', false);
         photoChoice.setAttribute('aria-pressed', 'false'); estimateChoice.setAttribute('aria-pressed', 'true');
         photoView.disabled = sideView.disabled = !viewerReady;
@@ -1672,6 +1678,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         if (!maskBlob) throw new Error('changed');
         stage.maskUrl = URL.createObjectURL(maskBlob);
         mask.src = stage.maskUrl;
+        outline.src = stage.maskUrl;
         objectPreview.originalView();
         viewerReady = true; estimateChoice.disabled = false; photoView.disabled = false; sideView.disabled = false; exploreObject.attach(objectPreview);
         showObjectView(shown);

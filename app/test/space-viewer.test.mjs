@@ -576,7 +576,10 @@ describe('source-bound full object owner flow', () => {
     view.find((node) => node.tag === 'button' && node.textContent === 'Photo').at(-1).dispatch('click');
     assert.equal(photo.hidden, false);
     assert.equal(mask.hidden, false, 'the checked outline appears over the photo');
-    assert.ok(view.find((node) => node.textContent === 'Photo · The light area marks the selected outline.').length);
+    const stroke = view.find((node) => node.className === 'object-review-outline')[0];
+    assert.equal(stroke.src, mask.src, 'the stroke reuses the verified mask; no other image is made');
+    assert.equal(stroke.hidden, false, 'the stroke appears with the mask');
+    assert.ok(view.find((node) => node.textContent === 'Photo · The drawn line outlines the selected object; it is not part of the photo.').length);
     assert.ok(view.find((node) => node.textContent === 'Choose Estimated shape to use it.' && !node.hidden).length);
     assert.equal(views[0].interactive, false, 'hidden scene cannot keep keyboard interaction');
     assert.equal(explore.disabled, true);
@@ -584,7 +587,8 @@ describe('source-bound full object owner flow', () => {
     view.button('Estimated shape').dispatch('click');
     assert.equal(photo.hidden, true);
     assert.equal(mask.hidden, true);
-    assert.ok(view.find((node) => node.textContent === 'Estimated shape · The dark cutout marks the selected photo area; its hidden background is unknown.').length);
+    assert.equal(stroke.hidden, true, 'the stroke is not drawn over the estimate');
+    assert.ok(view.find((node) => node.textContent === 'Estimated shape · Dark areas are unknown: where the selected object covered the photo, and gaps in the estimated room.').length);
     assert.equal(views[0].interactive, true);
     assert.deepEqual(views[0].options, { focus: false }, 'restoring exploration does not steal focus');
     assert.equal(view.button('Use this estimate at the photo position').disabled, false);
@@ -638,6 +642,7 @@ describe('source-bound full object owner flow', () => {
     await latePhotoLoad();
     assert.equal(photo.hidden, true);
     assert.equal(mask.hidden, true, 'a late outline load cannot reveal withdrawn source');
+    assert.equal(view.find((node) => node.className === 'object-review-outline')[0].hidden, true);
     assert.equal(views[0].disposed, true);
     assert.equal(savedViewport.hidden, true);
     assert.equal(view.button('Use this estimate at the photo position').disabled, true);
@@ -666,10 +671,13 @@ describe('source-bound full object owner flow', () => {
     };
     await openReview();
     const oldMask = view.find((node) => node.className === 'object-review-mask')[0];
+    const oldOutline = view.find((node) => node.className === 'object-review-outline')[0];
+    assert.equal(oldOutline.src, made[0]);
     const lateLoad = oldMask.onload;
     view.button('Leave review').dispatch('click');
     assert.deepEqual(revoked, [made[0]]);
     assert.equal(oldMask.onload, null); assert.equal(oldMask.src, ''); assert.equal(oldMask.hidden, true);
+    assert.equal(oldOutline.src, '', 'the stroke drops the revoked URL with the mask'); assert.equal(oldOutline.hidden, true);
     await openReview();
     const currentMask = view.find((node) => node.className === 'object-review-mask')[0];
     await lateLoad();

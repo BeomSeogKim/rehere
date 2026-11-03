@@ -95,5 +95,21 @@
     </section>
     </div>
   </main>
+  <!-- Display-only stroke around a binary outline mask: the ring between the
+       mask and its dilation, light inside and dark outside, in CSS pixels. -->
+  <svg class="filter-definitions" width="0" height="0" aria-hidden="true" focusable="false">
+    <filter id="object-outline-stroke" color-interpolation-filters="sRGB">
+      <feColorMatrix in="SourceGraphic" type="luminanceToAlpha" result="inside"/>
+      <feMorphology in="inside" operator="dilate" radius="2" result="near"/>
+      <feMorphology in="inside" operator="dilate" radius="4" result="far"/>
+      <feComposite in="near" in2="inside" operator="out" result="inner"/>
+      <feComposite in="far" in2="near" operator="out" result="outer"/>
+      <feFlood flood-color="#ffd23f" result="light"/>
+      <feComposite in="light" in2="inner" operator="in" result="innerRing"/>
+      <feFlood flood-color="#111111" result="dark"/>
+      <feComposite in="dark" in2="outer" operator="in" result="outerRing"/>
+      <feMerge><feMergeNode in="outerRing"/><feMergeNode in="innerRing"/></feMerge>
+    </filter>
+  </svg>
 </body>
 </html>
