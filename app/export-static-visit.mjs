@@ -8,7 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { fetchFromExport, loadEntry, verifyExportFolder } from './judge-entry.mjs';
+import { checkEntryAgainstSnapshot, fetchFromExport, loadEntry, verifyExportFolder } from './judge-entry.mjs';
 import { isComposition } from './public/composition-scene.js';
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -301,7 +301,9 @@ export async function exportStaticVisit({
   const page = pageHtml(await readFile(path.join(publicDir, 'visit.html'), 'utf8'), date, credit, entry !== null);
   if (entry) {
     put('snapshot.html', page);
-    for (const [name, bytes] of (await loadEntry(entry)).files) put(name, bytes);
+    const loaded = await loadEntry(entry);
+    checkEntryAgainstSnapshot(loaded, manifest);
+    for (const [name, bytes] of loaded.files) put(name, bytes);
   } else put('index.html', page);
   const style = await readFile(path.join(publicDir, 'style.css'), 'utf8');
   if (/url\(\s*['"]?\//.test(style)) fail('style.css has a root-absolute url().');

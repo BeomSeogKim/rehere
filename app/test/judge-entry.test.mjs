@@ -7,7 +7,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { exportStaticVisit } from '../export-static-visit.mjs';
-import { checkEntryHtml, fetchFromExport, loadEntry, stripJpegMetadata, verifyExportFolder } from '../judge-entry.mjs';
+import { checkEntryCss, checkEntryHtml, fetchFromExport, loadEntry, stripJpegMetadata, verifyExportFolder } from '../judge-entry.mjs';
 
 const ENTRY = fileURLToPath(new URL('../entry/', import.meta.url));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -93,7 +93,8 @@ describe('the entry page and its pinned photographs', () => {
     bad((h) => h.replace('</body>', '<script>1</script></body>'), /scripts/);
     bad((h) => h.replace('<p class="brand">', '<p style="color:red" class="brand">'), /inline styles/);
     bad((h) => h.replace('https://github.com/BeomSeogKim/rehere"', 'https://example.org/track"'), /approved source/);
-    bad((h) => h.replace('href="entry.css"', 'href="/entry.css"'), /root-absolute/);
+    bad((h) => h.replace('href="entry.css"', 'href="/entry.css"'), /only its own entry\.css/);
+    bad((h) => h.replace('<p class="brand">', '<p class="brand"><a href="/elsewhere">x</a>'), /root-absolute/);
     bad((h) => h.replace('href="snapshot.html?version=Alternative%20arrangement%202"', 'href="other.html"'), /unlisted file/);
     bad((h) => h.replace(/alt="[^"]*"/, 'alt="x"'), /alt text/);
     bad((h) => h.replace('WICKER CHEST AND ROCKING CHAIR', 'A chest and a chair'), /verbatim caption/);
@@ -102,13 +103,39 @@ describe('the entry page and its pinned photographs', () => {
   });
 });
 
+describe('entry page gate against attacker-style forms', () => {
+  it('refuses every way of reaching an unapproved address, however it is quoted or cased', async () => {
+    const { photos } = JSON.parse(await readFile(path.join(ENTRY, 'photos.json'), 'utf8'));
+    const html = await readFile(path.join(ENTRY, 'index.html'), 'utf8');
+    const add = (fragment) => html.replace('<p class="brand">Rehere</p>', `${fragment}<p class="brand">Rehere</p>`);
+    for (const fragment of [
+      '<a HREF="https://evil.example/">x</a>', "<a href='https://evil.example/'>x</a>", '<a href=https://evil.example/>x</a>', '<A Href = "https://evil.example/">x</A>',
+      '<a href="//evil.example/">x</a>', '<a href="mailto:someone@example.com">x</a>', '<a href="javascript:void(0)">x</a>', '<a href="data:text/html,x">x</a>',
+      '<img src="https://tracker.example/p.gif" alt="a tracking pixel for a test">', '<img src="entry/a16.jpg" srcset="https://tracker.example/p.jpg 1x" alt="a photograph for a test">',
+      '<meta http-equiv="refresh" content="0;url=https://evil.example/">', '<link rel="preload" href="https://evil.example/x">', '<link rel="stylesheet" href="https://evil.example/x.css">',
+      '<img src="entry/a16.jpg" onerror ="x()" alt="a photograph for a test">', '<svg/onload="x()"></svg>', '<iframe src="entry/a16.jpg"></iframe>', '<form action="https://evil.example/"></form>', '<base href="https://evil.example/">',
+    ]) assert.throws(() => checkEntryHtml(add(fragment), photos), /inline styles|approved source|http-equiv|only its own|root-absolute|unlisted/, fragment);
+  });
+
+  it('refuses a stylesheet that imports or loads anything', () => {
+    for (const css of ['@import "x.css";', 'a{background:url(https://evil.example/x.png)}', 'a { background : URL ( x.png ) }', 'a{behavior:url(x)}']) assert.throws(() => checkEntryCss(css), /import or load/, css);
+    assert.equal(checkEntryCss('a { color: red; }'), 'a { color: red; }');
+  });
+});
+
 describe('building a site from an earlier export with an entry', () => {
   const TOKEN = `rhv_${'D'.repeat(43)}`;
   const JPEG_PLAIN = jpegWith();
 
-  async function earlierExport() {
-    const viewId = randomUUID();
-    const manifest = { id: randomUUID(), title: 'Synthetic test place', synthetic: true, startViewId: viewId, views: [{ id: viewId, label: 'Original photograph' }], stories: [], contributorPhotos: [], contributorRecordings: [] };
+  const edit = (yaw) => ({ objects: [{ id: 'object-1', offset: [0, 0, 0], yaw: 0 }, { id: 'object-2', offset: [0, 0, 0], yaw }] });
+  const childViews = (overrides = {}) => [
+    { id: randomUUID(), label: 'Alternative arrangement 1', edit: edit(0), evidence: { arrangement: 'alternative' } },
+    { id: randomUUID(), label: 'Alternative arrangement 2', edit: edit((-5 * Math.PI) / 180), evidence: { arrangement: 'memory' }, ...overrides },
+  ];
+
+  async function earlierExport(views = childViews()) {
+    const viewId = views[0].id;
+    const manifest = { id: randomUUID(), title: 'Synthetic test place', synthetic: true, startViewId: viewId, views, stories: [], contributorPhotos: [], contributorRecordings: [] };
     const routes = new Map([['/api/visit', Buffer.from(JSON.stringify(manifest))], [`/api/visit/assets/${viewId}/surface.json`, Buffer.from('{"synthetic":true}')], [`/api/visit/assets/${viewId}/texture.jpg`, JPEG_PLAIN]]);
     const server = http.createServer((req, res) => {
       const body = req.headers.authorization === `Bearer ${TOKEN}` ? routes.get(req.url) : undefined;
@@ -198,6 +225,20 @@ describe('building a site from an earlier export with an entry', () => {
       await writeFile(path.join(entry.dir, 'photos.json'), JSON.stringify(config));
     }), /metadata block/);
     await assert.rejects(run((entry, photos) => rm(path.join(entry.photosDir, photos[2].file))), /ENOENT/);
+  });
+
+  it('refuses an entry whose version link or change claim the snapshot does not back', async () => {
+    const build = async (views) => {
+      const earlier = await earlierExport(views);
+      const { entry } = await entryAndPhotos();
+      return exportStaticVisit({ origin: 'http://snapshot.invalid', token: `rhv_${'H'.repeat(43)}`, outDir: path.join(await tempDir(), 'x'), confirmPublicMaterial: true, fetchImpl: fetchFromExport(earlier), entry });
+    };
+    await assert.rejects(build(childViews().map((view, index) => (index === 1 ? { ...view, label: 'Alternative arrangement 2 \u00b7 Owner revision' } : view))), /no single saved view labelled/);
+    await assert.rejects(build([...childViews(), { id: randomUUID(), label: 'Alternative arrangement 2', edit: edit(0), evidence: { arrangement: 'memory' } }]), /no single saved view labelled/);
+    await assert.rejects(build(childViews({ edit: edit((-10 * Math.PI) / 180) })), /does not record a 5 degree turn/);
+    await assert.rejects(build(childViews({ edit: edit(0) })), /does not record a 5 degree turn/);
+    await assert.rejects(build(childViews({ evidence: { arrangement: 'alternative' } })), /not recorded as memory/);
+    await assert.doesNotReject(build(childViews()));
   });
 
   it('serves only the files an earlier export wrote and answers everything else with 404', async () => {

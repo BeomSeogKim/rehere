@@ -46,5 +46,11 @@
       "height": 1546,
       "alt": "Black-and-white photograph of a wicker chest of drawers and a rocking chair side by side."
     }
-  ]
+  ],
+  "route": {
+    "label": "Alternative arrangement 2",
+    "objectId": "object-2",
+    "turnDegrees": 5,
+    "arrangement": "memory"
+  }
 }

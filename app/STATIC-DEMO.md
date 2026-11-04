@@ -96,6 +96,14 @@ button text>` opens it on that version, and it links back to the entry.
   `app/entry/photos.json`. The export refuses an entry page that has inline
   styles, scripts, event handlers, a link outside the listed sources, an image
   without alt text, or a missing caption or source link.
+- The gate reads every tag's attributes whatever the quoting or letter case,
+  refuses a meta refresh, a form, a frame, an SVG, `mailto:` and protocol-relative
+  links, and refuses an `entry.css` that imports or loads anything.
+- The export checks the entry against the snapshot it is built with: every
+  `snapshot.html?version=` link must name exactly one saved view, and the change
+  the copy describes (the turn of one object, recorded as an owner-approved
+  arrangement) must be recorded in that view. Otherwise the export fails instead
+  of shipping a link that opens the wrong view or a claim the data does not back.
 - The photographs are never committed. `node app/fetch-entry-photos.mjs <new
   folder>` downloads each pinned Commons JPEG derivative of the Library of
   Congress scan, checks its SHA-256, removes the Exif block without touching the

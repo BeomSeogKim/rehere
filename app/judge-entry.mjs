@@ -38,39 +38,90 @@ const ALLOWED_LINKS = [
   /^https:\/\/github\.com\/BeomSeogKim\/rehere\/blob\/main\/LICENSE$/,
 ];
 
-export function checkEntryHtml(html, photos) {
-  if (/<style[\s>]|\sstyle=|<script[\s>]|\son[a-z]+=/i.test(html)) fail('The entry page must not carry inline styles, scripts or event handlers.');
-  if (/(?:href|src)="\/(?!\/)/.test(html)) fail('The entry page has a root-absolute reference.');
-  for (const [, url] of html.matchAll(/href="(https?:[^"]+)"/g)) {
-    const plain = url.replace(/&amp;/g, '&');
-    if (!ALLOWED_LINKS.some((rule) => rule.test(plain))) fail(`The entry page links to an address that is not an approved source: ${url}`);
+// Reads every start tag's attributes whatever the quoting or letter case, so a check cannot be skipped by writing HREF, single
+// quotes or no quotes. Returns [{ tag, attrs: Map(lowercase name -> value) }].
+function startTags(html) {
+  const tags = [];
+  for (const [, tag, body] of html.matchAll(/<([a-zA-Z][^\s/>]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g)) {
+    const attrs = new Map();
+    for (const [, name, dq, sq, bare] of body.matchAll(/([^\s"'=<>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) attrs.set(name.toLowerCase(), dq ?? sq ?? bare ?? '');
+    tags.push({ tag: tag.toLowerCase(), attrs });
   }
-  for (const [, target] of html.matchAll(/(?:href|src)="(?!https?:|#|mailto:)([^"]+)"/g)) {
-    const file = target.split(/[?#]/)[0];
-    if (!['', 'snapshot.html', 'entry.css'].includes(file) && !photos.some((photo) => `entry/${photo.file}` === file)) fail(`The entry page points to an unlisted file: ${target}`);
+  return tags;
+}
+
+const BLOCKED_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed', 'form', 'base', 'svg', 'math', 'frame', 'frameset', 'applet']);
+const BLOCKED_ATTRS = new Set(['style', 'srcset', 'action', 'formaction', 'data', 'ping', 'poster', 'background', 'xlink:href']);
+
+export function checkEntryHtml(html, photos) {
+  const tags = startTags(html);
+  for (const { tag, attrs } of tags) {
+    if (BLOCKED_TAGS.has(tag) || [...attrs.keys()].some((name) => name.startsWith('on') || BLOCKED_ATTRS.has(name))) fail('The entry page must not carry inline styles, scripts or event handlers.');
+    if (tag === 'meta' && attrs.has('http-equiv')) fail('The entry page must not carry a meta http-equiv (for example a refresh).');
+    if (tag === 'link' && !(attrs.get('rel')?.toLowerCase() === 'stylesheet' && attrs.get('href') === 'entry.css')) fail('The entry page may link only its own entry.css.');
+  }
+  if (/<style[\s>]|<script[\s>]/i.test(html)) fail('The entry page must not carry inline styles, scripts or event handlers.');
+  for (const { tag, attrs } of tags) {
+    for (const name of ['href', 'src']) {
+      if (!attrs.has(name)) continue;
+      const value = attrs.get(name).replace(/&amp;/g, '&').trim();
+      if (/^\/(?!\/)/.test(value)) fail('The entry page has a root-absolute reference.');
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value)) {
+        if (name !== 'href' || tag !== 'a' || !ALLOWED_LINKS.some((rule) => rule.test(value))) fail(`The entry page links to an address that is not an approved source: ${value}`);
+      } else if (value.startsWith('#')) {
+        continue;
+      } else {
+        const file = value.split(/[?#]/)[0];
+        const known = ['', 'snapshot.html', 'entry.css'].includes(file) || photos.some((photo) => `entry/${photo.file}` === file);
+        if (!known) fail(`The entry page points to an unlisted file: ${value}`);
+      }
+    }
   }
   for (const photo of photos) {
     if (!html.includes(`src="entry/${photo.file}"`)) fail(`The entry page does not show ${photo.file}.`);
     if (!html.includes(photo.caption)) fail(`The entry page lacks the verbatim caption of ${photo.hbs}.`);
     if (!html.includes(photo.locUrl) || !html.includes(photo.commonsUrl)) fail(`The entry page lacks the source links of ${photo.hbs}.`);
   }
-  if ([...html.matchAll(/<img\b[^>]*>/g)].some(([tag]) => !/\salt="[^"]{12,}"/.test(tag))) fail('Every entry image needs descriptive alt text.');
+  if (tags.filter(({ tag }) => tag === 'img').some(({ attrs }) => (attrs.get('alt') ?? '').length < 12)) fail('Every entry image needs descriptive alt text.');
   if (!/<html lang="en"/.test(html) || !/<title>[^<]{8,}<\/title>/.test(html) || !/name="viewport"/.test(html)) fail('The entry page needs lang, title and viewport.');
   return html;
+}
+
+// The stylesheet may not fetch anything: no @import and no url().
+export function checkEntryCss(css) {
+  if (/@import|url\s*\(|expression\s*\(|behavior\s*:/i.test(css)) fail('entry.css must not import or load anything.');
+  return css;
+}
+
+// The page's claims about the snapshot are checked against the snapshot it is built with: every version link must name exactly one
+// saved view, and the change the copy describes must be recorded in that view.
+export function checkEntryAgainstSnapshot({ html, route }, manifest) {
+  const labels = (manifest.views ?? []).map((view) => view.label);
+  const linked = [...html.matchAll(/snapshot\.html\?version=([^"&#]+)/g)].map((match) => decodeURIComponent(match[1]));
+  if (!linked.length) fail('The entry page has no version link into the snapshot.');
+  for (const label of linked) {
+    if (label !== route.label) fail(`The entry links to "${label}", but the entry route names "${route.label}".`);
+    if (labels.filter((item) => item === label).length !== 1) fail(`The snapshot has no single saved view labelled "${label}", so the version link would not open it.`);
+  }
+  const view = manifest.views.find((item) => item.label === route.label);
+  const turn = view.edit?.objects?.find((object) => object.id === route.objectId)?.yaw;
+  if (typeof turn !== 'number' || Math.abs(Math.abs((turn * 180) / Math.PI) - route.turnDegrees) > 0.01) fail(`The view "${route.label}" does not record a ${route.turnDegrees} degree turn of ${route.objectId}.`);
+  if (view.evidence?.arrangement !== route.arrangement) fail(`The view "${route.label}" is not recorded as ${route.arrangement}.`);
 }
 
 // Loads the hand-written entry (index.html, entry.css, photos.json) and the prepared, hash-pinned photo files.
 export async function loadEntry({ dir, photosDir }) {
   const config = JSON.parse(await readFile(path.join(dir, 'photos.json'), 'utf8'));
   const html = checkEntryHtml(await readFile(path.join(dir, 'index.html'), 'utf8'), config.photos);
-  const files = new Map([['index.html', Buffer.from(html)], ['entry.css', await readFile(path.join(dir, 'entry.css'))]]);
+  const css = checkEntryCss(await readFile(path.join(dir, 'entry.css'), 'utf8'));
+  const files = new Map([['index.html', Buffer.from(html)], ['entry.css', Buffer.from(css)]]);
   for (const photo of config.photos) {
     const bytes = await readFile(path.join(photosDir, photo.file));
     if (bytes.length !== photo.bytes || sha256(bytes) !== photo.sha256) fail(`${photo.file} differs from its pinned size or SHA-256.`);
     if (bytes.includes(Buffer.from('Exif\0\0', 'latin1'))) fail(`${photo.file} still carries a metadata block.`);
     files.set(`entry/${photo.file}`, bytes);
   }
-  return { files, photos: config.photos };
+  return { files, photos: config.photos, html, route: config.route };
 }
 
 // A fetch that answers the visitor routes from the data folder of an earlier export. Only files that export wrote are served.
