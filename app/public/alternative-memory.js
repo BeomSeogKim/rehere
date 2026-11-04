@@ -217,7 +217,7 @@ export function mountAlternativeMemory(container, bridge) {
       if (proposal.result?.action === 'face_anchor' && bridge.textureUrl && Array.isArray(proposal.result.anchor?.point)) {
         const marker = el('span', { className: 'anchor-marker' });
         marker.style.left = `${proposal.result.anchor.point[0] * 100}%`; marker.style.top = `${proposal.result.anchor.point[1] * 100}%`;
-        nodes.push(el('figure', { className: 'anchor-figure' }, [el('div', { className: 'anchor-frame' }, [el('img', { src: bridge.textureUrl, alt: 'Source photo with the proposed point marked' }), marker]), el('figcaption', { className: 'hint', textContent: 'The model proposed this point in the source photo. Its direction still relies on estimated depth; inspect the actual preview.' })]));
+        nodes.push(el('figure', { className: 'anchor-figure' }, [el('div', { className: 'anchor-frame' }, [el('img', { src: bridge.textureUrl, alt: 'Source photo with the proposed point marked' }), marker]), el('figcaption', { className: 'hint', textContent: `${proposal.mode === 'simulated' ? 'The simulated answer' : 'The model'} proposed this point in the source photo. Its direction still relies on estimated depth; inspect the actual preview.` })]));
       }
       if (problem) nodes.push(el('p', { className: 'hint', textContent: problem }));
       if (previewed && face) {

@@ -82,7 +82,7 @@ export function modelEvidence(proposal) {
         heading: `Replayed answer from ${model}, recorded ${recordedTime(proposal.recordedAt)}`,
         lines: [
           `${response} · ${latencyText(proposal.latencyMs)} when recorded`,
-          `This exact request was answered live once and saved unchanged; replaying it sent nothing and cost nothing.${spent ? ` The recorded request cost ${spent}.` : ''}`,
+          `A live response to this exact request was recorded and saved unchanged; replaying it sent nothing and cost nothing.${spent ? ` The recorded request cost ${spent}.` : ''}`,
         ],
       };
     }
@@ -117,13 +117,13 @@ export function proposalTitle(result) {
 export function proposalStatusText(proposal) {
   switch (proposal.status) {
     case 'queued':
-      return 'Waiting to send your memory to Meta.';
+      return 'Waiting to plan a change from your memory.';
     case 'processing':
-      return 'Meta is reading your memory and the photo.';
+      return 'Planning a change from your memory and the photo.';
     case 'ready':
       return 'A change is proposed. Nothing has changed yet.';
     case 'clarify':
-      return 'Meta needs more detail before proposing a change.';
+      return proposal.mode === 'simulated' ? 'The simulated answer asks for more detail before proposing a change.' : 'Meta needs more detail before proposing a change.';
     case 'failed':
       return `No change was proposed. ${proposal.error || 'The request did not finish.'}`;
     case 'canceled':
@@ -583,7 +583,7 @@ export function mountMemoryEdit(container, bridge) {
     }
     const question = current.question ?? current.result?.question;
     if (current.status === 'clarify' && question) {
-      nodes.push(el('p', {}, [el('strong', { textContent: 'Meta asks: ' }), question]));
+      nodes.push(el('p', {}, [el('strong', { textContent: current.mode === 'simulated' ? 'Simulated question: ' : 'Meta asks: ' }), question]));
       nodes.push(el('p', { className: 'hint', textContent: 'Add the missing detail to your message above and plan again.' }));
     }
     if (current.status === 'ready' && current.result?.transform) {
@@ -618,7 +618,7 @@ export function mountMemoryEdit(container, bridge) {
             ]),
             el('figcaption', {
               className: 'hint',
-              textContent: `Proposed point: “${result.anchor.label}”. Meta picked this point in the photo; it is a candidate, not a confirmed observation.`,
+              textContent: `Proposed point: “${result.anchor.label}”. ${current.mode === 'simulated' ? 'The simulated answer' : 'Meta'} picked this point in the photo; it is a candidate, not a confirmed observation.`,
             }),
           ]),
           el('p', {

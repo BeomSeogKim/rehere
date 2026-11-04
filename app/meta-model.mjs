@@ -402,6 +402,8 @@ export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, time
       try {
         generated = await sending.value;
       } catch {
+        // A request that got no HTTP answer records no mode or latency; only
+        // its retained reservation shows it may have been charged.
         return combined.aborted ? stopped() : failure('provider');
       }
       const latencyMs = Math.round(performance.now() - started);

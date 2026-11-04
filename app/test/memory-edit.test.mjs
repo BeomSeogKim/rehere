@@ -289,7 +289,7 @@ describe('memory proposal panel', () => {
     state.proposals = [proposal({ status: 'queued', result: null, model: null, usage: null })];
     posts[0].respond(json(202, proposal({ status: 'queued', result: null, model: null, usage: null })));
     await settle();
-    assert.match(view.container.textContent, /Meta is reading your memory/);
+    assert.match(view.container.textContent, /Planning a change from your memory and the photo/);
     assert.ok(view.button('Cancel planning'));
     state.proposalGet = () => json(200, proposal({ updatedAt: '2026-10-31T00:00:02.000Z' }));
 
@@ -679,6 +679,29 @@ describe('saved proposals chooser', () => {
     view.handle.dispose();
   });
 
+  it('never attributes a simulated question or facing point to Meta', async () => {
+    state.proposals = [{ ...clarifyA(), mode: 'simulated', model: null, usage: null }];
+    let view = mount();
+    await settle();
+    assert.match(view.container.textContent, /The simulated answer asks for more detail before proposing a change\./);
+    assert.match(view.container.textContent, /Simulated question: Which window\?/);
+    assert.doesNotMatch(view.container.textContent, /Meta asks|Meta needs/);
+    view.handle.dispose();
+
+    state.proposals = [readyB({ mode: 'simulated', model: null, usage: null, result: faceAnchor(ID_B, 'window') })];
+    view = mount();
+    await settle();
+    assert.match(view.container.textContent, /Proposed point: “window”\. The simulated answer picked this point in the photo/);
+    assert.doesNotMatch(view.container.textContent, /Meta picked/);
+    view.handle.dispose();
+
+    state.proposals = [readyB({ mode: 'live', responseId: 'resp_live_2', latencyMs: 900, result: faceAnchor(ID_B, 'window') })];
+    view = mount();
+    await settle();
+    assert.match(view.container.textContent, /Meta picked this point in the photo/);
+    view.handle.dispose();
+  });
+
   it('ends a preview when another proposal is chosen, so its guide and front check must be done again', async () => {
     state.proposals = [readyB({ id: ID_C, result: faceAnchor(ID_C, 'window'), statement: statement('Facing the window.') }), readyB({ result: faceAnchor(ID_B, 'door') })];
     const view = mount();
@@ -773,7 +796,7 @@ describe('saved proposals chooser', () => {
     state.proposalGet = () => json(200, proposal({ status: 'processing', result: null, updatedAt: '2026-10-31T11:00:01.000Z' }));
     live.dispatch('click');
     await settle();
-    assert.match(view.container.textContent, /Meta is reading your memory/);
+    assert.match(view.container.textContent, /Planning a change from your memory and the photo/);
     assert.ok(view.button('Cancel planning'));
     assert.equal(pick(view, 'toward the door').disabled, true, 'historical proposals wait');
     view.handle.dispose();
@@ -935,7 +958,7 @@ describe('saved proposals chooser', () => {
     await view.handle.refresh();
     polls[0](json(200, proposal({ status: 'queued', result: null, updatedAt: '2026-10-31T00:00:01.000Z' })));
     await settle();
-    assert.match(view.container.textContent, /Meta is reading your memory/, 'the older answer changes nothing');
+    assert.match(view.container.textContent, /Planning a change from your memory and the photo/, 'the older answer changes nothing');
     state.proposalGet = () => json(200, proposal({ updatedAt: '2026-10-31T00:00:09.000Z' }));
     await new Promise((resolve) => setTimeout(resolve, 2100));
     await settle();

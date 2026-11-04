@@ -166,7 +166,7 @@ describe('memory proposals for the selected alternative', () => {
     assert.equal(review.attributes['data-kind'], 'guessed');
     const evidence = () => ui.find((node) => node.className === 'model-evidence')[0];
     assert.equal(evidence().attributes['data-mode'], 'recorded');
-    assert.match(evidence().textContent, /Replayed answer from muse-spark-1\.3, recorded 2026-11-04 03:00 UTC.*Meta response ID resp_rec_1 · 2,345 ms when recorded.*sent nothing and cost nothing/);
+    assert.match(evidence().textContent, /Replayed answer from muse-spark-1\.3, recorded 2026-11-04 03:00 UTC.*Meta response ID resp_rec_1 · 2,345 ms when recorded.*A live response to this exact request was recorded and saved unchanged; replaying it sent nothing and cost nothing/);
     assert.match(review.textContent, /Proposal \(AI suggestion\): Move the selected object \(A: Counter\)/);
     assert.match(review.textContent, /Reason given: The memory says it was higher\./);
 
@@ -175,6 +175,12 @@ describe('memory proposals for the selected alternative', () => {
     assert.equal(evidence().attributes['data-mode'], 'simulated');
     assert.match(evidence().textContent, /SIMULATED answer, not from Meta/);
     assert.match(ui.find((node) => node.className === 'alternative-memory-review')[0].textContent, /Proposal \(SIMULATED, not from Meta\): Move the selected object/);
+
+    ui = await mount('legacy'); await memory(ui);
+    await plan(ui, 'face_anchor', (value) => ({ ...value, mode: 'simulated', model: null, responseId: null, usage: null, latencyMs: null }));
+    const caption = ui.find((node) => node.tag === 'figcaption')[0].textContent;
+    assert.match(caption, /^The simulated answer proposed this point in the source photo\./);
+    assert.doesNotMatch(caption, /The model/);
   });
 
   for (const mismatch of ['requestId', 'era', 'time', 'target', 'missing id']) it(`keeps a mismatched create ${mismatch} response unclear and retries exactly`, async () => {
