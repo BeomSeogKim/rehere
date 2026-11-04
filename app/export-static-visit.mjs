@@ -183,7 +183,7 @@ function inspectManifest(value, location = 'manifest', links = new Set()) {
       } catch {
         fail(`${location} holds a malformed link.`);
       }
-      if (!['http', 'https'].includes(scheme) || /^(?:localhost|\[?::1\]?|127\..*|10\..*|192\.168\..*|169\.254\..*|172\.(?:1[6-9]|2\d|3[01])\..*|.*\.local)$/i.test(host)) fail(`${location} holds a link to a local or non-web address.`);
+      if (!['http', 'https'].includes(scheme) || /^(?:localhost|localhost\.|0\.0\.0\.0|\[?::1\]?|\[::\]|\[::ffff:[^\]]*\]|127\..*|10\..*|192\.168\..*|169\.254\..*|172\.(?:1[6-9]|2\d|3[01])\..*|.*\.local)$/i.test(host)) fail(`${location} holds a link to a local or non-web address.`);
       links.add(match[0]);
     }
     if (/^(?:javascript|data|file|blob):/i.test(value.trim())) fail(`${location} holds a script or data link.`);

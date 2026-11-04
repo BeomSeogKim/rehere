@@ -310,7 +310,7 @@ describe('static visitor export', () => {
   });
 
   it('rejects file paths and local links in the manifest and reports other links for review', async () => {
-    for (const title of ['../../owner/secret', '/etc/hosts', 'See http://127.0.0.1:4317/owner', 'file:///tmp/x']) {
+    for (const title of ['../../owner/secret', '/etc/hosts', 'See http://127.0.0.1:4317/owner', 'file:///tmp/x', 'See http://0.0.0.0:4318/owner', 'See http://[::]/owner', 'See http://localhost./owner', 'See http://[::ffff:127.0.0.1]/owner']) {
       const { routes } = snapshot({ manifest: { title } });
       await withVisitor(routes, async (origin) => {
         await assert.rejects(exportInto(origin), /holds a (?:file path|link)/, title);
