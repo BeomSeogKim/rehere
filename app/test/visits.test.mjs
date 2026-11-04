@@ -295,6 +295,33 @@ describe('visitor screen', () => {
     v.view.dispose();
   });
 
+  it('attributes a corrected legacy outline beside the photo, memory and retained model estimate', async () => {
+    const data = { ...manifest(), outline: { kind: 'owner-corrected' } };
+    const v = open(source({ manifest: async () => data }));
+    await flush();
+    const strip = v.find((node) => node.className === 'visit-evidence-strip')[0];
+    const note = 'Outline: corrected by the owner; depth remains the existing model estimate.';
+    assert.ok(strip.children.some((node) => node.tag === 'p' && node.textContent === note && !node.hidden));
+    assert.match(strip.textContent, /Photo: provided by Owner/);
+    assert.match(strip.textContent, /Memory: synthetic demonstration/);
+    assert.match(strip.textContent, /Model: shape and depth are estimates; unseen surfaces stay empty/);
+    assert.doesNotMatch(strip.textContent, /verified outline|complete silhouette|new model|historical truth/);
+    v.button('Mina’s recollection').dispatch('click');
+    assert.ok(strip.textContent.includes(note));
+    v.view.dispose();
+  });
+
+  for (const [label, outline] of [['absent', undefined], ['unknown', { kind: 'unknown' }], ['model-proposed', { kind: 'model-proposed' }]]) {
+    it(`does not attribute an owner correction for an ${label} outline`, async () => {
+      const data = { ...manifest(), outline };
+      const v = open(source({ manifest: async () => data }));
+      await flush();
+      const strip = v.find((node) => node.className === 'visit-evidence-strip')[0];
+      assert.doesNotMatch(strip.textContent, /Outline: corrected by the owner/);
+      v.view.dispose();
+    });
+  }
+
   it('describes one-object saved pose differences without asserting history or a remembered cause', async () => {
     const v = open(source());
     await flush();
@@ -807,6 +834,18 @@ describe('saved arrangement differences for visitors', () => {
   const choose = (v, label) => v.button(label).dispatch('click');
   const items = (v) => v.find((node) => node.tag === 'li' && /^(A|B): |^Rule: /.test(node.textContent)).map((node) => node.textContent);
   const NOTE = /These are differences between saved arrangements\. They do not establish when or whether the place changed/;
+
+  it('keeps corrected two-object attribution in the object evidence', async () => {
+    const v = mount(views(), { outline: { kind: 'owner-corrected' } });
+    await flush();
+    assert.equal(v.states.at(-1), '3d');
+    const strip = v.find((node) => node.className === 'visit-evidence-strip')[0];
+    assert.doesNotMatch(strip.textContent, /Outline: corrected by the owner/);
+    v.button('A: Counter').dispatch('click');
+    const evidence = v.find((node) => node.className === 'object-evidence')[0];
+    assert.match(evidence.textContent, /owner-made outline correction; the depth remains a model estimate/);
+    v.view.dispose();
+  });
 
   it('names the published start as baseline and shows an X-only change with the exact turn kept as unchanged', async () => {
     const xOnly = arrangement({ offset: [0.35, 0, 0.2], yaw: YAW }, { offset: [0.5, 0, 0], yaw: 0 });

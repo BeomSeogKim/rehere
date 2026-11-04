@@ -594,6 +594,7 @@ export function mountVisitor(container, source, { onState = () => {}, limitedPho
         ...photos.map((photo) => originLine('seen', `Photo${photo.objectId ? ` (${nameOf(photo.objectId)})` : ''}: provided by ${photo.providerLabel || 'an unnamed provider'}.`)),
         ...(!photos.length ? [originLine('seen', 'Photo attribution is not recorded for this view.')] : []),
         originLine('remembered', manifest.synthetic ? 'Memory: synthetic demonstration; any shared words or voices are not witness accounts.' : 'Memory: any shared words or voices are attributed accounts, not verified history.'),
+        ...(correctedOutline && !objects && !composition && !fullObject ? [el('p', { textContent: 'Outline: corrected by the owner; depth remains the existing model estimate.' })] : []),
         originLine('guessed', `Model: ${fullObject ? 'shape, depth and unseen object sides are estimates' : composition ? 'shape and depth are estimates; layout and scale are owner assumptions' : 'shape and depth are estimates; unseen surfaces stay empty'}.${view.evidence?.arrangement === 'memory' ? ' This saved view includes an owner-approved model proposal.' : ''}`),
       );
       const quotes = view.evidence?.recollections ?? [];
