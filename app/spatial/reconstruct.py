@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sys
 import time
 import unicodedata
@@ -21,6 +22,15 @@ import warnings
 
 DEPTH_MODEL = {"id": "depth-anything/Depth-Anything-V2-Small-hf", "revision": "5426e4f0f36572d16453bbda7a8389317b1bef99", "license": "Apache-2.0"}
 MASK_MODEL = {"id": "facebook/sam2.1-hiera-tiny", "revision": "de431c4043854a71d8101e17995dfe596bf101a5", "license": "Apache-2.0"}
+# Optional hosted outlines: the server requests and selects them; this worker
+# only decodes the two selected records with the pinned official parser.
+HOSTED_MASK_MODEL = {"id": "sam-3.1", "label": "SAM 3.1 (Meta Model API)", "provider": "Meta Model API"}
+MAX_SEGMENTATION_BYTES = 16 * 1024 * 1024
+_INT = r"(0|[1-9][0-9]{0,6})"
+_DEC = r"([01](?:\.[0-9]{1,20})?)"
+SEGMENTATION_RECORD = re.compile(
+    rf"^{_INT}<\|box;x1={_INT};y1={_INT};x2={_INT};y2={_INT};w={_INT};h={_INT}(?:;c={_DEC})?\|>"
+    rf"<\|mask;x=0;y=0(?:;c={_DEC})?;data={_INT},{_INT},([~!])([!-{{}}~]*)\|>$")
 MAX_PIXELS = 32_000_000
 GRID_WIDTH = 256
 MAX_GRID_CELLS = 262_144
@@ -110,7 +120,12 @@ def parse_args(argv=None):
     selection.add_argument("--objects", type=_objects, help='JSON: [{"label": ..., "box": [x1, y1, x2, y2]}, two entries]')
     selection.add_argument("--box", nargs=4, type=_finite_float, metavar=("X1", "Y1", "X2", "Y2"),
                         help="object box in pixels of the decoded image before any EXIF rotation")
-    return parser.parse_args(argv)
+    parser.add_argument("--segmentation", type=Path,
+                        help="server-written JSON of the two selected SAM 3.1 records; replaces local SAM2 (with --objects only)")
+    args = parser.parse_args(argv)
+    if args.segmentation is not None and args.objects is None:
+        parser.error("--segmentation needs --objects")
+    return args
 
 
 def validate_box(box, width, height):
@@ -348,6 +363,66 @@ def check_output(path):
         raise InputError(f"cannot inspect output path {path}: {error.strerror or error}") from None
 
 
+def load_segmentation(path, objects, width, height):
+    """Decoded full-frame masks and provenance from the server's selection file.
+
+    Every record must be the one the server selected for that object's box,
+    in this exact photo's frame. Nothing in it names a file or is executed.
+    """
+    import numpy as np
+
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_SEGMENTATION_BYTES + 1)
+        if len(raw) > MAX_SEGMENTATION_BYTES:
+            raise InputError("segmentation file is too large")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        raise InputError("segmentation file could not be read") from None
+    if not (isinstance(data, dict) and set(data) == {"model", "label", "objects"} and data["model"] == HOSTED_MASK_MODEL["id"]
+            and data["label"] == HOSTED_MASK_MODEL["label"] and isinstance(data["objects"], list) and len(data["objects"]) == len(objects)):
+        raise InputError("segmentation file does not describe this build")
+    try:
+        import meta_sam_parser as parser
+    except ImportError:
+        raise UnavailableError("missing dependency (meta_sam_parser); install requirements.txt into an isolated Python 3.12 environment") from None
+    masks, provenance = [], []
+    for item, entry in zip(objects, data["objects"]):
+        if not (isinstance(entry, dict) and set(entry) == {"id", "prompt", "record", "provenance"} and entry["id"] == item["id"]
+                and entry["prompt"] == item["label"] and isinstance(entry["record"], str) and isinstance(entry["provenance"], dict)):
+            raise InputError("segmentation entry does not match its object")
+        info = entry["provenance"]
+        selection = info.get("selection")
+        match = SEGMENTATION_RECORD.match(entry["record"])
+        if not match or info.get("id") != item["id"] or not isinstance(selection, dict):
+            raise InputError("segmentation record is malformed")
+        number, x1, y1, x2, y2, w, h, *_rest = (int(value) if value and value.isdigit() else value for value in match.groups())
+        mask_h, mask_w = int(match.group(10)), int(match.group(11))
+        if (w, h) != (width, height) or not (0 <= x1 <= x2 < width and 0 <= y1 <= y2 < height):
+            raise InputError("segmentation record does not fit this photo")
+        if (mask_w, mask_h) != (x2 - x1 + 1, y2 - y1 + 1):
+            raise InputError("segmentation mask does not match its box")
+        if selection.get("selectedInstance") != number or selection.get("selectedBox") != [x1, y1, x2 + 1, y2 + 1] or selection.get("ownerBox") != item["box_xyxy"]:
+            raise InputError("segmentation selection does not match its record")
+        state = parser.image_segmentation_format().create_parser()
+        state.push("<0f>" + entry["record"])
+        result = state.finish(parser.CompletedOutcome()).result
+        records = [record for record in result.records if record.kind == "mask"]
+        # Diagnostics quote provider text, so only their count is used.
+        if result.diagnostics or len(records) != 1:
+            raise InputError("segmentation record could not be decoded")
+        mask = records[0].mask
+        try:
+            raster = np.frombuffer(parser.decode_mask_to_raster(mask), np.uint8).reshape(mask.height, mask.width)
+        except (parser.InvalidSegmentationMaskError, ValueError):
+            raise InputError("segmentation mask could not be decoded") from None
+        full = np.zeros((height, width), bool)
+        full[y1:y2 + 1, x1:x2 + 1] = raster.astype(bool)
+        masks.append(full)
+        provenance.append(info)
+    return masks, provenance
+
+
 def _load_models():
     # Set before importing transformers so no code path can reach the network.
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -374,7 +449,7 @@ def _encode(image, fmt, **options):
     return buffer.getvalue()
 
 
-def reconstruct(image_path, output, source_id, box=None, objects=None):
+def reconstruct(image_path, output, source_id, box=None, objects=None, segmentation=None):
     started = time.perf_counter()
     try:
         data = image_path.read_bytes()
@@ -412,7 +487,7 @@ def reconstruct(image_path, output, source_id, box=None, objects=None):
     depth, normalized = pseudo_depth(raw)
     if objects is not None:
         return _reconstruct_objects(
-            torch=torch, Sam2Model=Sam2Model, Sam2Processor=Sam2Processor, rgb=rgb, objects=objects, data=data, output=output,
+            torch=torch, Sam2Model=Sam2Model, Sam2Processor=Sam2Processor, rgb=rgb, objects=objects, data=data, output=output, segmentation=segmentation,
             source_id=source_id, source_format=source_format, orientation=orientation, grid=(grid_width, grid_height),
             depth=depth, normalized=normalized, depth_device=depth_device, depth_seconds=depth_seconds, started=started,
         )
@@ -505,21 +580,25 @@ def _assumptions():
 
 
 def _reconstruct_objects(*, torch, Sam2Model, Sam2Processor, rgb, objects, data, output, source_id, source_format, orientation,
-                         grid, depth, normalized, depth_device, depth_seconds, started):
-    """Second half of reconstruct() for two objects: one batched SAM2 pass."""
+                         grid, depth, normalized, depth_device, depth_seconds, started, segmentation=None):
+    """Second half of reconstruct() for two objects: one batched SAM2 pass, or the selected SAM 3.1 records."""
     from PIL import Image
     import numpy as np
 
     grid_width, grid_height = grid
-    mask_processor = _pretrained(Sam2Processor, MASK_MODEL)
-    mask_model = _pretrained(Sam2Model, MASK_MODEL, use_safetensors=True).eval()
-    mask_inputs = mask_processor(images=rgb, input_boxes=[[item["box_xyxy"] for item in objects]], return_tensors="pt")
+    hosted = None
     mask_started = time.perf_counter()
-    with torch.inference_mode():
-        result = mask_model(**mask_inputs, multimask_output=False)
-    masks = mask_processor.post_process_masks(result.pred_masks.cpu(), mask_inputs["original_sizes"].cpu())[0][:, 0].numpy().astype(bool)
+    if segmentation is not None:
+        masks, hosted = load_segmentation(segmentation, objects, *rgb.size)
+    else:
+        mask_processor = _pretrained(Sam2Processor, MASK_MODEL)
+        mask_model = _pretrained(Sam2Model, MASK_MODEL, use_safetensors=True).eval()
+        mask_inputs = mask_processor(images=rgb, input_boxes=[[item["box_xyxy"] for item in objects]], return_tensors="pt")
+        with torch.inference_mode():
+            result = mask_model(**mask_inputs, multimask_output=False)
+        masks = mask_processor.post_process_masks(result.pred_masks.cpu(), mask_inputs["original_sizes"].cpu())[0][:, 0].numpy().astype(bool)
+        del mask_model, mask_inputs
     mask_seconds = time.perf_counter() - mask_started
-    del mask_model, mask_inputs
     regions_full, overlap = combine_masks(masks[0], masks[1])
     levels = mask_levels(regions_full)
     regions = grid_regions(levels, grid_width, grid_height)
@@ -562,11 +641,12 @@ def _reconstruct_objects(*, torch, Sam2Model, Sam2Processor, rgb, objects, data,
         "mask_legend": {str(level): ("void" if region == VOID else "background" if region == 0 else OBJECT_IDS[region - 1]) for region, level in MASK_LEVELS.items()},
         "evidence": "model proposals; not human-confirmed observations",
         "depth_device": depth_device,
-        "mask_device": "cpu",
+        "mask_device": "Meta Model API" if hosted is not None else "cpu",
         "depth_inference_seconds": round(depth_seconds, 3),
         "mask_inference_seconds": round(mask_seconds, 3),
         "elapsed_seconds": round(time.perf_counter() - started, 3),
-        "models": {"depth": DEPTH_MODEL, "mask": MASK_MODEL},
+        "models": {"depth": DEPTH_MODEL, "mask": HOSTED_MASK_MODEL if hosted is not None else MASK_MODEL},
+        **({"segmentation": hosted} if hosted is not None else {}),
         "versions": {"torch": torch.__version__, "numpy": np.__version__},
     }
     files = {
@@ -584,7 +664,7 @@ def _reconstruct_objects(*, torch, Sam2Model, Sam2Processor, rgb, objects, data,
 def main(argv=None):
     args = parse_args(argv)
     try:
-        summary = reconstruct(args.image, args.output, args.source_id, box=args.box, objects=args.objects)
+        summary = reconstruct(args.image, args.output, args.source_id, box=args.box, objects=args.objects, segmentation=args.segmentation)
     except (InputError, UnavailableError, ProposalRejected, WriteError) as error:
         print(f"error: {error}", file=sys.stderr)
         return error.exit_code

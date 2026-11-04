@@ -77,6 +77,12 @@ redistributed here. Licenses are as declared on PyPI on 2026-11-04.
 | torch 2.15.0 | BSD-3-Clause, with bundled components under Apache-2.0, BSD-2-Clause, BSL-1.0, ISC, MIT and Zlib |
 | torchvision 0.29.2 | BSD |
 | transformers 5.22.1 | Apache-2.0 |
+| meta-sam-parser 0.1.0 | SAM License (Meta, "Last Updated: November 19, 2025"), as shipped in the package's `LICENSE` |
+
+`meta-sam-parser` is used only by the optional SAM 3.1 outline path, to decode
+the masks Meta's API returns. It is installed from PyPI and not redistributed
+here. Anyone who redistributes it must, under its license, provide a copy of
+that license with it.
 
 The optional full-object worker also runs third-party TripoSR source that its
 own pins verify; that source and its dependencies keep their own licenses.
@@ -101,10 +107,10 @@ replacing the pinned Small model requires a new license check.
 
 ## Hosted model API
 
-The optional planner calls Meta's Muse Spark, and the optional caption drafts
-call Meta's Muse Voice Transcribe, both through Meta's API under Meta's own
-terms. Both are off by default. Neither model's weights are bundled or
-distributed with Rehere.
+The optional planner calls Meta's Muse Spark, the optional caption drafts call
+Meta's Muse Voice Transcribe, and optional two-object outlines call Meta's
+SAM 3.1 (`sam-3.1`), all through Meta's API under Meta's own terms. All are off
+by default. No model's weights are bundled or distributed with Rehere.
 
 ## Photographs, recordings and memories
 

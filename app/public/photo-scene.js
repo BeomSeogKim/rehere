@@ -389,7 +389,9 @@ export function jobStatusText(job) {
     case 'queued':
       return 'Accepted. Waiting to start.';
     case 'processing':
-      return 'Building. The local model is working; this can take a few minutes.';
+      return job.maskModel
+        ? `Building. ${job.maskModel} proposes the outlines from your object names and a local model estimates depth; this can take a few minutes.`
+        : 'Building. The local model is working; this can take a few minutes.';
     case 'ready':
       return 'Ready.';
     case 'failed':

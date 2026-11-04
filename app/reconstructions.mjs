@@ -30,6 +30,7 @@ import { geometrySources } from './geometry-sources.mjs';
 import { COMPOSITION_OUTPUTS, parseCompositionPose, parseCompositionRequest, verifiedAsset } from './composition-assets.mjs';
 import { COMPOSITION_REPRESENTATION, canonicalPose, copyPose, isComposition } from './public/composition-scene.js';
 import { heldObjectMotion } from './full-objects.mjs';
+import { SEGMENTATION_LABEL, SEGMENTATION_MODEL, SegmentationError, parseInstances, selectInstance } from './meta-segmentation.mjs';
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const RECONSTRUCTION_TIMEOUT_MS = 180_000;
@@ -66,6 +67,7 @@ const MESSAGES = {
   invalidOutput: 'The model output was incomplete or inconsistent, so no scene was published. Please try again.',
   interrupted: 'The app stopped before this build finished. Start a new build.',
   restricted: 'The owner turned off model processing or stopped using this photo, so no scene was published.',
+  segmentation: 'SAM 3.1 (Meta Model API) did not return outlines for this build, so no scene was published. Nothing else was sent.',
   unknown: 'The scene could not be built. Please try again.',
 };
 
@@ -84,11 +86,13 @@ export const pythonModelImage = ({ python = defaultPython() } = {}) => pythonIma
 
 // Spawns the offline worker with server-chosen arguments only.
 export function pythonRunner({ python = defaultPython() } = {}) {
-  return ({ imagePath, outputDir, sourceId, box, objects, signal }) =>
+  return ({ imagePath, outputDir, sourceId, box, objects, segmentation, signal }) =>
     new Promise((resolve) => {
       const env = workerEnv();
       // A two-object build sends both admitted labels and boxes, in object order.
       const selection = objects ? ['--objects', JSON.stringify(objects.map(({ label, box: objectBox }) => ({ label, box: objectBox })))] : ['--box', ...box.map(String)];
+      // A server-written file of selected SAM 3.1 records replaces local SAM2 masks.
+      if (segmentation) selection.push('--segmentation', segmentation);
       const args = [path.join(SPATIAL_DIR, 'reconstruct.py'), '--image', imagePath, '--output', outputDir, '--source-id', sourceId, ...selection];
       const child = spawn(python, args, { cwd: SPATIAL_DIR, env, shell: false, stdio: ['ignore', 'ignore', 'pipe'], signal, killSignal: 'SIGKILL' });
       let stderr = '';
@@ -553,6 +557,10 @@ function checkObjectSurface(surface, summary, expected) {
   if (!Array.isArray(depth) || depth.length !== cells || !depth.every((value) => finite(value) && value >= near - 1e-5 && value <= far + 1e-5)) return null;
   if (!Array.isArray(regions) || regions.length !== cells || !regions.every((value) => value === -1 || value === 0 || value === 1 || value === 2)) return null;
   if (summary?.source_id !== expected.sourceId || summary?.source_sha256 !== expected.sourceSha256 || summary?.texture_sha256 !== expected.textureSha256) return null;
+  // Outline provenance must be exactly what the server requested and selected.
+  if (expected.segmentation) {
+    if (summary.models?.mask?.id !== SEGMENTATION_MODEL || summary.models.mask.label !== SEGMENTATION_LABEL || !sameValues(summary.segmentation, expected.segmentation.objects)) return null;
+  } else if (summary.models?.mask?.id === SEGMENTATION_MODEL || summary.segmentation !== undefined) return null;
   const coverage = [1, 2].map((region) => regions.filter((value) => value === region).length / cells);
   if (!coverage.every((value) => value >= OBJECT_COVERAGE.min && value <= OBJECT_COVERAGE.max)) return null;
   if (coverage[0] + coverage[1] > OBJECT_COVERAGE.combined) return null;
@@ -610,6 +618,7 @@ export class ReconstructionStore {
   constructor({
     dataDir, drafts, runner, timeoutMs = RECONSTRUCTION_TIMEOUT_MS, proposalModel = null, prepareImage = pythonModelImage(), visibleSurfaceLimits,
     placeDeletions = null, outlineRunner = pythonOutlineRunner(), outlineTimeoutMs = OUTLINE_TIMEOUT_MS,
+    segmenter = null,
   }) {
     this.drafts = drafts;
     // Place-deletion barriers; a deleted place reads as absent everywhere.
@@ -624,6 +633,8 @@ export class ReconstructionStore {
     this.activeComposition = null;
     this.timeoutMs = timeoutMs;
     this.proposalModel = proposalModel;
+    // Optional SAM 3.1 (Meta Model API) outlines for two-object builds; null keeps local SAM2.
+    this.segmenter = segmenter;
     this.prepareImage = prepareImage;
     // Only fault and budget tests pass limits; the shared gate's defaults apply otherwise.
     this.visibleSurfaceLimits = visibleSurfaceLimits;
@@ -1108,6 +1119,8 @@ export class ReconstructionStore {
         ...(request.objects
           ? { objects: request.objects.map((item) => ({ ...item, box: [...item.box], pivot: null })), objectsConfirmed: null }
           : { box: request.box }),
+        // Named from the start so the build status never calls hosted outlines local.
+        ...(request.objects && this.segmenter && { maskModel: SEGMENTATION_LABEL }),
         requestId: request.requestId,
         status: 'queued',
         createdAt: now,
@@ -1192,6 +1205,22 @@ export class ReconstructionStore {
       };
       // A runner that ignores the signal is not awaited; its late result is discarded.
       const aborted = new Promise((resolve) => controller.signal.addEventListener('abort', () => resolve(null), { once: true }));
+      // Optional SAM 3.1 outlines, requested inside this job so its abort (place
+      // deletion, source restriction, timeout) cancels them. The launch slot
+      // below checks the grant and the abort again before the worker sees them.
+      let segmentation = null;
+      if (this.segmenter && isTwoObject(manifest)) {
+        const outcome = await this.segmentObjects(manifest, imagePath, size, staging, controller.signal, permitted);
+        if (controller.signal.aborted) {
+          manifest = await this.serialize(stopped);
+          return;
+        }
+        if (outcome.error) {
+          manifest = await this.serialize(() => this.update(manifest, { status: 'failed', error: outcome.error }));
+          return;
+        }
+        segmentation = outcome;
+      }
       // The worker starts inside a mutex slot right after a last grant check, so
       // a restriction saved while staging was prepared is honoured even when
       // its abort failed. The run itself is awaited outside the slot.
@@ -1204,7 +1233,7 @@ export class ReconstructionStore {
         let started;
         try {
           const selection = isTwoObject(manifest) ? { objects: manifest.objects.map(({ id, label, box }) => ({ id, label, box })) } : { box: manifest.box };
-          started = Promise.resolve(this.runner({ imagePath, outputDir, sourceId: manifest.sourceId, ...selection, signal: controller.signal }));
+          started = Promise.resolve(this.runner({ imagePath, outputDir, sourceId: manifest.sourceId, ...selection, ...(segmentation && { segmentation: segmentation.file }), signal: controller.signal }));
         } catch (error) {
           started = Promise.reject(error);
         }
@@ -1227,7 +1256,7 @@ export class ReconstructionStore {
         manifest = await this.serialize(() => this.update(manifest, { status: 'failed', error: failureMessage(result ?? {}) }));
         return;
       }
-      const verified = await this.verifyOutputs(outputDir, manifest, size);
+      const verified = await this.verifyOutputs(outputDir, segmentation ? { ...manifest, segmentation: segmentation.provenance } : manifest, size);
       const derivedAssets = verified?.derivedAssets;
       if (!derivedAssets) {
         manifest = await this.serialize(() => (controller.signal.aborted ? stopped() : this.update(manifest, { status: 'failed', error: MESSAGES.invalidOutput })));
@@ -1248,7 +1277,7 @@ export class ReconstructionStore {
         }
         // The pivots are computed once from the verified surface and never change.
         const objects = verified.pivots && manifest.objects.map((item) => ({ ...item, pivot: verified.pivots.find((entry) => entry.id === item.id).pivot }));
-        return this.update(manifest, { status: 'ready', derivedAssets, ...(objects && { objects }) });
+        return this.update(manifest, { status: 'ready', derivedAssets, ...(objects && { objects }), ...(segmentation && { segmentation: segmentation.provenance }) });
       });
     } catch (error) {
       console.error('reconstruction failed:', error?.code ?? error?.name ?? 'error');
@@ -1260,6 +1289,47 @@ export class ReconstructionStore {
       if (!(await this.placeDeleted(manifest.draftId))) await rm(staging, { recursive: true, force: true }).catch(() => {});
       this.active = null;
     }
+  }
+
+  // Requests one SAM 3.1 concept per object with the verified original bytes,
+  // then keeps only the one instance matching each owner box. Returns
+  // { file, provenance }, { error } or {} when stopped. The selected records
+  // go to a staging file the worker decodes; nothing from the provider names a path.
+  async segmentObjects(manifest, imagePath, size, staging, signal, permitted) {
+    const bytes = await readFile(imagePath).catch(() => null);
+    if (!bytes || sha256(bytes) !== manifest.sourceSha256) return { error: CHECKSUM_MESSAGE };
+    const format = startsWith(bytes, JPEG) ? 'jpeg' : startsWith(bytes, PNG) ? 'png' : null;
+    if (!format) return { error: MESSAGES.input };
+    const objects = [];
+    for (const object of manifest.objects) {
+      if (signal.aborted) return {};
+      // The grant is read again immediately before each dispatch.
+      if (!(await this.serialize(permitted))) return { error: MESSAGES.restricted };
+      let result;
+      let picked;
+      try {
+        result = await this.segmenter.segment({ prompt: object.label, imageBytes: bytes, format, signal });
+        picked = selectInstance(parseInstances(result.outputText, size), object.box);
+      } catch (error) {
+        if (signal.aborted) return {};
+        console.error(`segmentation ${manifest.id} failed: ${error instanceof SegmentationError ? error.message : error?.name ?? 'error'}`);
+        return { error: MESSAGES.segmentation };
+      }
+      if (picked.refused) {
+        return { error: `SAM 3.1 (Meta Model API) could not match “${object.label}” to one outline in its box: ${picked.refused}. No scene was published; draw a box around a single object or choose another photo.` };
+      }
+      objects.push({
+        id: object.id, prompt: object.label, record: picked.record,
+        provenance: {
+          id: object.id, mode: result.mode, responseId: result.responseId, requestDigest: result.requestDigest, recordedAt: result.recordedAt,
+          ...(result.mode === 'live' && { latencyMs: result.latencyMs }), selection: picked.selection,
+        },
+      });
+    }
+    const provenance = { model: SEGMENTATION_MODEL, label: SEGMENTATION_LABEL, objects: objects.map((item) => item.provenance) };
+    const file = path.join(staging, 'segmentation.json');
+    await writeFile(file, JSON.stringify({ model: SEGMENTATION_MODEL, label: SEGMENTATION_LABEL, objects: objects.map(({ id, prompt, record, provenance: entry }) => ({ id, prompt, record, provenance: entry })) }), { mode: 0o600, flag: 'wx' });
+    return { file, provenance };
   }
 
   async verifyOutputs(outputDir, manifest, size) {
@@ -1289,7 +1359,7 @@ export class ReconstructionStore {
     } catch {
       return null;
     }
-    const expected = { ...size, sourceId: manifest.sourceId, sourceSha256: manifest.sourceSha256, box: manifest.box, objects: manifest.objects, textureSha256: sha256(files['texture.jpg']) };
+    const expected = { ...size, sourceId: manifest.sourceId, sourceSha256: manifest.sourceSha256, box: manifest.box, objects: manifest.objects, segmentation: manifest.segmentation ?? null, textureSha256: sha256(files['texture.jpg']) };
     let pivots = null;
     if (isTwoObject(manifest)) {
       pivots = checkObjectSurface(surface, summary, expected);

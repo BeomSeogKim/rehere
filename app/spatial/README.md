@@ -173,6 +173,29 @@ exclusive):
              {"label": "Counter", "box": [565, 445, 905, 685]}]'
 ```
 
+With `--objects`, `--segmentation FILE` replaces local SAM2 with outlines the
+server already selected from SAM 3.1 (Meta Model API) responses. The worker
+never calls an API: it reads one server-written JSON file (at most 16 MiB)
+naming each object's prompt, its one selected record and its provenance,
+checks that each record lies in this photo's frame, that its mask raster
+matches its box, and that the recorded selection, owner box and object label
+match, then decodes the mask with the pinned `meta-sam-parser`. That package
+is imported only on this path and is listed in `requirements.txt` under its
+SAM License (see the third-party notices). Parser diagnostics are never
+printed, because they quote provider text. Depth still comes from the local
+model, and `summary.json` then names `SAM 3.1 (Meta Model API)` as the mask
+model and carries the selection. Run `python -B -m unittest test_segmentation`
+for the focused checks; they use synthetic masks only.
+
+The server side is off by default. `REHERE_SEGMENTATION=sam-3.1` plus either
+`REHERE_SEGMENTATION_REPLAY=<file>` (stored responses, used only for a
+byte-identical request; a mismatch sends nothing and fails) or
+`REHERE_SEGMENTATION_LIVE=1` with `MODEL_API_KEY` enables it. Live requests are
+reserved in `app/data/segmentation-budget.json` before sending, at $0.0025 per
+image, and an uncertain request keeps its reservation. An incomplete setting
+stops the server at startup. Stored response files contain provider output
+and must stay private, outside Git.
+
 The JSON lists exactly two `{label, box}` entries. Labels must already be
 trimmed, non-blank, at most 80 UTF-16 units, free of control characters and
 different ignoring case; they are returned unchanged as `object-1` and

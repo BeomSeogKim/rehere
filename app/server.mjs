@@ -18,6 +18,7 @@ import { metaModelFromEnv } from './meta-model.mjs';
 import { metaTranscriberFromEnv } from './meta-transcribe.mjs';
 import { EvidenceReviews, evidenceModelFromEnv } from './evidence-reviews.mjs';
 import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner, pythonOutlineRunner } from './reconstructions.mjs';
+import { segmenterFromEnv } from './meta-segmentation.mjs';
 import { FullObjectStore } from './full-objects.mjs';
 import { OBJECT_IDS } from './arrangements.mjs';
 import { PlaceDeletionService, PlaceDeletions } from './place-deletions.mjs';
@@ -410,6 +411,7 @@ export function createAppServer({
   limits = LIMITS,
   reconstructionRunner = pythonRunner(),
   reconstructionTimeoutMs,
+  segmenter = null,
   outlineRunner = pythonOutlineRunner(),
   outlineTimeoutMs,
   proposalModel = null,
@@ -436,7 +438,7 @@ export function createAppServer({
   const attempts = attemptLimiter();
   const reconstructions = new ReconstructionStore({
     dataDir, drafts: store, runner: reconstructionRunner, timeoutMs: reconstructionTimeoutMs, proposalModel, prepareImage: prepareModelImage, visibleSurfaceLimits,
-    placeDeletions, outlineRunner, outlineTimeoutMs,
+    placeDeletions, outlineRunner, outlineTimeoutMs, segmenter,
   });
   const fullObjects = new FullObjectStore({ reconstructions, validateMask: fullObjectMaskValidator, runFullObject });
   reconstructions.fullObjects = fullObjects;
@@ -1415,6 +1417,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.exit(1);
   }
   const app = createAppServer({
+    segmenter: segmenterFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'segmentation-budget.json') }),
     proposalModel: metaModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'model-budget.json') }),
     captionTranscriber: metaTranscriberFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'transcribe-budget.json') }),
     evidenceModel: evidenceModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'evidence-budget.json') }),

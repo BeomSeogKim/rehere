@@ -586,6 +586,8 @@ export class ShareStore {
       // The owner's names and source boxes for the two objects, as visible evidence.
       ...(isTwoObject(manifest) && { objects: manifest.objects.map(({ id, label, box }, index) => ({ id, label, box: [...box], ...(isComposition(manifest) && { sourceIndex: index + 1 }) })) }),
       ...(manifest.outline?.kind === 'owner-corrected' && { outline: { kind: 'owner-corrected' } }),
+      // The outline source for visitors when outlines came from SAM 3.1 (Meta Model API).
+      ...(manifest.segmentation?.label && !manifest.outline && { outlineSource: manifest.segmentation.label }),
     };
     const assets = {};
     for (const name of Object.keys(sharedAssets(manifest))) {

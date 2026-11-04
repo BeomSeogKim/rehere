@@ -421,7 +421,7 @@ export function mountVisitor(container, source, { onState = () => {}, limitedPho
       evidence.replaceChildren(
         el('p', { className: 'hint', textContent: composition ? `Source photo for ${nameOf(object.id)}: its photographed surface and estimated depth come from this photo. Its composition pose and relative scale were chosen by the owner.` : correctedOutline
           ? `Photo evidence for ${nameOf(object.id)}: this box encloses its current outline. This scene includes an owner-made outline correction; the depth remains a model estimate. Neither establishes history.`
-          : `Photo evidence for ${nameOf(object.id)}: the box the owner drew. The outline inside it is a model estimate.` }),
+          : `Photo evidence for ${nameOf(object.id)}: the box the owner drew. ${typeof manifest.outlineSource === 'string' ? `The outline inside it was proposed by ${manifest.outlineSource} from the owner's object name; it is a model estimate.` : 'The outline inside it is a model estimate.'}` }),
         el('div', { className: 'anchor-frame' }, [el('img', { src: textureFor(object.id), alt: `The source photo for ${nameOf(object.id)} in “${manifest.title}”, with its box` }), box]),
         ...(composition ? objectRecollections(views.get(currentId), object.id, nameOf) : []),
       );

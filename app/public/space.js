@@ -244,7 +244,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     el('p', {
       className: 'hint',
       textContent:
-        'A partial scene turns one photo into the surfaces visible in it, so you can look around them. You choose an object in front; a local model proposes its outline and the depth. It does not add what the photo did not show, and it does not confirm what the place was like.',
+        'A partial scene turns one photo into the surfaces visible in it, so you can look around them. You choose an object in front; a model proposes its outline and a local model estimates the depth. It does not add what the photo did not show, and it does not confirm what the place was like.',
     }),
     panel,
     status,
@@ -2299,7 +2299,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
 
     const explore = createExploreToggle();
-    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges, unseenLabel]), viewMessage, ...(composition ? objects.flatMap((object) => photoCredit({ sourceId: sourceIdFor(object.id) })) : photoCredit(job)), ...(job.outline?.kind === 'owner-corrected' ? [el('p', { className: 'hint', textContent: 'Outlines include an owner-made correction; depth remains the existing model estimate.' })] : []), el('p', { className: 'hint', textContent: composition ? `${COMPOSITION_NOTE} ${surface.context ? 'The first photo’s observed background is fixed at its initial placement.' : 'Only the two observed surfaces are shown, with no background.'}` : SCENE_NOTE })];
+    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges, unseenLabel]), viewMessage, ...(composition ? objects.flatMap((object) => photoCredit({ sourceId: sourceIdFor(object.id) })) : photoCredit(job)), ...(job.outline?.kind === 'owner-corrected' ? [el('p', { className: 'hint', textContent: 'Outlines include an owner-made correction; depth remains the existing model estimate.' })] : []), ...(job.segmentation?.label ? [el('p', { className: 'hint', textContent: `Outlines: proposed by ${job.segmentation.label} from your object names, one returned outline per box. Depth: a local model estimate. Neither is a measurement or establishes history.` })] : []), el('p', { className: 'hint', textContent: composition ? `${COMPOSITION_NOTE} ${surface.context ? 'The first photo’s observed background is fixed at its initial placement.' : 'Only the two observed surfaces are shown, with no background.'}` : SCENE_NOTE })];
 
     if (!job.objectsConfirmed) {
       // No object can be chosen before the outlines are confirmed.
@@ -2372,7 +2372,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         sceneWorkspace(stage, [
           el('section', { className: 'memory-edit object-confirm' }, [
             el('h4', { textContent: 'Check the two outlines' }),
-            el('p', { className: 'hint', textContent: `${job.outline?.kind === 'owner-corrected' ? 'This scene includes an owner-made outline correction. Check both outlines against the named objects.' : 'The model proposed these outlines inside your boxes.'} Nothing can be moved, planned, shared or given a story until you confirm they match the objects you named.` }),
+            el('p', { className: 'hint', textContent: `${job.outline?.kind === 'owner-corrected' ? 'This scene includes an owner-made outline correction. Check both outlines against the named objects.' : (job.segmentation?.label ? `${job.segmentation.label} proposed these outlines from your object names, one per box.` : 'The model proposed these outlines inside your boxes.')} Nothing can be moved, planned, shared or given a story until you confirm they match the objects you named.` }),
             el('div', { className: 'anchor-frame' }, [el('img', { src: assetUrl(jobId, 'mask-overlay.jpg'), alt: `Photo ${number} with the two ${job.outline?.kind === 'owner-corrected' ? 'saved' : 'proposed'} outlines tinted` }), ...objects.map(boxOver)]),
             el('ul', { className: 'hint' }, [
               ...objects.map((object) => el('li', { textContent: `${nameOf(object.id)}: the ${letterOf(object.id) === 'A' ? 'blue' : 'orange'} tinted area.` })),

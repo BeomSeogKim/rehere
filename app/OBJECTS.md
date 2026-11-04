@@ -75,6 +75,19 @@ characters. Names are your labels, not model identification, and must differ
 ignoring case. The server keeps them as `object-1` and `object-2` in the order
 given. Local depth estimation runs once and SAM2 proposes one mask per box.
 
+Optionally, the server can be started with SAM 3.1 (Meta Model API) outlines
+instead of local SAM2 (`REHERE_SEGMENTATION=sam-3.1`; see
+[`app/spatial/README.md`](spatial/README.md)). Each object's name is then sent,
+with the exact original photo, to Meta's API as one concept prompt, and only
+while the photo's model use is allowed, which is checked again before each request.
+The server keeps the single returned outline whose box matches the owner's
+box (intersection over union at least 0.5, and at least 0.15 above any
+other); a weak or near-tied match fails the build instead of guessing. The
+model's confidence is recorded but never used to choose. Depth stays local.
+The scene, its build status and visitor snapshots name SAM 3.1 (Meta Model
+API) as the outline source; the selection, response ID and request digest are
+kept with the scene. All other limits below apply unchanged.
+
 Pixels claimed by both masks are left unassigned, as holes that belong to
 neither object nor the background. If they exceed 1% of the smaller mask, the
 build fails and asks for boxes that separate the objects. Each object must
