@@ -16,9 +16,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: demo-2026-11-04
-  ASSET_NAME: rehere-final-03ff749-site.zip
-  ASSET_SHA256: c5518e0f14e49a473aa35fd9322b7ed1c73f420311cf5a193656b7b31cee37db
+  RELEASE_TAG: demo-2026-11-04-sam31
+  ASSET_NAME: rehere-hero-48481-site.zip
+  ASSET_SHA256: 72c29023b806f68a7b197260da03d496cadc3eb38a7e154eef4c4ba8a8f59dfb
 
 jobs:
   deploy:
