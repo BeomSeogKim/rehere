@@ -428,10 +428,12 @@ export function evidenceModelFromEnv({ ledgerFile, env = process.env, fetch = gl
     if (!Number.isFinite(number) || number <= 0 || number > fallback) throw new Error('Evidence check limits can only be lowered.');
     return number;
   };
+  const maxRequests = lower(env.REHERE_EVIDENCE_MAX_REQUESTS, EVIDENCE_LIMITS.maxRequests);
+  if (!Number.isInteger(maxRequests)) throw new Error('REHERE_EVIDENCE_MAX_REQUESTS must be a whole number of requests.');
   const limits = {
     totalUsd: lower(env.REHERE_EVIDENCE_TOTAL_USD, EVIDENCE_LIMITS.totalUsd),
     perRequestUsd: EVIDENCE_LIMITS.perRequestUsd,
-    maxRequests: Math.floor(lower(env.REHERE_EVIDENCE_MAX_REQUESTS, EVIDENCE_LIMITS.maxRequests)),
+    maxRequests,
   };
   return createMetaSender({ apiKey: env.MODEL_API_KEY, ledger: new BudgetLedger({ file: ledgerFile, limits }), fetch });
 }

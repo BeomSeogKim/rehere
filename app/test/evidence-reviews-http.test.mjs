@@ -369,5 +369,11 @@ describe('evidence answer checks', () => {
     assert.equal(evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1' } }), null);
     assert.equal(typeof evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1', MODEL_API_KEY: 'k', REHERE_EVIDENCE_TOTAL_USD: '0.05' } }), 'function');
     assert.throws(() => evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1', MODEL_API_KEY: 'k', REHERE_EVIDENCE_TOTAL_USD: '5' } }));
+    assert.equal(typeof evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1', MODEL_API_KEY: 'k', REHERE_EVIDENCE_MAX_REQUESTS: '1' } }), 'function');
+    assert.equal(typeof evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1', MODEL_API_KEY: 'k', REHERE_EVIDENCE_MAX_REQUESTS: '' } }), 'function');
+    assert.throws(() => evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1', MODEL_API_KEY: 'k', REHERE_EVIDENCE_MAX_REQUESTS: '1.5' } }), /must be a whole number of requests/);
+    assert.throws(() => evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1', MODEL_API_KEY: 'k', REHERE_EVIDENCE_MAX_REQUESTS: '0' } }), /can only be lowered/);
+    assert.throws(() => evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1', MODEL_API_KEY: 'k', REHERE_EVIDENCE_MAX_REQUESTS: '-2' } }), /can only be lowered/);
+    assert.throws(() => evidenceModelFromEnv({ ledgerFile: '/nonexistent', env: { REHERE_EVIDENCE_LIVE: '1', MODEL_API_KEY: 'k', REHERE_EVIDENCE_MAX_REQUESTS: '1000000' } }), /can only be lowered/);
   });
 });
