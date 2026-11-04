@@ -111,15 +111,21 @@ function vendorText(target, source) {
   return text;
 }
 
+// Rules for the offline notice and the credit footer, shipped as a file next to
+// the page instead of an inline <style>.
+export const OFFLINE_CSS = `.offline-notice { margin: 0; padding: .75rem 1rem; border-bottom: 2px solid #8a6d00; background: #fff4c2; color: #2b2200; font: 15px/1.4 system-ui, sans-serif; }
+.source-credit { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; font: 14px/1.5 system-ui, sans-serif; opacity: .85; }
+.source-credit p { margin: .4rem 0; }
+.source-credit a { color: inherit; overflow-wrap: anywhere; }
+@media (prefers-color-scheme: dark) { .offline-notice { background: #3a2f00; color: #fff1b8; border-color: #d4aa00; } }
+`;
+
 const pageHtml = (template, date, credit) => {
   const notice = `<aside class="offline-notice" role="note"><strong>${escapeHtml(NOTICE.heading)}.</strong> ${escapeHtml(NOTICE.text.replace('{date}', date))}</aside>`;
-  const style = '<style>.offline-notice{margin:0;padding:.75rem 1rem;border-bottom:2px solid #8a6d00;background:#fff4c2;color:#2b2200;font:15px/1.4 system-ui,sans-serif}'
-    + '.source-credit{max-width:60rem;margin:1.5rem auto;padding:0 1rem;font:14px/1.5 system-ui,sans-serif;opacity:.85}.source-credit p{margin:.4rem 0}.source-credit a{color:inherit;overflow-wrap:anywhere}'
-    + '@media (prefers-color-scheme:dark){.offline-notice{background:#3a2f00;color:#fff1b8;border-color:#d4aa00}}</style>';
   let html = template
-    .replace('href="/style.css"', 'href="./style.css"')
+    .replace('href="/style.css"', 'href="./style.css">\n  <link rel="stylesheet" href="./offline.css"')
     .replace('src="/visitor-entry.js"', 'src="./static-entry.js"')
-    .replace('<title>Rehere · shared view</title>', `<title>Rehere · offline snapshot</title>\n  ${style}`)
+    .replace('<title>Rehere · shared view</title>', '<title>Rehere · offline snapshot</title>')
     .replace('<body>', `<body>\n  ${notice}\n  <noscript><p class="offline-notice">This snapshot needs JavaScript to draw the scene.</p></noscript>`);
   if (credit !== null) {
     if (!html.includes('</body>')) fail('The visitor page template changed; update the exporter.');
@@ -127,6 +133,8 @@ const pageHtml = (template, date, credit) => {
   }
   if (!html.includes('./static-entry.js') || !html.includes('./style.css') || !html.includes('offline-notice')) fail('The visitor page template changed; update the exporter.');
   if (/(?:href|src)="\//.test(html)) fail('The exported page still has a root-absolute reference.');
+  // Styles live in offline.css so a host policy without inline styles still renders the page.
+  if (/<style[\s>]|\sstyle=/i.test(html)) fail('The exported page must not carry inline styles.');
   return html;
 };
 
@@ -290,6 +298,7 @@ export async function exportStaticVisit({
   const style = await readFile(path.join(publicDir, 'style.css'), 'utf8');
   if (/url\(\s*['"]?\//.test(style)) fail('style.css has a root-absolute url().');
   put('style.css', style);
+  put('offline.css', OFFLINE_CSS);
   for (const name of NOTICE_FILES) put(name, await readFile(path.join(rootDir, name)));
   for (const name of VISITOR_MODULES) put(name, moduleText(name, await readFile(path.join(publicDir, name), 'utf8')));
   for (const [target, source] of VENDOR) {

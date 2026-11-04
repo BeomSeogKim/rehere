@@ -50,9 +50,11 @@ The page uses relative paths, so it also works from a sub-path.
 
 Only these are written, and the export stops with an error otherwise:
 
-- `index.html`, `style.css` and the visitor modules the live visitor listener
+- `index.html`, `style.css`, `offline.css` and the visitor modules the live visitor listener
   serves (checked against `server.mjs` by a test), with root-absolute vendor
-  imports made relative.
+  imports made relative. The offline notice and credit footer are styled by
+  `offline.css`, not by inline styles, so a host that forbids inline styles
+  still shows them.
 - `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.md`: the exported JavaScript is
   Rehere code distributed under the project's Apache-2.0 license, so the
   license and notices travel with it.

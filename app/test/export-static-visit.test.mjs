@@ -7,7 +7,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { pcmWav } from '../audio-derivative.mjs';
-import { exportStaticVisit, STATIC_DEVICE_NOTE, VISITOR_MODULES } from '../export-static-visit.mjs';
+import { exportStaticVisit, OFFLINE_CSS, STATIC_DEVICE_NOTE, VISITOR_MODULES } from '../export-static-visit.mjs';
 
 const TOKEN = `rhv_${'A'.repeat(43)}`;
 const WAV = pcmWav(Buffer.alloc(3200));
@@ -76,7 +76,7 @@ describe('static visitor export', () => {
       assert.deepEqual(result.contributorLabels, ['Synthetic contributor']);
       const files = (await walk(result.outDir)).map((file) => file.split(path.sep).join('/')).sort();
       assert.deepEqual(files, [
-        'EXPORT.json', 'index.html', 'style.css', 'LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES.md',
+        'EXPORT.json', 'index.html', 'style.css', 'offline.css', 'LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES.md',
         ...VISITOR_MODULES,
         'data/manifest.json',
         `data/assets/${viewId}/surface.json`, `data/assets/${viewId}/texture.jpg`, 'data/assets/evidence/1.jpg',
@@ -106,6 +106,13 @@ describe('static visitor export', () => {
       assert.match(html, /exported on 2026-11-04/);
       assert.match(html, /revokes the link, a contributor withdraws a memory/);
       assert.match(html, /src="\.\/static-entry\.js"/);
+      // No inline styles, so a host policy that blocks them still renders the page.
+      assert.doesNotMatch(html, /<style[\s>]|\sstyle=/i);
+      assert.match(html, /<link rel="stylesheet" href="\.\/offline\.css">/);
+      assert.equal(await readFile(path.join(outDir, 'offline.css'), 'utf8'), OFFLINE_CSS);
+      assert.match(OFFLINE_CSS, /\.offline-notice[^}]*background/);
+      assert.match(OFFLINE_CSS, /\.source-credit a/);
+      assert.match(OFFLINE_CSS, /prefers-color-scheme: dark/);
       assert.doesNotMatch(html, /(?:href|src)="\//);
       for (const file of await walk(outDir)) {
         const bytes = await readFile(path.join(outDir, file));
