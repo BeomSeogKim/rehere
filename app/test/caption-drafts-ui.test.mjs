@@ -4,7 +4,7 @@ import { FakeElement } from './fake-dom.mjs';
 import { installViewerShim } from './viewer-shim.mjs';
 
 installViewerShim();
-const { captionCredit, mountStories } = await import('../public/stories.js');
+const { captionCredit, draftCallEvidence, mountStories } = await import('../public/stories.js');
 const { createStoryPlayer } = await import('../public/story-player.js');
 
 const JOB_URL = '/api/drafts/11111111-1111-4111-8111-111111111111/reconstructions/cccccccc-cccc-4ccc-8ccc-cccccccccccc';
@@ -27,11 +27,16 @@ function deferred() {
 }
 
 const voice = (model = true) => ({ id: VOICE, kind: 'voice', provider: 'Owner', permissions: { place: true, model, share: false }, policy: { revision: 0, stopped: false } });
-const draftAnswer = () => json(201, {
+const CALL = {
+  model: 'muse-voice-transcribe-1.0', dispatched: true, httpStatus: 200, providerRequestId: null, providerSessionId: 'fixture-session-1',
+  latencyMs: 3115, admittedDurationMs: 2000, estimatedUsd: 0.0001,
+};
+const draftAnswer = ({ id = DRAFT_ID, call = CALL } = {}) => json(201, {
   draft: {
-    id: DRAFT_ID, model: 'muse-voice-transcribe-1.0', modelLabel: 'Muse Voice Transcribe', voiceSourceId: VOICE, voiceSha256: 'a'.repeat(64),
+    id, model: 'muse-voice-transcribe-1.0', modelLabel: 'Muse Voice Transcribe', voiceSourceId: VOICE, voiceSha256: 'a'.repeat(64),
     view: { kind: 'version', version: 1, variantId: null, eraRevision: null }, durationMs: 2000, confirmed: false,
     cues: [{ startMs: 0, endMs: 1200, text: 'Synthetic fixture speech.' }, { startMs: 1400, endMs: 2000, text: 'Second part.' }],
+    call,
   },
 });
 
@@ -73,6 +78,10 @@ async function mount({ sources = [voice()], objects } = {}) {
   const cueTexts = () => rows().map((row) => row.findAll((node) => node.tag === 'textarea')[0].value);
   const confirm = () => find((node) => node.tag === 'input' && node.type === 'checkbox')[0];
   const note = () => find((node) => node.role === 'status' && node.tag === 'p').map((node) => node.textContent).join(' ');
+  const evidence = () => {
+    const block = find((node) => node.className === 'model-evidence')[0];
+    return block.hidden ? null : block.textContent;
+  };
   const chooseView = (key) => {
     viewSelect().value = key;
     viewSelect().dispatch('change');
@@ -81,7 +90,7 @@ async function mount({ sources = [voice()], objects } = {}) {
     button(ASK).dispatch('click');
     button(SEND).dispatch('click');
   };
-  return { root, view, find, button, rows, cueTexts, confirm, note, chooseView, requestDraft };
+  return { root, view, find, button, rows, cueTexts, confirm, note, evidence, chooseView, requestDraft };
 }
 
 const draftPosts = () => requests.filter((r) => r.method === 'POST' && r.url === DRAFTS_URL);
@@ -325,6 +334,73 @@ describe('caption draft composer', () => {
     target.value = 'object-2';
     target.dispatch('change');
     assert.match(ui.note(), /AI draft of a different recording, view, part or object/);
+  });
+
+  it('shows the applied draft’s call evidence, naming IDs that were not returned', async () => {
+    const answer = deferred();
+    routes[`POST ${DRAFTS_URL}`] = () => answer.promise;
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    assert.equal(ui.evidence(), null, 'nothing while pending');
+    answer.resolve(draftAnswer());
+    await settle();
+    const text = ui.evidence();
+    assert.match(text, /Live answer from muse-voice-transcribe-1\.0/);
+    assert.match(text, /HTTP 200 · 3,115 ms/);
+    assert.match(text, /Provider request ID: not returned · Provider session ID: fixture-session-1/);
+    assert.match(text, /Audio sent: 2,000 ms · Estimated cost \$0\.00010 \(an estimate, not the bill\)/);
+    assert.deepEqual(draftCallEvidence({ call: { ...CALL, providerSessionId: null, latencyMs: undefined, estimatedUsd: undefined } }).lines.slice(0, 3), [
+      'Sent once to the Meta Model API · HTTP 200 · latency not recorded',
+      'Provider request ID: not returned · Provider session ID: not returned',
+      'Audio sent: 2,000 ms',
+    ]);
+    assert.equal(draftCallEvidence({ call: { ...CALL, dispatched: false } }), null);
+    assert.equal(draftCallEvidence({}), null);
+  });
+
+  it('hides call evidence while the draft does not apply, and clears it when discarded', async () => {
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(draftAnswer());
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    assert.ok(ui.evidence());
+    ui.chooseView('version:2');
+    assert.equal(ui.evidence(), null);
+    assert.deepEqual(ui.cueTexts(), ['Synthetic fixture speech.', 'Second part.'], 'AI cues stay, still blocked from saving');
+    ui.chooseView('version:1');
+    assert.match(ui.evidence(), /fixture-session-1/);
+    ui.button('Discard the AI-drafted captions').dispatch('click');
+    assert.equal(ui.evidence(), null);
+  });
+
+  it('keeps the earlier draft and its evidence when a later answer arrives after an undone change', async () => {
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(draftAnswer());
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    const late = deferred();
+    routes[`POST ${DRAFTS_URL}`] = () => late.promise;
+    ui.requestDraft();
+    await settle();
+    assert.equal(ui.evidence(), null, 'stale evidence is cleared while a new request is pending');
+    ui.chooseView('version:2');
+    ui.chooseView('version:1');
+    late.resolve(draftAnswer({ id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', call: { ...CALL, providerSessionId: 'fixture-session-2' } }));
+    await settle();
+    assert.match(ui.note(), /was not applied/);
+    assert.deepEqual(ui.cueTexts(), ['Synthetic fixture speech.', 'Second part.']);
+    assert.match(ui.evidence(), /fixture-session-1/);
+    assert.doesNotMatch(ui.evidence(), /fixture-session-2/);
+    ui.find((node) => node.tag === 'input' && node.type === 'text')[0].value = 'Morning bell';
+    ui.confirm().checked = true;
+    routes[`POST ${JOB_URL}/stories`] = () => Promise.resolve(json(201, {}));
+    ui.button('Save story').dispatch('click');
+    await settle();
+    assert.equal(storyPosts()[0].body.captionDraftId, DRAFT_ID);
   });
 
   it('credits AI drafting and the reviewing owner in saved stories', async () => {

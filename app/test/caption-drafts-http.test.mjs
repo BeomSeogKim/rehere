@@ -153,6 +153,16 @@ describe('drafting captions with a fixture provider', () => {
       assert.equal(draft.durationMs, 2000);
       assert.deepEqual(draft.cues, SYNTHETIC_TURNS.map(({ startMs, endMs, transcript }) => ({ startMs, endMs, text: transcript })));
       assert.equal(provider.fetches.length, 1);
+      // Exactly the allowlisted call evidence, as recorded.
+      assert.deepEqual(Object.keys(draft.call).sort(), ['admittedDurationMs', 'dispatched', 'estimatedUsd', 'httpStatus', 'latencyMs', 'model', 'providerRequestId', 'providerSessionId']);
+      assert.equal(draft.call.model, 'muse-voice-transcribe-1.0');
+      assert.equal(draft.call.dispatched, true);
+      assert.equal(draft.call.httpStatus, 200);
+      assert.equal(draft.call.providerRequestId, 'fixture-request');
+      assert.equal(draft.call.providerSessionId, 'fixture-session');
+      assert.equal(draft.call.admittedDurationMs, 2000);
+      assert.ok(Number.isInteger(draft.call.latencyMs) && draft.call.latencyMs >= 0);
+      assert.ok(draft.call.estimatedUsd > 0);
 
       const [record] = (await readManifest(dataDir, place)).captionDrafts;
       assert.equal(record.status, 'drafted');
@@ -168,6 +178,25 @@ describe('drafting captions with a fixture provider', () => {
       assert.match((await replay.json()).error, /not kept/);
       assert.equal((await owner.post(place.drafts, { ...body, view: versionView(2) })).status, 409);
       assert.equal(provider.fetches.length, 1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('reports provider IDs the provider did not return as null, and keeps call evidence out of stories and visits', async () => {
+    const provider = await fixtureProvider(async () => new Response(JSON.stringify({ turns: SYNTHETIC_TURNS }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const { app, owner } = await workspace({ provider });
+    try {
+      const place = await sceneWithVoice(owner);
+      const { draft } = await (await owner.post(place.drafts, draftBody(place))).json();
+      assert.equal(draft.call.providerRequestId, null);
+      assert.equal(draft.call.providerSessionId, null);
+      const story = await (await owner.post(place.stories, storyBody(place, draft.cues, { captionDraftId: draft.id }))).json();
+      const shared = await share(owner, place, [story.id]);
+      const visitor = JSON.stringify(await (await visit(app.base, shared.token)).json());
+      for (const text of [JSON.stringify(story), JSON.stringify(await owner.json(place.stories)), visitor]) {
+        for (const key of ['providerRequestId', 'providerSessionId', 'latencyMs', 'estimatedUsd', 'admittedDurationMs']) assert.equal(text.includes(key), false, key);
+      }
     } finally {
       await app.close();
     }

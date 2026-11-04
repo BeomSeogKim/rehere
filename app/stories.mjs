@@ -165,12 +165,18 @@ const draftAttribution = (story) => story.captionDraft && { captionDraft: { mode
 
 // The owner's copy of a completed draft. The cues are returned once and not
 // kept; they stay unconfirmed until the owner reviews them and saves a story.
-const draftView = (record, cues) => ({
-  draft: {
-    id: record.id, model: record.call.model, modelLabel: record.call.modelLabel, voiceSourceId: record.voiceSourceId, voiceSha256: record.voiceSha256,
-    view: { ...record.view }, targetId: record.target, durationMs: record.durationMs, cues: cues.map((cue) => ({ ...cue })), confirmed: false,
-  },
-});
+// `call` is an explicit allowlist of the recorded model-call evidence; it is
+// owner-only and never joins a story or a visitor snapshot.
+const draftView = (record, cues) => {
+  const { model, dispatched, httpStatus, providerRequestId, providerSessionId, latencyMs, admittedDurationMs, estimatedUsd } = record.call;
+  return {
+    draft: {
+      id: record.id, model: record.call.model, modelLabel: record.call.modelLabel, voiceSourceId: record.voiceSourceId, voiceSha256: record.voiceSha256,
+      view: { ...record.view }, targetId: record.target, durationMs: record.durationMs, cues: cues.map((cue) => ({ ...cue })), confirmed: false,
+      call: { model, dispatched, httpStatus, providerRequestId, providerSessionId, latencyMs, admittedDurationMs, estimatedUsd },
+    },
+  };
+};
 // Visitor snapshots pin a story's content. AI draft provenance joins the pin
 // only when present, so stories saved without it keep their earlier pin.
 const contentPin = (story) => sha256(JSON.stringify(story.captionDraft ? [story.title, story.cues, story.context, story.captionDraft] : [story.title, story.cues, story.context]));

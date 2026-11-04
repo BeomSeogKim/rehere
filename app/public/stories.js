@@ -61,6 +61,29 @@ export function captionCredit(captionDraft, author) {
   return captionDraft ? `Captions AI-drafted (${captionDraft.label || DRAFT_MODEL_LABEL}), reviewed by ${author}` : `Captions written by ${author}`;
 }
 
+const knownMs = (ms) => (Number.isInteger(ms) && ms >= 0 ? `${ms.toLocaleString('en-US')} ms` : null);
+const providerId = (value) => (typeof value === 'string' && value !== '' ? value : null);
+
+// The recorded evidence of the model call behind an applied draft, read only
+// from what the server returned with it, as { heading, lines }. Missing values
+// are named as not returned or not recorded; nothing is filled in.
+export function draftCallEvidence(draft) {
+  const call = draft?.call;
+  if (!call || call.dispatched !== true) return null;
+  const model = typeof call.model === 'string' ? call.model : 'an unknown model';
+  const requestId = providerId(call.providerRequestId);
+  const sessionId = providerId(call.providerSessionId);
+  return {
+    heading: `Live answer from ${model}`,
+    lines: [
+      `Sent once to the Meta Model API · ${Number.isInteger(call.httpStatus) ? `HTTP ${call.httpStatus}` : 'HTTP status not recorded'} · ${knownMs(call.latencyMs) ?? 'latency not recorded'}`,
+      `Provider request ID: ${requestId ?? 'not returned'} · Provider session ID: ${sessionId ?? 'not returned'}`,
+      `Audio sent: ${knownMs(call.admittedDurationMs) ?? 'length not recorded'}${Number.isFinite(call.estimatedUsd) ? ` · Estimated cost $${call.estimatedUsd.toFixed(5)} (an estimate, not the bill)` : ''}`,
+      'The draft text was returned once and is not stored; reviewing it sends nothing new.',
+    ],
+  };
+}
+
 // Recordings of this memory the owner can still use to build a story.
 export function usableVoices(sources) {
   return sources.filter((record) => record.kind === 'voice' && record.policy?.stopped !== true && record.permissions?.place === true);
@@ -151,7 +174,10 @@ export function mountStories(container, bridge) {
   ]);
   const draftNote = el('p', { className: 'hint', role: 'status' });
   const draftDiscard = el('button', { type: 'button', className: 'secondary', textContent: 'Discard the AI-drafted captions', hidden: true });
-  const draftControls = el('div', {}, [el('div', { className: 'actions access-links' }, [draftAsk]), draftConfirm, draftNote, el('div', { className: 'actions' }, [draftDiscard])]);
+  // Evidence of the call behind the applied draft; shown only while its
+  // captions are in the form under the draft's own choices.
+  const draftEvidence = el('div', { className: 'model-evidence', hidden: true });
+  const draftControls = el('div', {}, [el('div', { className: 'actions access-links' }, [draftAsk]), draftConfirm, draftNote, draftEvidence, el('div', { className: 'actions' }, [draftDiscard])]);
   // pendingDraft: the request in flight, with the form's choices, captions and
   // edit epoch when it was sent. appliedDraft: the draft the current cues
   // started from and the choices it belongs to. draftEpoch counts every
@@ -268,7 +294,16 @@ export function mountStories(container, bridge) {
     renderDraft();
   }
 
+  function renderDraftEvidence() {
+    const evidence = appliedDraft && !pendingDraft && !draftMismatch() ? draftCallEvidence(appliedDraft) : null;
+    draftEvidence.hidden = !evidence;
+    draftEvidence.replaceChildren(...(evidence
+      ? [el('p', {}, [el('strong', { textContent: evidence.heading })]), ...evidence.lines.map((line) => el('p', { className: 'hint', textContent: line }))]
+      : []));
+  }
+
   function renderDraftMismatch() {
+    renderDraftEvidence();
     draftDiscard.hidden = !appliedDraft;
     if (draftMismatch()) draftNote.textContent = 'The captions in the form are an AI draft of a different recording, view, part or object. Choose that again, or discard them, before saving.';
     else if (appliedDraft && draftNote.textContent.startsWith('The captions in the form are an AI draft')) draftNote.textContent = '';
@@ -282,6 +317,7 @@ export function mountStories(container, bridge) {
     addCueRow();
     draftDiscard.hidden = true;
     draftNote.textContent = 'The AI-drafted captions were discarded.';
+    renderDraftEvidence();
   }
 
   async function sendDraft() {
@@ -303,10 +339,12 @@ export function mountStories(container, bridge) {
     draftConfirm.hidden = true;
     draftNote.textContent = `Waiting for ${DRAFT_MODEL_LABEL}. Nothing is applied until it answers.`;
     renderDraft();
+    renderDraftEvidence();
     const result = await postJson(`${bridge.jobUrl}/stories/caption-drafts`, body);
     if (disposed || pendingDraft !== mine) return;
     pendingDraft = null;
     renderDraft();
+    renderDraftEvidence();
     if (result.status === 0) {
       // The outcome is unknown: a retry repeats this request ID, which the
       // server answers from its record without sending the recording again.
@@ -327,10 +365,11 @@ export function mountStories(container, bridge) {
     cueRows.replaceChildren();
     for (const cue of draft.cues) addCueRow({ start: formatPosition(cue.startMs), end: formatPosition(cue.endMs), text: cue.text });
     confirmed.checked = false;
-    appliedDraft = { id: draft.id, selection: mine.selection };
+    appliedDraft = { id: draft.id, selection: mine.selection, call: draft.call };
     draftEpoch += 1;
     draftDiscard.hidden = false;
     draftNote.textContent = `AI draft from ${draft.modelLabel || DRAFT_MODEL_LABEL} applied. It may be wrong: listen, correct every caption, then confirm.`;
+    renderDraftEvidence();
   }
 
   const readCues = () => [...cueRows.children].filter((row) => row.read).map((row) => row.read());
@@ -594,6 +633,7 @@ export function mountStories(container, bridge) {
     draftDiscard.hidden = true;
     draftNote.textContent = '';
     renderDraft();
+    renderDraftEvidence();
   }
 
   async function send(attempt, retrying) {
