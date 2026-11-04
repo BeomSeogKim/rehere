@@ -11,6 +11,11 @@ export const MAX_WAV_BYTES = WAV_HEADER_BYTES + 9_600_000;
 
 const ascii = (bytes, start, length) => String.fromCharCode(...bytes.subarray(start, start + length));
 
+// The WAV media types a response may carry, with or without parameters. Static hosts often label .wav as audio/x-wav,
+// so that alias is accepted next to audio/wav; every other type is refused, and the bytes are still checked by wavProblem.
+const WAV_TYPES = new Set(['audio/wav', 'audio/x-wav', 'audio/wave']);
+const isWavType = (value) => WAV_TYPES.has(String(value).split(';')[0].trim().toLowerCase());
+
 // Returns a fixed problem, or null when the bytes are exactly the expected WAV.
 export function wavProblem(bytes, expectedSize) {
   if (!(bytes instanceof Uint8Array)) return 'not-bytes';
@@ -207,7 +212,7 @@ export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story'), 
     try {
       const response = await fetchAudio(controller.signal);
       if (mine !== generation) return;
-      if (!response.ok || !String(response.headers?.get?.('content-type') ?? story.audio.type).startsWith('audio/wav')) throw new Error('response');
+      if (!response.ok || !isWavType(response.headers?.get?.('content-type') ?? story.audio.type)) throw new Error('response');
       bytes = await readBounded(response, Math.min(story.audio.size, MAX_WAV_BYTES));
     } catch {
       if (mine === generation) teardown('The recording is not available.');

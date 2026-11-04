@@ -308,8 +308,22 @@ describe('story player', () => {
     assert.equal(audios[0].calls.length, calls);
   });
 
+  it('plays a valid WAV that a static host labels audio/x-wav, with parameters or another case', async () => {
+    for (const type of ['audio/x-wav', 'AUDIO/X-WAV', 'audio/wav; charset=binary', 'audio/x-wav ; foo=bar', 'audio/wave']) {
+      const before = audios.length;
+      const p = player(async () => response(wav(), type));
+      p.button('Play').dispatch('click');
+      await flush();
+      assert.equal(audios.length, before + 1, `${type} reaches playback`);
+      audios[before].plays[0].resolve();
+      await flush();
+      assert.match(p.status(), /Playing/, type);
+      p.dispose();
+    }
+  });
+
   it('refuses a wrong type, an oversized body or a malformed WAV without playing', async () => {
-    for (const make of [() => response(wav(), 'text/html'), () => response(wav(64)), () => response(new Uint8Array(wav().length))]) {
+    for (const make of [() => response(wav(), 'text/html'), () => response(wav(), 'audio/mpeg'), () => response(wav(), 'application/octet-stream'), () => response(wav(), 'audio/wavx'), () => response(wav(), 'audio/x-wavx'), () => response(wav(64)), () => response(new Uint8Array(wav().length))]) {
       const p = player(async () => make());
       p.button('Play').dispatch('click');
       await flush();
