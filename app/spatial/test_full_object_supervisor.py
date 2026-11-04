@@ -276,6 +276,43 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual((code, receipt["reason"]), (1, "wall_limit"))
         self.assert_stopped(host)
 
+    def test_wall_alarm_floor_fails_closed_before_arming(self):
+        self.assertEqual(supervisor.WALL_ALARM_FLOOR, .05)
+        host = DummyHost()
+        ticks = iter([1000.0] * 7 + [1497.97])
+
+        def fake_monotonic():
+            try:
+                return next(ticks)
+            except StopIteration:
+                return 1497.97
+
+        real_bounded = supervisor.bounded
+        armed = []
+
+        @contextlib.contextmanager
+        def recording_bounded(seconds=supervisor.TELEMETRY_TIMEOUT):
+            armed.append(seconds)
+            with real_bounded(seconds):
+                yield
+
+        with patch.object(supervisor.time, "monotonic", side_effect=fake_monotonic), \
+                patch.object(supervisor.time, "time", return_value=self.config["startedEpoch"] + 100), \
+                patch.object(supervisor.time, "sleep"), \
+                patch.object(supervisor, "bounded", recording_bounded):
+            code, receipt = self.run_supervisor(host)
+        self.assertEqual((code, receipt["reason"]), (1, "wall_limit"))
+        self.assertEqual(host.samples, 0)
+        self.assertEqual(host.launches, 0)
+        self.assertEqual(len(armed), 1)
+
+    def test_wall_alarm_floor_allows_healthy_telemetry(self):
+        host = DummyHost()
+        code, receipt = self.run_supervisor(host)
+        self.assertEqual(code, 0)
+        self.assertGreater(host.samples, 0)
+        self.assertEqual(host.launches, 1)
+
     def test_runtime_telemetry_loss_stops_and_reaps(self):
         self.worker_code("import time;time.sleep(10)")
         host = DummyHost()

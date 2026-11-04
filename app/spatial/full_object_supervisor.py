@@ -22,6 +22,7 @@ import time
 sys.dont_write_bytecode = True
 GIB, MIB = 1024**3, 1024**2
 WALL, BASELINE, INTERVAL, TELEMETRY_TIMEOUT = 600, 20, .5, 5
+WALL_ALARM_FLOOR = .05
 PROFILE = "(version 1)(allow default)(deny network*)"
 # Bounded wait for an exiting process to read as a zombie or as absent.
 EXIT_SETTLE_POLLS, EXIT_SETTLE_INTERVAL = 20, .005
@@ -389,7 +390,10 @@ def supervise(config_path, host=None):
 
     def telemetry(call):
         check()
-        with bounded(min(TELEMETRY_TIMEOUT, max(.001, deadline - time.monotonic() - 2))):
+        remaining = deadline - time.monotonic() - 2
+        if remaining < WALL_ALARM_FLOOR:
+            raise Stop("wall_limit")
+        with bounded(min(TELEMETRY_TIMEOUT, remaining)):
             result = call()
         check()
         return result
