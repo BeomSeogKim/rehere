@@ -1,29 +1,25 @@
+/* One dusk theme: photographs are lit slides, recollections are lamplight,
+   model estimates are pale dashed ghosts, and unseen space is calm hatching. */
 :root {
-  --bg: #f6f3ee;
-  --surface: #fffdf9;
-  --text: #2a2622;
-  --muted: #6c645b;
-  --line: #e2dbd0;
-  --accent: #3f5f55;
-  --accent-text: #ffffff;
-  --danger: #a3372b;
-  --recording: #c2412f;
-  --radius: 12px;
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1b1917;
-    --surface: #24211e;
-    --text: #ece6dd;
-    --muted: #a69d92;
-    --line: #3a352f;
-    --accent: #8db8a8;
-    --accent-text: #14211c;
-    --danger: #f08b7d;
-    --recording: #f0725f;
-  }
+  --bg: #1d2333;
+  --surface: #262e43;
+  --text: #ebe6da;
+  --muted: #a6acbb;
+  --line: #3a4560;
+  --accent: #ebe6da;
+  --accent-text: #1d2333;
+  --danger: #f08b7d;
+  --recording: #f0725f;
+  --radius: 10px;
+  --mount: #ece9e0;
+  --mount-text: #3b4258;
+  --lamp: #f0be6a;
+  --ghost: #a9b4ff;
+  --ghost-fill: rgba(169, 180, 255, 0.13);
+  --void: #161b28;
+  --unseen-hatch: repeating-linear-gradient(135deg, rgba(235, 230, 218, 0.18) 0 2px, transparent 2px 10px);
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -49,12 +45,12 @@ body {
   padding-top: 24px;
 }
 
-.brand { margin: 0; font-weight: 700; letter-spacing: 0.02em; }
+.brand { margin: 0; font: 600 1.5rem/1.2 var(--serif); letter-spacing: 0.01em; }
 .tagline { margin: 0; color: var(--muted); font-size: 0.9rem; }
 
 main { padding-bottom: 64px; }
 
-h1 { font-size: 1.6rem; line-height: 1.25; margin: 32px 0 8px; }
+h1 { font-family: var(--serif); font-weight: 600; font-size: 1.85rem; line-height: 1.2; margin: 32px 0 8px; }
 h2 { font-size: 1.05rem; margin: 0; }
 .lead { color: var(--muted); margin: 0 0 24px; }
 .hint { color: var(--muted); font-size: 0.875rem; margin: 6px 0 0; }
@@ -444,3 +440,58 @@ button[aria-pressed="true"] { background: var(--accent); color: var(--accent-tex
 .outline-photo > canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; pointer-events: none; }
 .outline-cursor { position: absolute; border: 1px solid white; outline: 1px solid #111; pointer-events: none; box-sizing: border-box; }
 .outline-cutout { display: block; width: 100%; max-width: 420px; height: auto; image-rendering: pixelated; background: #161b20; border-radius: 8px; margin-bottom: 12px; }
+
+/* Evidence states. Each keeps one shape and one word wherever it appears:
+   seen = a photograph in a pale mount, remembered = lamplight serif with a
+   ruled margin, guessed = dashed ghost edge with a flat tint, unseen = hatching.
+   data-kind is set at render time by the scripts that know the meaning. */
+button { border-radius: 8px; }
+.space-viewport { background: var(--void); }
+
+.photo-frame { background: var(--mount); padding: 8px; border-radius: 6px; }
+.photo-frame img { border-radius: 3px; }
+.anchor-frame img { border: 8px solid var(--mount); border-radius: 6px; }
+.box-overlay {
+  border: 2px solid var(--mount);
+  outline: 1px solid rgba(10, 12, 20, 0.6);
+  background: rgba(236, 233, 224, 0.12);
+}
+
+p.memory-text, .visit-memory-summary p, .visit-memory-full p, .share-memory-words, .memory-comparison-words, .place-words {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 1.08rem;
+  color: var(--lamp);
+  border-left: 2px solid var(--lamp);
+  padding-left: 14px;
+}
+.memory-text.source-text { border: 0; border-left: 2px solid var(--lamp); border-radius: 0; }
+.saved-preview { font-family: var(--serif); font-style: italic; color: var(--lamp); }
+
+.box-badge, .object-badge { background: rgba(22, 27, 40, 0.88); border-color: var(--text); }
+:is(.box-badge, .object-badge)[data-kind="seen"] { background: var(--mount); color: var(--bg); border-color: var(--mount); }
+:is(.box-badge, .object-badge)[data-kind="guessed"] { background: var(--bg); color: var(--ghost); border: 1px dashed var(--ghost); }
+:is(.box-badge, .object-badge)[data-kind="remembered"] { background: var(--bg); color: var(--lamp); border: 0; border-left: 3px solid var(--lamp); }
+:is(.box-badge, .object-badge)[data-kind="unseen"] { background: var(--void) var(--unseen-hatch); color: var(--text); border: 1px solid var(--line); }
+
+[data-kind="seen"] .source-summary { border-left: 3px solid var(--mount); padding-left: 8px; }
+[data-kind="remembered"] .source-summary { border-left: 3px solid var(--lamp); padding-left: 8px; }
+
+.memory-review[data-kind="guessed"], .alternative-memory-review[data-kind="guessed"] {
+  border: 1.5px dashed var(--ghost);
+  border-radius: var(--radius);
+  background: var(--ghost-fill);
+  padding: 12px 16px;
+}
+
+.viewport-unseen-label {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--void) var(--unseen-hatch);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.space-viewport-wrap > .viewport-unseen-label { position: absolute; top: 12px; left: 12px; z-index: 1; pointer-events: none; }
