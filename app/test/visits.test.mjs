@@ -277,6 +277,60 @@ describe('visitor screen', () => {
     v.view.dispose();
   });
 
+  it('keeps photo, synthetic accounts and model origin beside each selected saved view', async () => {
+    const data = manifest();
+    data.views[1].evidence.arrangement = 'memory';
+    const v = open(source({ manifest: async () => data }));
+    await flush();
+    const strip = v.find((node) => node.className === 'visit-evidence-strip')[0];
+    assert.match(strip.textContent, /Photo: provided by Owner/);
+    assert.match(strip.textContent, /synthetic demonstration; any shared words or voices are not witness accounts/);
+    assert.doesNotMatch(strip.textContent, /Memory and voice:/);
+    assert.match(strip.textContent, /Model: shape and depth are estimates/);
+    assert.doesNotMatch(strip.textContent, /owner-approved model proposal|SAM 3\.1|Muse Spark|rights|restrictions/);
+    v.button('Mina’s recollection').dispatch('click');
+    assert.match(strip.textContent, /This saved view includes an owner-approved model proposal/);
+    assert.equal(strip.parent.className, 'scene-inspector');
+    assert.deepEqual(currentCamera(), CAMERA);
+    v.view.dispose();
+  });
+
+  it('describes one-object saved pose differences without asserting history or a remembered cause', async () => {
+    const v = open(source());
+    await flush();
+    v.button('Mina’s recollection').dispatch('click');
+    const details = v.find((node) => node.className === 'visit-details')[0];
+    assert.match(details.textContent, /Saved change compared with “Saved scene”/);
+    assert.match(details.textContent, /Selected object: farther right, different turn/);
+    assert.match(details.textContent, /relative scene coordinates/);
+    assert.match(details.textContent, /do not establish when or whether the place changed/);
+    assert.deepEqual(currentCamera(), CAMERA);
+    v.button('Saved scene').dispatch('click');
+    assert.doesNotMatch(details.textContent, /Selected object: farther right/);
+    v.view.dispose();
+  });
+
+  it('keeps mixed and unattached selected quotes alongside a view without claiming they caused its change', async () => {
+    const data = manifest();
+    data.views[1].evidence.arrangement = 'memory';
+    data.views[1].evidence.recollections.push({ providerLabel: 'Mina', text: 'Unattached synthetic words <b>remain text</b>.', periodClaim: '' });
+    const v = open(source({ manifest: async () => data }));
+    await flush();
+    v.button('Mina’s recollection').dispatch('click');
+    const words = v.find((node) => node.className?.includes('visit-shared-excerpts'))[0];
+    assert.equal(words.hidden, false);
+    assert.match(words.textContent, /Synthetic words shared alongside this view/);
+    assert.match(words.textContent, /The counter <b>faced<\/b> the window/);
+    assert.match(words.textContent, /Unattached synthetic words <b>remain text<\/b>/);
+    assert.match(words.textContent, /Their presence does not establish which change they informed/);
+    assert.doesNotMatch(words.textContent, /based on these words|caused|approved.*these words/);
+    assert.equal(v.find((node) => node.tag === 'b').length, 0);
+    v.button('Saved scene').dispatch('click');
+    assert.equal(words.hidden, true);
+    assert.doesNotMatch(v.container.textContent, /Unattached synthetic words/);
+    v.view.dispose();
+  });
+
   it('closes everything at the first failed heartbeat and shows only a generic message', async () => {
     let allowed = true;
     const v = open(source({ check: () => Promise.resolve(allowed) }));
@@ -827,7 +881,7 @@ describe('saved arrangement differences for visitors', () => {
     v.view.dispose();
   });
 
-  it('shows no comparison for a single view or a legacy one-object visit', async () => {
+  it('shows no comparison for a single view and compares retained one-object poses', async () => {
     const single = mount(views());
     await flush();
     assert.doesNotMatch(single.container.textContent, /published starting view|Saved arrangement compared/);
@@ -836,7 +890,9 @@ describe('saved arrangement differences for visitors', () => {
     const legacy = open(source());
     await flush();
     legacy.button('Mina’s recollection').dispatch('click');
-    assert.doesNotMatch(legacy.container.textContent, /published starting view|Saved arrangement compared|differences between saved arrangements/);
+    assert.match(legacy.container.textContent, /Saved change compared with “Saved scene”/);
+    assert.match(legacy.container.textContent, /Selected object: farther right, different turn/);
+    assert.match(legacy.container.textContent, /differences between saved arrangements/);
     legacy.view.dispose();
   });
 });

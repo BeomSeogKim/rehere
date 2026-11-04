@@ -35,6 +35,10 @@ const sharedWords = (view) => {
   const attribution = attributionOf(words);
   return attribution.valid ? { text: words.text, lines: attribution.lines } : null;
 };
+const excerptOf = (text) => {
+  const compact = Array.from(text.replace(/\s+/g, ' ').trim());
+  return compact.length > 80 ? `${compact.slice(0, 80).join('')}…` : compact.join('');
+};
 
 function el(tag, { onclick, ...props } = {}, children = []) {
   const node = document.createElement(tag);
@@ -231,8 +235,8 @@ function viewDetails(view, labelOf, summary = [], nameOf = objectNames(null)) {
 
 const finite3 = (value) => Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
 
-// Saved two-object arrangements compared with the published start view only:
-// per object by stable id, each stored coordinate and the turn compared
+// Saved arrangements compared with the published start view only:
+// for the single foreground or each stable object id, each coordinate and turn compared
 // exactly (no rounding), and the rule compared field by field. Anything that
 // cannot be compared is said to be unknown, never unchanged.
 const AXES = [
@@ -251,7 +255,24 @@ const sameRule = (a, b) => {
   return [...keys].every((key) => a[key] === b[key]);
 };
 function arrangementDifference(view, start, views, objects, nameOf) {
-  if (!objects || !Array.isArray(view.edit?.objects)) return [];
+  if (!objects) {
+    if (views.length < 2) return [];
+    if (view.id === start.id) return [el('p', { className: 'hint', textContent: `“${start.label}” is the published starting view. Other saved positions are compared with it, not with historical measurements.` })];
+    const now = view.edit;
+    const then = start.edit;
+    let text = 'Selected object: unknown; its saved placement is not available in both views.';
+    if (finite3(now?.offset) && finite3(then?.offset) && Number.isFinite(now.yaw) && Number.isFinite(then.yaw)) {
+      const changes = AXES.flatMap(([, more, less], index) => now.offset[index] === then.offset[index] ? [] : [now.offset[index] > then.offset[index] ? more : less]);
+      if (now.yaw !== then.yaw) changes.push('different turn');
+      text = changes.length ? `Selected object: ${changes.join(', ')}.` : 'Selected object: saved position and turn unchanged.';
+    }
+    return [
+      el('p', { className: 'space-choice-label', textContent: `Saved change compared with “${start.label}”` }),
+      el('p', { textContent: text }),
+      el('p', { className: 'hint', textContent: `Directions use the original photo viewpoint and relative scene coordinates. ${DIFFERENCE_NOTE}` }),
+    ];
+  }
+  if (!Array.isArray(view.edit?.objects)) return [];
   const base = `“${start.label}”`;
   if (view.id === start.id) {
     const others = views.some((other) => other.id !== start.id && Array.isArray(other.edit?.objects));
@@ -385,6 +406,9 @@ export function mountVisitor(container, source, { onState = () => {}, limitedPho
     const details = el('div', { className: 'visit-details' });
     const memoryWords = el('section', { className: 'memory-edit visit-memory-summary', hidden: true });
     const fullMemoryWords = el('details', { className: 'source-details visit-memory-full', hidden: true });
+    const origins = el('section', { className: 'visit-evidence-strip' });
+    origins.setAttribute('aria-label', 'Photo, memory and model origins');
+    const selectedWords = el('section', { className: 'memory-edit visit-shared-excerpts', hidden: true });
     memoryWords.setAttribute('data-kind', 'remembered');
     fullMemoryWords.setAttribute('data-kind', 'remembered');
     const message = el('p', { className: 'hint', role: 'status' });
@@ -556,12 +580,33 @@ export function mountVisitor(container, source, { onState = () => {}, limitedPho
       sideStatus.textContent = '';
       const view = views.get(id);
       const shared = sharedWords(view);
+      const photos = view.evidence?.photos ?? (view.evidence?.photo ? [view.evidence.photo] : []);
+      const originLine = (kind, text) => {
+        const node = el('p', { textContent: text });
+        node.setAttribute('data-kind', kind);
+        return node;
+      };
+      origins.replaceChildren(
+        ...photos.map((photo) => originLine('seen', `Photo${photo.objectId ? ` (${nameOf(photo.objectId)})` : ''}: provided by ${photo.providerLabel || 'an unnamed provider'}.`)),
+        ...(!photos.length ? [originLine('seen', 'Photo attribution is not recorded for this view.')] : []),
+        originLine('remembered', manifest.synthetic ? 'Memory: synthetic demonstration; any shared words or voices are not witness accounts.' : 'Memory: any shared words or voices are attributed accounts, not verified history.'),
+        originLine('guessed', `Model: ${fullObject ? 'shape, depth and unseen object sides are estimates' : composition ? 'shape and depth are estimates; layout and scale are owner assumptions' : 'shape and depth are estimates; unseen surfaces stay empty'}.${view.evidence?.arrangement === 'memory' ? ' This saved view includes an owner-approved model proposal.' : ''}`),
+      );
+      const quotes = view.evidence?.recollections ?? [];
+      selectedWords.hidden = quotes.length === 0;
+      selectedWords.replaceChildren(...(quotes.length ? [
+        el('h4', { textContent: manifest.synthetic ? 'Synthetic words shared alongside this view' : 'Words shared alongside this view' }),
+        ...quotes.flatMap((quote) => [
+          el('p', { className: 'hint', textContent: `Shared by ${quote.providerLabel || 'an unnamed contributor'}` }),
+          el('p', { className: 'memory-text', textContent: `Excerpt: “${excerptOf(quote.text)}”` }),
+        ]),
+        el('p', { className: 'hint', textContent: 'These selected words are shared alongside this view. Their presence does not establish which change they informed. Full words and recorded support are below.' }),
+      ] : []));
       memoryWords.hidden = !shared;
       fullMemoryWords.hidden = memoryWords.hidden;
       fullMemoryWords.open = false;
       const words = shared?.text ?? '';
-      const compact = Array.from(words.replace(/\s+/g, ' ').trim());
-      const excerpt = compact.length > 80 ? `${compact.slice(0, 80).join('')}…` : compact.join('');
+      const excerpt = excerptOf(words);
       memoryWords.replaceChildren(...(memoryWords.hidden ? [] : [
         el('h3', { textContent: 'Words shared about this change' }),
         el('p', { textContent: `Excerpt: “${excerpt}”` }),
@@ -800,8 +845,10 @@ export function mountVisitor(container, source, { onState = () => {}, limitedPho
         ]),
         el('div', { className: 'scene-inspector' }, [
           buttons,
+          origins,
           memoryWords,
           fullMemoryWords,
+          selectedWords,
           ...(objects ? [objectButtons, sideButton, sideStatus, evidenceBox] : []),
           details,
           photoBox,

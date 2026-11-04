@@ -563,6 +563,11 @@ button.secondary:hover:not(:disabled):not([aria-pressed="true"]) { background: v
 :is(.scene-workspace button, .scene-workspace summary):focus-visible { outline: 3px solid var(--lamp); outline-offset: 3px; }
 .scene-inspector > .actions[role="group"] { padding-top: 16px; border-top: 1px solid var(--line); }
 .scene-inspector > .source-details { padding-block: 12px; border-block: 1px solid var(--line); }
+.visit-evidence-strip { padding-block: 4px; margin-bottom: 16px; font-size: 0.875rem; overflow-wrap: anywhere; }
+.visit-evidence-strip p { margin: 8px 0; padding-left: 10px; }
+.visit-evidence-strip [data-kind="seen"] { border-left: 2px solid var(--mount); }
+.visit-evidence-strip [data-kind="remembered"] { border-left: 2px solid var(--lamp); }
+.visit-evidence-strip [data-kind="guessed"] { border-left: 2px dashed var(--ghost); }
 .visit-details { margin-top: 20px; }
 .visit-details h3 { font: 600 1.4rem/1.25 var(--serif); margin: 0 0 16px; }
 .visit-details .hint { margin: 12px 0; }
