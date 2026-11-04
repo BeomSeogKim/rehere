@@ -181,6 +181,8 @@ The private server listens on the loopback interface only. An optional
 [visitor-only ingress](VISITOR-INGRESS.md) adds a separate loopback port for
 saved visits behind an independently operated HTTPS proxy; account and editing
 routes remain private. No proxy or public deployment is configured by the app.
+A saved visit can also be copied into a frozen [static folder](STATIC-DEMO.md)
+that any file server can show without the app, models or an account.
 Saved memories and workspace authority are written to `app/data/`, which is
 ignored by Git. Deleting that folder removes both, including any access card
 kept inside it. Keep a separate secure copy of the current card.

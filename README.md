@@ -31,7 +31,10 @@ originals; current restrictions also govern existing snapshots.
 Imported recordings can be attached to exact saved arrangements with
 human-supplied captions and explicitly included in visitor snapshots.
 Scoped contributors can submit photos and recordings for owner review.
-Multi-view alignment and hosted operation remain absent.
+A saved visitor snapshot can be exported as a frozen, read-only
+[static copy](app/STATIC-DEMO.md) that needs no server; it does not follow
+later revocation or withdrawal. Multi-view alignment and live hosted
+operation remain absent.
 
 The production deployment stack is not selected.
 
