@@ -22,7 +22,12 @@ const MAX_OUTPUT_CHARS = 8 * 1024 * 1024;
 const TIMEOUT_MS = 60_000;
 const MIME = { jpeg: 'image/jpeg', png: 'image/png' };
 
-export class SegmentationError extends Error {}
+export class SegmentationError extends Error {
+  constructor(message, code) {
+    super(message);
+    if (code !== undefined) this.code = code;
+  }
+}
 
 // The exact Responses body. Key order is fixed here, so the digest of its
 // JSON text binds prompt, photo bytes and options.
@@ -64,7 +69,10 @@ export function parseInstances(outputText, { width, height }) {
     const n = (value) => Number(value);
     if (seen.has(id)) throw new SegmentationError('duplicate instance id');
     seen.add(id);
-    if (n(w) !== width || n(h) !== height) throw new SegmentationError('instance frame does not match the photo');
+    if (n(w) !== width || n(h) !== height) {
+      if (width !== height && n(w) === height && n(h) === width) throw new SegmentationError('instance frame is the photo turned by 90 degrees', 'rotated');
+      throw new SegmentationError('instance frame does not match the photo');
+    }
     if (!(n(x1) <= n(x2) && n(y1) <= n(y2) && n(x2) < width && n(y2) < height)) throw new SegmentationError('instance box outside the photo');
     if (n(mw) !== n(x2) - n(x1) + 1 || n(mh) !== n(y2) - n(y1) + 1) throw new SegmentationError('mask raster does not match its box');
     if ((boxC ?? null) !== (maskC ?? null)) throw new SegmentationError('box and mask confidence differ');
@@ -141,7 +149,7 @@ export function createLiveSegmenter({ apiKey, ledger, fetch = globalThis.fetch, 
       const body = segmentationBody({ prompt, imageBytes, format });
       const requestDigest = segmentationDigest(body);
       const reservation = await ledger.reserve(IMAGE_USD);
-      if (!reservation) throw new SegmentationError('the segmentation budget is used up');
+      if (!reservation) throw new SegmentationError('the segmentation budget is used up', 'budget');
       const started = Date.now();
       const timeout = AbortSignal.timeout(timeoutMs);
       const both = signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -202,8 +210,10 @@ export function segmentationRecorder(file) {
 }
 
 const lower = (value, fallback) => {
+  if (value === undefined || value === '') return fallback;
   const number = Number(value);
-  return value !== undefined && Number.isFinite(number) && number > 0 && number < fallback ? number : fallback;
+  if (!Number.isFinite(number) || number <= 0 || number > fallback) throw new Error('Segmentation limits can only be lowered.');
+  return number;
 };
 
 // null keeps the local SAM2 default. Opting in without a usable mode stops startup.
@@ -216,10 +226,12 @@ export function segmenterFromEnv({ ledgerFile, env = process.env }) {
     return createStoredSegmenter({ entries: parseStoredSegmentations(JSON.parse(readFileSync(env.REHERE_SEGMENTATION_REPLAY, 'utf8'))) });
   }
   if (!live || !env.MODEL_API_KEY) throw new Error('SAM 3.1 segmentation needs REHERE_SEGMENTATION_REPLAY, or REHERE_SEGMENTATION_LIVE=1 with MODEL_API_KEY.');
+  const maxRequests = lower(env.REHERE_SEGMENTATION_MAX_REQUESTS, DEFAULT_SEGMENTATION_LIMITS.maxRequests);
+  if (!Number.isInteger(maxRequests)) throw new Error('REHERE_SEGMENTATION_MAX_REQUESTS must be a whole number of requests.');
   const limits = {
     totalUsd: lower(env.REHERE_SEGMENTATION_TOTAL_USD, DEFAULT_SEGMENTATION_LIMITS.totalUsd),
     perRequestUsd: IMAGE_USD,
-    maxRequests: Math.floor(lower(env.REHERE_SEGMENTATION_MAX_REQUESTS, DEFAULT_SEGMENTATION_LIMITS.maxRequests)),
+    maxRequests,
   };
   const recorder = env.REHERE_SEGMENTATION_RECORD ? segmentationRecorder(env.REHERE_SEGMENTATION_RECORD) : null;
   return createLiveSegmenter({ apiKey: env.MODEL_API_KEY, ledger: new BudgetLedger({ file: ledgerFile, limits }), recorder });

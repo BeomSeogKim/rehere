@@ -6,7 +6,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { BudgetLedger } from '../meta-model.mjs';
 import {
-  SEGMENTATION_LABEL, createLiveSegmenter, createStoredSegmenter, parseInstances, parseStoredSegmentations, segmentationBody,
+  SEGMENTATION_LABEL, SegmentationError, createLiveSegmenter, createStoredSegmenter, parseInstances, parseStoredSegmentations, segmentationBody,
   segmentationDigest, segmenterFromEnv, selectInstance,
 } from '../meta-segmentation.mjs';
 import { jobStatusText } from '../public/photo-scene.js';
@@ -68,6 +68,20 @@ describe('SAM 3.1 instance parsing and selection', () => {
       'too many instances': line(...Array.from({ length: 65 }, (_, i) => record(i, [0, 0, 1, 1]))),
     };
     for (const [name, text] of Object.entries(bad)) assert.throws(() => parseInstances(text, FRAME), undefined, name);
+  });
+
+  it('reports a sideways frame from a rotated photo and keeps the old message otherwise', () => {
+    const swapped = line(record(0, [2, 4, 13, 25], '0.9', [30, 40]));
+    try {
+      parseInstances(swapped, FRAME);
+      assert.fail('expected a rotated frame error');
+    } catch (error) {
+      assert.ok(error instanceof SegmentationError);
+      assert.equal(error.code, 'rotated');
+      assert.match(error.message, /turned by 90 degrees/);
+    }
+    assert.throws(() => parseInstances(line(record(0, [2, 4, 13, 25], '0.9', [80, 60])), FRAME), /does not match the photo/);
+    assert.throws(() => parseInstances(line(record(0, [2, 4, 13, 25], '0.9', [40, 40])), FRAME), /does not match the photo/);
   });
 
   it('selects one instance by the owner box and refuses weak or tied matches, never by confidence', () => {
@@ -133,8 +147,27 @@ describe('SAM 3.1 modes', () => {
     const ledger = new BudgetLedger({ file: path.join(dir, 'ledger.json'), limits: { totalUsd: 0.01, perRequestUsd: 0.0025, maxRequests: 0 } });
     let calls = 0;
     const live = createLiveSegmenter({ apiKey: 'k', ledger, fetch: async () => { calls += 1; return completed(''); } });
-    await assert.rejects(live.segment({ prompt: 'chair', imageBytes: bytes, format: 'png' }), /budget/);
+    const error = await live.segment({ prompt: 'chair', imageBytes: bytes, format: 'png' }).then(() => null, (value) => value);
+    assert.ok(error instanceof SegmentationError);
+    assert.equal(error.code, 'budget');
+    assert.match(error.message, /budget/);
     assert.equal(calls, 0);
+  });
+
+  it('only lowers segmentation limits from the environment', async () => {
+    const base = { REHERE_SEGMENTATION: 'sam-3.1', REHERE_SEGMENTATION_LIVE: '1', MODEL_API_KEY: 'k' };
+    const dir = await temp();
+    for (const value of ['0.06', '0', '-1', 'abc']) {
+      assert.throws(() => segmenterFromEnv({ ledgerFile: path.join(dir, 'l.json'), env: { ...base, REHERE_SEGMENTATION_TOTAL_USD: value } }), /only be lowered/);
+    }
+    for (const value of ['21', '0', '-1', 'abc']) {
+      assert.throws(() => segmenterFromEnv({ ledgerFile: path.join(dir, 'l.json'), env: { ...base, REHERE_SEGMENTATION_MAX_REQUESTS: value } }), /only be lowered/);
+    }
+    for (const value of ['0.5', '2.5']) {
+      assert.throws(() => segmenterFromEnv({ ledgerFile: path.join(dir, 'l.json'), env: { ...base, REHERE_SEGMENTATION_MAX_REQUESTS: value } }), /whole number/);
+    }
+    const lowered = segmenterFromEnv({ ledgerFile: path.join(dir, 'l.json'), env: { ...base, REHERE_SEGMENTATION_TOTAL_USD: '0.01', REHERE_SEGMENTATION_MAX_REQUESTS: '3' } });
+    assert.equal(lowered.mode, 'live');
   });
 
   it('stays off by default and refuses an opt-in without a usable mode', async () => {
@@ -319,6 +352,34 @@ describe('two-object builds with SAM 3.1 outlines', () => {
       assert.match(manifest.error, /SAM 3.1 \(Meta Model API\) could not match “Display counter”.*almost equally/);
       assert.equal(runner.calls.length, 0);
       assert.equal(segmenter.calls.length, 1);
+    } finally { await ctx.app.close(); }
+  });
+
+  it('tells the owner when the request budget is used up', async () => {
+    const runner = syntheticRunner();
+    const segmenter = { mode: 'recorded', calls: [], async segment() {
+      segmenter.calls.push({});
+      throw new SegmentationError('the segmentation budget is used up', 'budget');
+    } };
+    const ctx = await place({ reconstructionRunner: runner, segmenter });
+    try {
+      const { manifest } = await build(ctx);
+      assert.equal(manifest.status, 'failed');
+      assert.match(manifest.error, /request budget is used up/);
+      assert.equal(runner.calls.length, 0);
+    } finally { await ctx.app.close(); }
+  });
+
+  it('tells the owner to save a rotated photo upright', async () => {
+    const runner = syntheticRunner();
+    const swapped = line(record(0, [2, 4, 13, 25], '0.9', [30, 40]));
+    const segmenter = fakeSegmenter({ texts: { 'Display counter': swapped } });
+    const ctx = await place({ reconstructionRunner: runner, segmenter });
+    try {
+      const { manifest } = await build(ctx);
+      assert.equal(manifest.status, 'failed');
+      assert.match(manifest.error, /turned sideways.*EXIF rotation/);
+      assert.equal(runner.calls.length, 0);
     } finally { await ctx.app.close(); }
   });
 

@@ -68,6 +68,8 @@ const MESSAGES = {
   interrupted: 'The app stopped before this build finished. Start a new build.',
   restricted: 'The owner turned off model processing or stopped using this photo, so no scene was published.',
   segmentation: 'SAM 3.1 (Meta Model API) did not return outlines for this build, so no scene was published. Nothing else was sent.',
+  segmentationBudget: 'This app\'s SAM 3.1 (Meta Model API) request budget is used up, so no scene was published. Failed requests count against it too; the app operator can review the budget.',
+  segmentationRotated: 'SAM 3.1 (Meta Model API) returned outlines for this photo turned sideways, usually because of an EXIF rotation flag, so no scene was published. Save the photo upright without the flag and upload it again.',
   unknown: 'The scene could not be built. Please try again.',
 };
 
@@ -1313,6 +1315,8 @@ export class ReconstructionStore {
       } catch (error) {
         if (signal.aborted) return {};
         console.error(`segmentation ${manifest.id} failed: ${error instanceof SegmentationError ? error.message : error?.name ?? 'error'}`);
+        if (error?.code === 'budget') return { error: MESSAGES.segmentationBudget };
+        if (error?.code === 'rotated') return { error: MESSAGES.segmentationRotated };
         return { error: MESSAGES.segmentation };
       }
       if (picked.refused) {
