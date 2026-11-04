@@ -20,26 +20,33 @@ these it rests on. Contributors keep control of their material. When a source
 is withdrawn, the shared views that depend on it stop being served.
 
 **Why this matters.** When a place is lost, what remains is a handful of
-photographs and the people who remember it. The Grand Canyon Lodge on the North
-Rim was destroyed by fire in July 2025. Tools that fill gaps with plausible
-imagery make memory and invention indistinguishable. Rehere lets people share a partial view of a lost place,
+photographs and the people who remember it. New York's original Penn Station
+was demolished in 1963. Tools that fill gaps with plausible imagery make memory
+and invention indistinguishable. Rehere lets people share a partial view of a lost place,
 with originals that keep their checksums and every approved change recorded
 as a new, attributed version.
 
-**Demo material.** Photographs of the Grand Canyon Lodge from the Historic
-American Buildings Survey (HABS AZ-135-A, Richard Frear, July 1982; Library of
-Congress), a U.S. Government work with no known restrictions on images made by
-the U.S. Government, per the [Library of Congress HABS rights
-advisory](https://www.loc.gov/rr/print/res/114_habs.html). Notes in the demo
-are labelled as demonstration hypotheses, not recollections. The demo's owner
-note is read aloud by a Synthetic demo voice (macOS text-to-speech): a
-demonstration instruction about the archival photo, not a person, memory or
-witness account.
+**Demo material.** The main visit uses New York's original Penn Station,
+photograph 8 of HABS NY-5471, by Cervin Robinson, April 24, 1962. Credit:
+Cervin Robinson, 1962. HABS NY-5471. U.S. Government work. No known restrictions
+on images made by the U.S. Government. The story and notes are synthetic,
+labelled demonstrations, not a real person's memory. The story belongs only to
+Saved version 1. Saved version 2 holds an owner-approved, hypothetical
+10-degree clock turn with no translation; its note is not historical evidence.
+The scene uses local SAM 2.1 and local depth, not SAM 3.1, and a small change
+of viewpoint exposes empty and torn edges. It is not a complete room.
+
+The separate lodge gallery uses Richard Frear's July 1982 photographs of the
+Grand Canyon Lodge (HABS AZ-135-A; Library of Congress). These are U.S.
+Government works with no known restrictions on images made by the U.S.
+Government, per the [Library of Congress HABS rights
+advisory](https://www.loc.gov/rr/print/res/114_habs.html). Its SAM 3.1 results
+are separate from the Penn visit. See [demo provenance](app/demo/README.md).
 
 **Meta models in Rehere**
 
 - **Muse Spark** (`muse-spark-1.3`), in the optional planner, turns an owner's note into one bounded proposed edit. The app checks it, and nothing is saved until the owner approves. In an optional, owner-only evidence check, it also says whether chosen photographs support, conflict with, or do not show up to three verbatim parts of a note. Both are off by default.
-- **SAM 3.1** (Meta Model API) is an optional, off-by-default outline provider; Meta's SAM 2.1, run locally, remains the default. The demo scene's outlines were replayed from recorded live SAM 3.1 responses (no new call). The [lodge gallery](https://beomseogkim.github.io/rehere/lodge-index.html) shows 30 live one-noun requests on three photographs, with what they missed. Those are 2D estimates, not measurements, and they are not the demo scene's outlines.
+- **SAM 3.1** (Meta Model API) is an optional, off-by-default outline provider; Meta's SAM 2.1, run locally, remains the default. The earlier Lodge scene's outlines were replayed from recorded live SAM 3.1 responses (no new call). The Penn visit uses local SAM 2.1 instead. The [lodge gallery](https://beomseogkim.github.io/rehere/lodge-index.html) shows 30 live one-noun requests on three photographs, with what they missed. Those are 2D estimates, not measurements, and they are not the demo scene's outlines.
 - **Muse Voice Transcribe**, optional and off by default, drafts captions for a recorded story, and the owner reviews them before visitors see them.
 - **Muse Code**, Meta's coding agent, wrote ten changes that the team reviewed before merging (five entirely, five finished with team edits), including export safety checks, request-limit checks, a visitor accessibility fix, a README setup step and a regression test for the 3D camera controls; it also ran read-only review sweeps.
 - **[EVALUATION.md](app/evaluation/evidence/EVALUATION.md):** 240 live evidence checks. Agreement on conflicting claims is 80% (low) / 87% (medium); strict agreement across all claims is 52.5% / 55%, and part-aware agreement is 78.3% / 87.5%. Agreement on `not_visible` claims is 31% at both efforts. Team-written labels with AI assistance, not a benchmark, never historical truth.
@@ -86,9 +93,10 @@ refuses the build; depth stays local. The masks are decoded with Meta's
 `meta-sam-parser`, which is under a custom Meta license (see the [third-party
 notices](THIRD-PARTY-NOTICES.md)) and is not redistributed here. A stored SAM
 3.1 response can be replayed only for a byte-identical request and sends
-nothing, while a live request is a separate, budgeted mode. The published demo
+nothing, while a live request is a separate, budgeted mode. The earlier Lodge
 scene's outline source reads "SAM 3.1 (Meta Model API)", and its outlines were
-built by replaying a stored response, so building it made no new API call.
+built by replaying a stored response, so building it made no new API call. The
+Penn visit uses local SAM 2.1; these Lodge results do not describe its outline.
 Neither path measures geometry or establishes history. See [two
 objects](app/OBJECTS.md#build-and-confirm-two-objects-from-one-photo) and the
 [spatial worker guide](app/spatial/README.md).
@@ -101,7 +109,8 @@ those photos for that note only, never historical truth. It is owner-only,
 nothing is applied to a scene, and the owner accepts or dismisses each result.
 See [owner evidence checks](app/README.md#owner-evidence-checks).
 
-Try it: a frozen, read-only demo of one synthetic snapshot is at
+Try it: a frozen, read-only visit to New York's original Penn Station, using
+synthetic demonstration words and voice, is at
 https://beomseogkim.github.io/rehere/
 It is an offline copy (see the static copy above), so it does not follow
 revocation or withdrawal.

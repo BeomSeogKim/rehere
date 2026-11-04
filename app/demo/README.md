@@ -3,7 +3,38 @@
 Run these commands from the repository root. If the quickstart left you in
 `app/`, return to the repository root first with `cd ..`.
 
-## A place to revisit: Grand Canyon Lodge
+## Current visit: New York's original Penn Station
+
+The visit uses [Cervin Robinson's April 24, 1962 photograph of the main
+concourse](https://commons.wikimedia.org/wiki/File:Main_concourse_of_Pennsylvania_Station,_New_York_City_on_April_24,_1962.jpg),
+HABS NY-5471, photograph 8. The source JPEG SHA-256 is
+`80a4e27ca08caf3d3ad9e90df603725584e42c3ab8ae2addf39dc4c4b1b5a026`.
+Credit: Cervin Robinson, 1962. HABS NY-5471. U.S. Government work. No known
+restrictions on images made by the U.S. Government.
+
+Local SAM 2.1 outlines the clock and local depth produces partial surfaces.
+No SAM 3.1 outline is used in this scene. The photograph viewpoint remains
+recognizable, but even a small camera move exposes torn edges and empty areas.
+These are limits of the reconstruction, not recovered parts of a complete room.
+
+Saved version 1 is the original orientation and has the synthetic story.
+Muse Voice Transcribe drafted its captions; the demonstration owner corrected
+a duplicated phrase before saving them. The voice is synthetic macOS
+text-to-speech, not a witness. Saved version 2 has the demonstration hypothesis
+about the clock: Muse Spark (`muse-spark-1.3`), response
+`resp_6aeb2351b74e8530803c4fc0`, proposed the change, the owner previewed it and
+approved the save. The saved turn is -0.1745 radians (about -10 degrees) with
+zero translation. Its sign is a scene coordinate, not a historical assertion
+about which direction the clock faced. The story remains attached only to
+Saved version 1.
+
+The frozen snapshot is `99787631-6b65-4e9d-a24d-02ac00d2b154`; original view
+`ed8fa175-109b-4a16-aabf-b0bca84c47c5`, changed view
+`dacbf03a-71cf-4bb3-ba1f-0f1a7c804404`. The public copy is read-only and does not
+follow later revocation or withdrawal. The [static guide](../STATIC-DEMO.md)
+describes that boundary. No real recollection or consumer validation is claimed.
+
+## Earlier example: Grand Canyon Lodge
 
 Grand Canyon Lodge on the North Rim was destroyed in the July 2025 Dragon Bravo
 Fire, according to the [National Park Service](https://www.nps.gov/grca/northrimstatus.htm).
@@ -15,7 +46,7 @@ identifies the source. A [separate detail photograph](https://www.loc.gov/pictur
 shows a wall light in the same room, but the captions do not establish which
 fixture it is in the wider view or how the photographs align.
 
-### Current scenario: wicker chest and rocking chair (photograph 26)
+### Wicker chest and rocking chair (photograph 26)
 
 The [HABS caption index](https://tile.loc.gov/storage-services/master/pnp/habshaer/az/az0400/az0459/data/az0459cap.pdf)
 catalogs AZ-135-A-26 as "Wicker chest and rocking chair", by the same
