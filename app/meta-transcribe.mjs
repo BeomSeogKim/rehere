@@ -1,5 +1,9 @@
 import { BudgetLedger, META_API } from './meta-model.mjs';
 import { STORY_LIMITS } from './stories.mjs';
+import { randomUUID } from 'node:crypto';
+import { open, readFile, rename, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 export const TRANSCRIBE_MODEL = 'muse-voice-transcribe-1.0';
 export const TRANSCRIBE_LABEL = 'Muse Voice Transcribe';
@@ -10,6 +14,130 @@ export const MAX_DRAFT_MS = 60_000;
 // the billed amount. Estimates are local bounds, not bills.
 export const USD_PER_AUDIO_MS = 0.18 / 3_600_000;
 export const DEFAULT_TRANSCRIBE_LIMITS = Object.freeze({ totalUsd: 0.05, perRequestUsd: 0.005, maxRequests: 10 });
+const STRICT_TOTAL_USD = 0.003;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+const positive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+const timestamp = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+
+async function syncDirectory(file) {
+  const directory = await open(path.dirname(file), 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
+// A dedicated one-attempt workspace. The permanent marker precedes the ledger
+// write, so an interrupted reservation refuses reuse even before any send.
+export class StrictTranscribeLedger {
+  #unstarted = new Set();
+  constructor({ file, oneShotFile, limits }) {
+    if (typeof file !== 'string' || !path.isAbsolute(file) || typeof oneShotFile !== 'string' || !path.isAbsolute(oneShotFile)
+        || path.resolve(file) === path.resolve(oneShotFile) || !exact(limits, ['totalUsd', 'perRequestUsd', 'maxRequests'])
+        || !positive(limits.totalUsd) || limits.totalUsd > STRICT_TOTAL_USD || !positive(limits.perRequestUsd)
+        || limits.perRequestUsd > limits.totalUsd || limits.maxRequests !== 1) throw new Error('Strict transcription requires explicit one-attempt limits and distinct absolute ledger paths.');
+    this.file = file;
+    this.oneShotFile = oneShotFile;
+    this.limits = Object.freeze({ ...limits });
+    this.queue = Promise.resolve();
+  }
+
+  serialize(task) {
+    const run = this.queue.then(task);
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  async #marker() {
+    let text;
+    try { text = await readFile(this.oneShotFile, 'utf8'); } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+    return this.#validateMarker(JSON.parse(text));
+  }
+
+  #validateMarker(marker) {
+    if (!exact(marker, ['id', 'reservedUsd', 'at']) || !UUID.test(marker.id) || !positive(marker.reservedUsd)
+        || marker.reservedUsd > this.limits.perRequestUsd || !timestamp(marker.at)) throw new Error('The transcription one-shot marker is unreadable.');
+    return marker;
+  }
+
+  async read() {
+    const state = JSON.parse(await readFile(this.file, 'utf8'));
+    return this.#validateState(state, await this.#marker());
+  }
+
+  #validateState(state, marker) {
+    if (!exact(state, ['entries']) || !Array.isArray(state.entries) || state.entries.length > 1) throw new Error('The strict transcription ledger is unreadable.');
+    const [entry] = state.entries;
+    if (!entry) {
+      if (marker) throw new Error('The transcription reservation was interrupted or reset.');
+      return state;
+    }
+    if (!exact(entry, ['id', 'state', 'reservedUsd', 'estimatedUsd', 'at']) || !UUID.test(entry.id)
+        || !['reserved', 'settled'].includes(entry.state) || !positive(entry.reservedUsd) || entry.reservedUsd > this.limits.perRequestUsd
+        || !timestamp(entry.at) || (entry.state === 'reserved' ? entry.estimatedUsd !== null : entry.estimatedUsd !== 0)
+        || !marker || marker.id !== entry.id || marker.reservedUsd !== entry.reservedUsd || marker.at !== entry.at) throw new Error('The strict transcription reservation is inconsistent.');
+    return state;
+  }
+
+  async write(state, { reservation = false } = {}) {
+    // Marker creation temporarily precedes the first ledger row. Require the
+    // existing file itself here; never create or repair a missing ledger.
+    const current = JSON.parse(await readFile(this.file, 'utf8'));
+    if (!exact(current, ['entries']) || !Array.isArray(current.entries) || current.entries.length > 1) throw new Error('The strict transcription ledger is unreadable.');
+    if (reservation) {
+      const marker = await this.#marker(), entry = state.entries[0];
+      if (current.entries.length || !marker || marker.id !== entry.id || marker.reservedUsd !== entry.reservedUsd || marker.at !== entry.at) {
+        throw new Error('The transcription reservation could not be persisted.');
+      }
+    } else await this.read();
+    const temp = `${this.file}.${randomUUID()}.tmp`;
+    try {
+      const handle = await open(temp, 'wx', 0o600);
+      try { await handle.writeFile(JSON.stringify(state, null, 2)); await handle.sync(); } finally { await handle.close(); }
+      await rename(temp, this.file);
+      await syncDirectory(this.file);
+    } finally { await rm(temp, { force: true }); }
+  }
+
+  reserve(reservedUsd) {
+    return this.serialize(async () => {
+      const state = await this.read();
+      if (state.entries.length || !positive(reservedUsd) || reservedUsd > this.limits.perRequestUsd || reservedUsd > this.limits.totalUsd) return null;
+      const marker = { id: randomUUID(), reservedUsd, at: new Date().toISOString() };
+      let handle;
+      try { handle = await open(this.oneShotFile, 'wx', 0o600); } catch (error) {
+        if (error.code === 'EEXIST') return null;
+        throw error;
+      }
+      try { await handle.writeFile(JSON.stringify(marker)); await handle.sync(); } finally { await handle.close(); }
+      await syncDirectory(this.oneShotFile);
+      await this.write({ entries: [{ ...marker, state: 'reserved', estimatedUsd: null }] }, { reservation: true });
+      this.#unstarted.add(marker.id);
+      return marker.id;
+    });
+  }
+
+  markStarted(id) {
+    // This synchronous check stays inside the caller's admission mutex.
+    const state = this.#validateState(JSON.parse(readFileSync(this.file, 'utf8')),
+      this.#validateMarker(JSON.parse(readFileSync(this.oneShotFile, 'utf8'))));
+    if (state.entries[0]?.id !== id || state.entries[0].state !== 'reserved') throw new Error('The transcription reservation is unavailable.');
+    if (!this.#unstarted.delete(id)) throw new Error('The transcription attempt cannot be started again.');
+  }
+
+  settle(id, estimatedUsd) {
+    return this.serialize(async () => {
+      const state = await this.read();
+      const [entry] = state.entries;
+      if (!entry || entry.id !== id || entry.state !== 'reserved' || estimatedUsd !== 0 || !this.#unstarted.delete(id)) {
+        throw new Error('A started or unknown transcription reservation cannot be released.');
+      }
+      await this.write({ entries: [{ ...entry, state: 'settled', estimatedUsd: 0 }] });
+    });
+  }
+}
 // The language names the provider documents for `languageBias`.
 export const BIAS_LANGUAGES = Object.freeze([
   'Arabic', 'Bengali', 'Dutch', 'English', 'French', 'German', 'Hebrew', 'Hindi', 'Indonesian', 'Italian', 'Japanese', 'Kannada', 'Korean',
@@ -88,6 +216,7 @@ export function createMetaTranscriber({ apiKey, ledger, fetch = globalThis.fetch
   if (!apiKey) throw new Error('A model API key is required.');
   if (language !== null && !BIAS_LANGUAGES.includes(language)) throw new Error('The transcription language must be one of the documented language names.');
   const options = { model: TRANSCRIBE_MODEL, mode: 'ENDPOINTING', audioEncoding: 'WAV', ...(language && { languageBias: [language] }) };
+  const strict = ledger instanceof StrictTranscribeLedger;
   let busy = false;
   const post = async (wav, signal) => {
     const form = new FormData();
@@ -125,15 +254,30 @@ export function createMetaTranscriber({ apiKey, ledger, fetch = globalThis.fetch
       if (!reservation) return { ...failure('budget'), call: call() };
       let sending = null;
       let started = null;
+      let startedRequest = null;
+      let admissionOpen = true;
       try {
         sending = await admit(() => {
+          if (strict) {
+            if (!admissionOpen || started !== null) throw new Error('The transcription admission is no longer open.');
+            ledger.markStarted(reservation);
+          }
           started = now();
-          return post(wav, combined);
+          startedRequest = post(wav, combined);
+          // Admission can fail after start without returning its promise.
+          if (strict) startedRequest.catch(() => {});
+          return startedRequest;
         });
       } catch {
         sending = null;
+      } finally {
+        admissionOpen = false;
       }
-      if (!sending) {
+      if (!sending || (strict && sending.value !== startedRequest)) {
+        if (strict && started !== null) {
+          return { ...(combined.aborted ? stopped() : failure('provider')), unknown: true,
+            call: call({ ...estimate, dispatched: true, latencyMs: now() - started }) };
+        }
         await ledger.settle(reservation, 0);
         return { ...(combined.aborted ? stopped() : failure('restricted')), call: call() };
       }
@@ -144,6 +288,7 @@ export function createMetaTranscriber({ apiKey, ledger, fetch = globalThis.fetch
         // An unknown outcome keeps its full reservation.
         return { ...(combined.aborted ? stopped() : failure('provider')), unknown: true, call: call({ ...estimate, dispatched: true, latencyMs: now() - started }) };
       }
+      if (strict) await ledger.read();
       const record = call({
         ...estimate, dispatched: true, httpStatus: answer.status, providerRequestId: id(answer.requestId), providerSessionId: id(answer.json?.sessionId), latencyMs: now() - started,
       });
@@ -169,8 +314,17 @@ function limit(value, fallback) {
 // Live use needs the key and its own enable flag, separate from the planner's.
 // Limit overrides can only lower the defaults. REHERE_TRANSCRIBE_LANGUAGE
 // optionally names one documented language to bias recognition toward.
-export function metaTranscriberFromEnv({ ledgerFile, env = process.env }) {
+export function metaTranscriberFromEnv({ ledgerFile, oneShotFile, env = process.env }) {
   if (!env.MODEL_API_KEY || env.REHERE_TRANSCRIBE_LIVE !== '1') return null;
+  if (env.REHERE_TRANSCRIBE_STRICT === '1') {
+    const totalUsd = Number(env.REHERE_TRANSCRIBE_TOTAL_USD);
+    if (!positive(totalUsd) || totalUsd > STRICT_TOTAL_USD || Number(env.REHERE_TRANSCRIBE_MAX_REQUESTS) !== 1) {
+      throw new Error('Strict transcription requires an explicit total no greater than 0.003 and exactly one attempt.');
+    }
+    const ledger = new StrictTranscribeLedger({ file: ledgerFile, oneShotFile, limits: { totalUsd, perRequestUsd: totalUsd, maxRequests: 1 } });
+    const language = env.REHERE_TRANSCRIBE_LANGUAGE ? env.REHERE_TRANSCRIBE_LANGUAGE : null;
+    return createMetaTranscriber({ apiKey: env.MODEL_API_KEY, ledger, language });
+  }
   const limits = {
     totalUsd: limit(env.REHERE_TRANSCRIBE_TOTAL_USD, DEFAULT_TRANSCRIBE_LIMITS.totalUsd),
     perRequestUsd: DEFAULT_TRANSCRIBE_LIMITS.perRequestUsd,

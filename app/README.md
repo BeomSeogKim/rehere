@@ -591,6 +591,35 @@ keeps its full estimate, even after an error response; only a request that
 was never sent is settled at zero. These are
 local estimates and limits, not provider-enforced caps or billing receipts.
 
+For a separately approved, single-attempt workspace, a custom entrypoint can
+select `REHERE_TRANSCRIBE_STRICT=1` with an explicit positive
+`REHERE_TRANSCRIBE_TOTAL_USD` no greater than `0.003` and
+`REHERE_TRANSCRIBE_MAX_REQUESTS=1`. It must pass both `ledgerFile` and a distinct
+absolute `oneShotFile` to `metaTranscriberFromEnv`; the normal entrypoint does
+not supply that marker path. The ledger must already contain a valid, empty
+`{"entries":[]}` record created exclusively for that approved workspace.
+Strict mode never initializes, repairs or resets it and does not adopt an old
+ledger. Missing, corrupt or inconsistent state blocks reserve and settlement.
+
+The strict ledger writes a permanent one-shot marker before its reservation.
+Both files and their directories are synced; the ledger is replaced by atomic
+rename. An interrupted marker or reservation refuses further attempts. Only
+the same ledger instance can refund its own proven unstarted reservation.
+Once start is invoked, a missing admission return or an admission throw or
+rejection keeps the reservation as unknown. Restart cannot prove an attempt
+unsent. The marker also remains after a valid zero settlement, so changing an
+application request ID cannot open another attempt. Process-death tests do not
+prove power-loss durability, and changing directories or deleting records can
+defeat this local guard; it is not an account-wide or provider spending cap.
+
+Standalone callers opt in by supplying a `StrictTranscribeLedger` to
+`createMetaTranscriber`. Supplying the ordinary `BudgetLedger`, or leaving the
+strict flag unset in the environment factory, preserves the existing defaults:
+a missing ledger is initialized, and the admission callback must return its
+started promise in `{ value }`. The default sender can still treat a lost
+admission return as unsent; the stronger guarantee is limited to strict mode.
+Counted and count-free Spark admission are unchanged.
+
 Each attempt is recorded in the scene before anything is decoded or sent, with
 its call metadata: whether it was sent, the HTTP status, the provider's request
 and session IDs when returned (null otherwise), latency, admitted duration and
