@@ -118,6 +118,12 @@ const resizeTo = (viewport, width, height) => {
 const surfaceWithSize = (width, height) => ({ ...visitorSurface(), source: { image_size: [width, height] } });
 
 describe('limited photo-view camera', () => {
+  it('recognizes only source-camera roundoff, without treating a custom camera as the original', () => {
+    assert.equal(originalPhotoCamera({ position: [0, 1.8369701987210297e-16, 0], target: [0, 0, -3] }), true);
+    assert.equal(originalPhotoCamera({ position: [0.000001, 0, 0], target: [0, 0, -3] }), false);
+    assert.equal(originalPhotoCamera({ position: [0, 0, 0], target: [0, 0.000001, -3] }), false);
+    assert.equal(originalPhotoCamera({ position: [0, '0', 0], target: [0, 0, -3] }), false);
+  });
   it('keeps even diagonal corners inside ten degrees at fixed distance and refuses excursions', async () => {
     const viewer = await createViewer(viewportOf(800, 600), visitorSurface(), 'blob:texture', 'Limited photo view', { limitedPhotoView: true });
     const controls = globalThis.viewerCamera.controls;

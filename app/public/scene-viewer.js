@@ -15,8 +15,8 @@ const PHOTO_ORBIT_ANGLE = Math.acos(Math.sqrt(Math.cos(Math.PI / 18)));
 const PHOTO_TARGET = [0, 0, -3];
 
 export function originalPhotoCamera(camera) {
-  return Array.isArray(camera?.position) && camera.position.length === 3 && camera.position.every((n) => n === 0)
-    && Array.isArray(camera?.target) && camera.target.length === 3 && camera.target.every((n, i) => n === PHOTO_TARGET[i]);
+  return Array.isArray(camera?.position) && camera.position.length === 3 && camera.position.every((n) => Number.isFinite(n) && Math.abs(n) <= 1e-12)
+    && Array.isArray(camera?.target) && camera.target.length === 3 && camera.target.every((n, i) => Number.isFinite(n) && Math.abs(n - PHOTO_TARGET[i]) <= 1e-12);
 }
 
 export function cameraWithinPhotoOrbit(camera) {

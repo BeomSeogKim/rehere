@@ -136,9 +136,9 @@ function open(src, options = {}) {
 const count = (entry) => globalThis.viewerLog.filter((item) => item === entry).length;
 
 describe('visitor screen', () => {
-  it('opts into the labelled limited view only for the exact single-photo source camera', async () => {
+  it('opts into the labelled limited view for the source camera with harmless orbit roundoff', async () => {
     const data = manifest();
-    data.camera = { position: [0, 0, 0], target: [0, 0, -3] };
+    data.camera = { position: [0, 1.8369701987210297e-16, 0], target: [0, 0, -3] };
     const v = open(source({ manifest: async () => data }), { limitedPhotoView: true });
     await flush();
     assert.match(v.container.textContent, /Limited-view demo: rotation stays within 10 degrees/);
