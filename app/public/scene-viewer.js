@@ -11,6 +11,21 @@ import { compositionFacingGuide, rotateVector } from './composition-scene.js';
 
 // Camera limits the viewer itself enforces; a saved camera must stay within them.
 export const CAMERA_LIMITS = Object.freeze({ coordinate: 50, minDistance: 0.5, maxDistance: 8 });
+const PHOTO_ORBIT_ANGLE = Math.acos(Math.sqrt(Math.cos(Math.PI / 18)));
+const PHOTO_TARGET = [0, 0, -3];
+
+export function originalPhotoCamera(camera) {
+  return Array.isArray(camera?.position) && camera.position.length === 3 && camera.position.every((n) => n === 0)
+    && Array.isArray(camera?.target) && camera.target.length === 3 && camera.target.every((n, i) => n === PHOTO_TARGET[i]);
+}
+
+export function cameraWithinPhotoOrbit(camera) {
+  if (!camera || !cameraWithinLimits(camera) || !camera.target.every((n, i) => n === PHOTO_TARGET[i])) return false;
+  const [x, y, z] = camera.position.map((n, i) => n - PHOTO_TARGET[i]);
+  return Math.abs(Math.hypot(x, y, z) - 3) < 1e-8
+    && Math.abs(Math.atan2(x, z)) <= PHOTO_ORBIT_ANGLE + 1e-8
+    && Math.abs(Math.atan2(y, Math.hypot(x, z))) <= PHOTO_ORBIT_ANGLE + 1e-8;
+}
 
 // The same rule a saved share camera must meet (parseCamera on the server):
 // finite coordinates within the limit, and a position-to-target distance the
@@ -49,7 +64,7 @@ export function photographedSideCamera(pivot, transform) {
 // any later step frees what was already created.
 // onDraw, when given, runs after every frame is drawn (camera moves included),
 // for anything placed over the canvas.
-export async function createViewer(viewport, surface, textureUrl, label, { onDraw = null, fullObject = null } = {}) {
+export async function createViewer(viewport, surface, textureUrl, label, { onDraw = null, fullObject = null, limitedPhotoView = false } = {}) {
   const releases = [];
   let released = false;
   const release = () => {
@@ -64,14 +79,14 @@ export async function createViewer(viewport, surface, textureUrl, label, { onDra
     }
   };
   try {
-    return await setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, () => released, fullObject);
+    return await setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, () => released, fullObject, limitedPhotoView);
   } catch (error) {
     release();
     throw error;
   }
 }
 
-async function setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, isReleased, fullObject) {
+async function setUpViewer(viewport, surface, textureUrl, label, releases, release, onDraw, isReleased, fullObject, limitedPhotoView) {
   let renderer;
   try {
     // A full object clears to transparent, so a CSS hatch behind the canvas
@@ -86,6 +101,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     renderer.domElement.remove();
   });
   const composition = surface?.schema_version === 3;
+  const photoOrbit = Boolean(limitedPhotoView) && !composition;
   const loadTexture = async (url) => {
     let texture;
     try { texture = await new THREE.TextureLoader().loadAsync(url); } catch { throw new Error('texture'); }
@@ -224,6 +240,19 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   releases.push(() => controls.dispose());
   controls.minDistance = CAMERA_LIMITS.minDistance;
   controls.maxDistance = CAMERA_LIMITS.maxDistance;
+  if (photoOrbit) {
+    // Each axis stays inside a rectangle whose corners lie on the 10-degree
+    // cone. Locking the radius also prevents dolly into the partial surfaces.
+    controls.minAzimuthAngle = -PHOTO_ORBIT_ANGLE;
+    controls.maxAzimuthAngle = PHOTO_ORBIT_ANGLE;
+    controls.minPolarAngle = Math.PI / 2 - PHOTO_ORBIT_ANGLE;
+    controls.maxPolarAngle = Math.PI / 2 + PHOTO_ORBIT_ANGLE;
+    controls.enablePan = false;
+    controls.enableZoom = false;
+    controls.zoomToCursor = false;
+    controls.minDistance = 3;
+    controls.maxDistance = 3;
+  }
   controls.listenToKeyEvents(canvas);
   // Page scrolling by default: until the person chooses to explore, the
   // controls ignore pointer, wheel and keys, touch scrolls the page, and the
@@ -320,7 +349,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   let inspection = null;
   let onInspection = null;
   const inspectObject = (on, reason = null) => {
-    if (!fullObject || isReleased()) return false;
+    if (!fullObject || photoOrbit || isReleased()) return false;
     if (Boolean(on) === Boolean(inspection)) return true;
     if (on) {
       leaveContext();
@@ -437,11 +466,12 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
   };
 
   return {
+    limitedPhotoView: photoOrbit,
     setInteractive: (on, options) => { leaveInspection(); if (on) leaveContext(); explore(on, options); },
     // Like getCamera, reports the scene's own mode while inspecting, so a caller
     // that records it (a comparison) restores page scrolling, not the inspector's orbit.
     isInteractive: () => (inspection ? inspection.interactive : interactive),
-    canInspectObject: Boolean(fullObject),
+    canInspectObject: Boolean(fullObject) && !photoOrbit,
     setPhotoContext,
     setContextListener: (listener) => { onContext = listener; },
     inspectObject,
@@ -495,7 +525,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       draw();
       return relation;
     },
-    sideView: () => { leaveInspection(); leaveContext(); return look(composition ? [4, 2, 5] : [1.6, 0.25, -0.4]); },
+    sideView: () => { if (photoOrbit) return false; leaveInspection(); leaveContext(); return look(composition ? [4, 2, 5] : [1.6, 0.25, -0.4]); },
     // The camera as two finite vectors, for snapshots that must restore the
     // exact view later.
     getCamera: () => (inspection
@@ -518,6 +548,7 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
     // `transform`; changes nothing else. False when there is no such object or
     // the vantage is outside the limits, and the camera stays where it was.
     viewPhotographedSide(transform, targetId = null) {
+      if (photoOrbit) return false;
       leaveInspection();
       const selected = twoObjects ? objects.objects.find((object) => object.id === targetId) : null;
       const pivot = composition ? selected?.sourcePivot : twoObjects ? selected?.pivot : objects.pivot;
@@ -534,10 +565,13 @@ async function setUpViewer(viewport, surface, textureUrl, label, releases, relea
       leaveInspection();
       leaveContext();
       if (composition) { camera.fov = 55; camera.updateProjectionMatrix(); }
+      const allowed = !photoOrbit || cameraWithinPhotoOrbit({ position, target });
+      if (!allowed) { position = [0, 0, 0]; target = [...PHOTO_TARGET]; }
       camera.position.set(...position);
       controls.target.set(...target);
       controls.update();
       draw();
+      return allowed;
     },
     applyEdit(edit) {
       leaveInspection();
@@ -600,6 +634,10 @@ const EXPLORE_STATUS = {
   page: 'Scroll here to move the page. Choose Explore in 3D to look around the scene.',
   explore: 'Exploring: drag to look around, scroll or pinch to zoom, arrow keys move the view. Choose Explore in 3D again to return to page scrolling.',
 };
+const LIMITED_EXPLORE_STATUS = {
+  page: 'Scroll here to move the page. Choose Explore in 3D for limited rotation near the photo viewpoint.',
+  explore: 'Exploring: drag to rotate within the limited photo view. Panning and zoom are off. Choose Explore in 3D again to return to page scrolling.',
+};
 
 // The one control that switches a viewer between page scrolling and exploring:
 // a toggle button with a stable label whose pressed state says which is on.
@@ -617,7 +655,7 @@ export function createExploreToggle() {
     const exploring = Boolean(viewer?.isInteractive());
     button.setAttribute('aria-pressed', String(exploring));
     button.disabled = !viewer;
-    status.textContent = viewer ? EXPLORE_STATUS[exploring ? 'explore' : 'page'] : '';
+    status.textContent = viewer ? (viewer.limitedPhotoView ? LIMITED_EXPLORE_STATUS : EXPLORE_STATUS)[exploring ? 'explore' : 'page'] : '';
   };
   button.addEventListener('click', () => {
     if (!viewer) return;

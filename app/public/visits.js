@@ -6,7 +6,7 @@
 
 import { copyPose, isComposition, poseProblem } from './composition-scene.js';
 import { compositionDifference } from './composition-description.js';
-import { createExploreToggle, createInspectToggle, createViewer } from './scene-viewer.js';
+import { createExploreToggle, createInspectToggle, createViewer, originalPhotoCamera } from './scene-viewer.js';
 import { createStoryPlayer } from './story-player.js';
 import { describeArrangement, objectNames, ruleText } from './arrangement.js';
 
@@ -292,7 +292,7 @@ const copyCamera = (camera) => (camera && finite3(camera.position) && finite3(ca
 // source: { manifest(signal) -> view|null, check(signal) -> boolean,
 // asset(viewId, name, signal) -> Response }. onState receives 'loading',
 // '3d', '2d', 'paused' or 'unavailable'; '2d' means the 3D scene was not shown.
-export function mountVisitor(container, source, { onState = () => {} } = {}) {
+export function mountVisitor(container, source, { onState = () => {}, limitedPhotoView = false } = {}) {
   let generation = 0;
   let controller = null;
   let viewer = null;
@@ -371,6 +371,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
   async function render(manifest, surface, textureUrl, mine, fullObject = null) {
     const correctedOutline = manifest.outline?.kind === 'owner-corrected';
     const composition = isComposition(surface);
+    const photoOrbit = limitedPhotoView && !composition && originalPhotoCamera(manifest.camera);
     const textureFor = (id) => composition ? textureUrl[surface.components.find((component) => component.id === id).texture] : textureUrl;
     const views = new Map(manifest.views.map((view) => [view.id, view]));
     const labelOf = (id) => views.get(id)?.label ?? 'another view';
@@ -428,7 +429,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     // Offered only with a working 3D view of two objects and a chosen object;
     // disabled while comparing so the photo framing and its return camera stay.
     const renderSide = () => {
-      sideButton.hidden = !objects || !viewer;
+      sideButton.hidden = !objects || !viewer || photoOrbit;
       sideButton.disabled = !objectId || comparing || !viewer;
       sideButton.textContent = objectId ? `See photographed side of ${nameOf(objectId)}` : SIDE_CHOOSE;
     };
@@ -787,6 +788,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
           el('p', { className: 'hint', textContent: manifest.synthetic ? 'Synthetic test material, shared by the owner.' : 'Shared by the owner.' }),
           el('div', { className: 'actions space-camera' }, [explore.button, inspect.button, back, compareButton]),
           explore.status,
+          ...(photoOrbit ? [el('p', { className: 'hint', textContent: 'Limited-view demo: rotation stays within 10 degrees of the photo viewing direction. Unseen areas remain unknown; this does not validate the reconstructed geometry.' })] : []),
           inspect.note,
           compareBar,
           stageFrame,
@@ -809,7 +811,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
 
     let created = null;
     try {
-      created = await createViewer(viewport, surface, textureUrl, `3D view: ${manifest.title}`, fullObject ? { fullObject } : {});
+      created = await createViewer(viewport, surface, textureUrl, `3D view: ${manifest.title}`, { fullObject, limitedPhotoView: photoOrbit });
     } catch (error) {
       if (mine !== generation) return;
       if (error?.message !== 'webgl') {

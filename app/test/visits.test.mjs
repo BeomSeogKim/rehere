@@ -124,10 +124,10 @@ function source(overrides = {}) {
   return s;
 }
 
-function open(src) {
+function open(src, options = {}) {
   const container = new FakeElement('div');
   const states = [];
-  const view = mountVisitor(container, src, { onState: (state) => states.push(state) });
+  const view = mountVisitor(container, src, { ...options, onState: (state) => states.push(state) });
   const find = (predicate) => container.findAll(predicate);
   const button = (text) => find((node) => node.tag === 'button' && node.textContent === text)[0];
   return { container, view, states, find, button };
@@ -136,6 +136,25 @@ function open(src) {
 const count = (entry) => globalThis.viewerLog.filter((item) => item === entry).length;
 
 describe('visitor screen', () => {
+  it('opts into the labelled limited view only for the exact single-photo source camera', async () => {
+    const data = manifest();
+    data.camera = { position: [0, 0, 0], target: [0, 0, -3] };
+    const v = open(source({ manifest: async () => data }), { limitedPhotoView: true });
+    await flush();
+    assert.match(v.container.textContent, /Limited-view demo: rotation stays within 10 degrees/);
+    assert.equal(globalThis.viewerCamera.controls.enablePan, false);
+    assert.equal(globalThis.viewerCamera.controls.enableZoom, false);
+    v.button('Explore in 3D').dispatch('click');
+    assert.match(v.container.textContent, /Panning and zoom are off/);
+    v.button('Mina’s recollection').dispatch('click');
+    assert.deepEqual(currentCamera(), data.camera);
+    v.view.dispose();
+    const custom = open(source(), { limitedPhotoView: true });
+    await flush();
+    assert.doesNotMatch(custom.container.textContent, /Limited-view demo/);
+    assert.deepEqual(currentCamera(), CAMERA);
+    custom.view.dispose();
+  });
   it('shows shared words only beside their selected saved view and keeps the camera', async () => {
     const data = manifest();
     data.views[1].evidence.arrangement = 'memory';

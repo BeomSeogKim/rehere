@@ -19,11 +19,11 @@ globalThis.ResizeObserver = class {
 };
 installViewerShim();
 
-let createViewer;
+let createViewer, originalPhotoCamera, cameraWithinPhotoOrbit;
 before(async () => {
   globalThis.document = { createElement: (tag) => new FakeElement(tag) };
   globalThis.devicePixelRatio = 3;
-  ({ createViewer } = await import('../public/scene-viewer.js'));
+  ({ createViewer, originalPhotoCamera, cameraWithinPhotoOrbit } = await import('../public/scene-viewer.js'));
 });
 after(() => {
   delete globalThis.document;
@@ -116,6 +116,57 @@ const resizeTo = (viewport, width, height) => {
   for (const observer of observers) observer.callback();
 };
 const surfaceWithSize = (width, height) => ({ ...visitorSurface(), source: { image_size: [width, height] } });
+
+describe('limited photo-view camera', () => {
+  it('keeps even diagonal corners inside ten degrees at fixed distance and refuses excursions', async () => {
+    const viewer = await createViewer(viewportOf(800, 600), visitorSurface(), 'blob:texture', 'Limited photo view', { limitedPhotoView: true });
+    const controls = globalThis.viewerCamera.controls;
+    assert.equal(viewer.limitedPhotoView, true);
+    assert.equal(controls.enablePan, false);
+    assert.equal(controls.enableZoom, false);
+    assert.equal(controls.zoomToCursor, false);
+    assert.equal(controls.minDistance, 3);
+    assert.equal(controls.maxDistance, 3);
+    for (const azimuth of [controls.minAzimuthAngle, controls.maxAzimuthAngle]) {
+      for (const polar of [controls.minPolarAngle, controls.maxPolarAngle]) {
+        const position = [3 * Math.sin(polar) * Math.sin(azimuth), 3 * Math.cos(polar), -3 + 3 * Math.sin(polar) * Math.cos(azimuth)];
+        assert.ok(Math.acos((position[2] + 3) / 3) * 180 / Math.PI <= 10 + 1e-8);
+        const view = { position, target: [0, 0, -3] };
+        assert.equal(cameraWithinPhotoOrbit(view), true);
+        assert.equal(viewer.setCamera(view), true);
+        viewer.setPhotoFraming(true);
+        viewer.originalView();
+        assert.equal(viewer.setCamera(view), true);
+        assert.deepEqual(viewer.getCamera(), view, 'the comparison return keeps the bounded camera');
+      }
+    }
+    for (const view of [
+      { position: [0, 0, -2.5], target: [0, 0, -3] },
+      { position: [1, 0, 0], target: [0, 0, -3] },
+      { position: [0, 0, 0], target: [1, 0, -3] },
+    ]) {
+      assert.equal(viewer.setCamera(view), false);
+      assert.equal(originalPhotoCamera(viewer.getCamera()), true, 'stale runtime cameras reset to the original');
+    }
+    assert.equal(viewer.sideView(), false);
+    assert.equal(viewer.viewPhotographedSide({ offset: [0.1, 0, 0], yaw: 0.5 }), false);
+    assert.equal(originalPhotoCamera(viewer.getCamera()), true);
+    viewer.dispose();
+  });
+
+  it('does not change the ordinary owner or two-photo composition camera', async () => {
+    const custom = { position: [1, 0.4, -0.5], target: [0, 0, -3] };
+    const viewer = await createViewer(viewportOf(800, 600), visitorSurface(), 'blob:texture', 'Ordinary view');
+    assert.equal(viewer.limitedPhotoView, false);
+    assert.equal(viewer.setCamera(custom), true);
+    assert.deepEqual(viewer.getCamera(), custom);
+    viewer.dispose();
+    const composition = await createViewer(viewportOf(800, 600), compositionSurface(), textureUrls, 'Composition', { limitedPhotoView: true });
+    assert.equal(composition.limitedPhotoView, false);
+    assert.deepEqual(composition.getCamera(), { position: [0, 0, 5], target: [0, 0, 0] });
+    composition.dispose();
+  });
+});
 
 // Where a photograph shown with contain-fit in the viewport puts source pixel (u, v).
 function containPoint(viewport, [imageWidth, imageHeight], [u, v]) {

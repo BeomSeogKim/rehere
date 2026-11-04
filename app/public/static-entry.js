@@ -25,6 +25,6 @@ export function staticSource() {
 
 const container = globalThis.document?.getElementById?.('visit');
 if (container) {
-  mountVisitor(container, staticSource());
+  mountVisitor(container, staticSource(), { limitedPhotoView: true });
   globalThis.addEventListener?.('pagehide', () => stopAll());
 }

@@ -10,7 +10,7 @@ import { stopAll } from './playback.js';
 export const VISIT = /^#\/visit\/(rhv_[A-Za-z0-9_-]{43})$/;
 export const NO_LINK = 'This page opens a view someone shared with you. Open the complete link you were given; nothing is shown without it.';
 
-export function startVisitorEntry(container, { location = globalThis.location, target = globalThis } = {}) {
+export function startVisitorEntry(container, { location = globalThis.location, target = globalThis, limitedPhotoView = false } = {}) {
   let visitor = null;
   let token = null;
   // Every address change replaces what is shown at once; an earlier visit's
@@ -30,7 +30,7 @@ export function startVisitorEntry(container, { location = globalThis.location, t
       container.replaceChildren(note);
       return;
     }
-    visitor = mountVisitor(container, visitSource(next));
+    visitor = mountVisitor(container, visitSource(next), { limitedPhotoView });
   }
   // Leaving the page stops sound; the visit pauses itself and re-checks access
   // when the page is shown again.
@@ -51,4 +51,4 @@ export function startVisitorEntry(container, { location = globalThis.location, t
 }
 
 const container = globalThis.document?.getElementById?.('visit');
-if (container) startVisitorEntry(container);
+if (container) startVisitorEntry(container, { limitedPhotoView: true });

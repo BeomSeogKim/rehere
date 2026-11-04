@@ -37,6 +37,14 @@ port must differ. Supplying only one visitor setting or an invalid origin or
 port fails startup. Closing the app closes both listeners. Run only one app
 process per data directory.
 
+The standalone visitor page opts into a labelled limited-view demonstration
+when a single-photo snapshot starts at the original photo camera. Rotation
+stays within 10 degrees of that direction, with a fixed distance and no pan,
+zoom or object-inspection excursion. Photo comparison and saved-arrangement
+switching remain available. This interaction limit does not validate the
+geometry. Owner views, two-photo compositions and snapshots with a different
+saved camera keep their ordinary controls and exact saved camera.
+
 ## External proxy boundary
 
 A separately operated HTTPS proxy can forward to the visitor port. Configure
