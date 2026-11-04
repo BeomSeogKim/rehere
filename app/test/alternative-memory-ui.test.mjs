@@ -4,6 +4,7 @@ import { FakeElement } from './fake-dom.mjs';
 import { installViewerShim } from './viewer-shim.mjs';
 import { objectSurfaceMeshes, surfacePoint } from '../public/photo-scene.js';
 import { copyPose, faceObjectPose, quaternionFromEuler } from '../public/composition-scene.js';
+import { boundAttributionLines } from '../public/alternative-memory.js';
 
 installViewerShim();
 const DRAFT = '11111111-1111-4111-8111-111111111111', JOB = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
@@ -377,4 +378,91 @@ describe('memory proposals for the selected alternative', () => {
     assert.equal(requests.filter((entry) => entry.method === 'POST' && entry.url.endsWith('/apply')).length, 1);
   });
 
+});
+
+describe('reviewed saved words for an alternative proposal', () => {
+  const contribution = { statementSource: { kind: 'contribution-text', contributionId: SOURCE, sourceSha256: 'a'.repeat(64) },
+    text: 'Synthetic contributor: turn the object.', attribution: { kind: 'contribution-text', providerLabel: 'Synthetic contributor A' }, modelAllowed: true };
+  const story = { statementSource: { kind: 'story-captions', storyId: SECOND, sourceSha256: 'b'.repeat(64), storySha256: 'c'.repeat(64) },
+    text: 'Synthetic spoken words.', attribution: { kind: 'story-captions', providerLabel: 'Synthetic speaker B', captionAuthorLabel: 'Synthetic reviewer C', captionDraft: { model: 'muse-voice-transcribe', label: 'Muse Voice Transcribe' } }, modelAllowed: true };
+  const sourceControls = (ui) => ({
+    select: ui.choose('Saved memory source for this alternative'),
+    get reviewed() { return ui.find((node) => node.tag === 'input' && node.attributes['aria-label'] === 'I reviewed the selected saved words and attribution')[0]; },
+  });
+  const chooseSource = (control, source) => { control.select.value = JSON.stringify(source.statementSource); control.select.dispatch('change'); };
+  const check = (node) => { node.checked = true; node.dispatch('change'); };
+  const creation = () => requests.filter((entry) => entry.method === 'POST' && entry.url === PROPOSALS);
+
+  for (const selected of [contribution, story]) it(`sends only the whole ${selected.statementSource.kind} ref after separate review and consent`, async () => {
+    const ui = await mount('legacy', { context: { statementSources: [contribution, story] } });
+    const form = await memory(ui), controls = sourceControls(ui);
+    chooseSource(controls, selected);
+    assert.equal(form.consent.checked, false);
+    assert.equal(controls.reviewed.checked, false);
+    assert.equal(ui.button('Plan a change to this alternative').disabled, true);
+    check(controls.reviewed);
+    assert.equal(ui.button('Plan a change to this alternative').disabled, true);
+    check(form.consent);
+    assert.equal(ui.button('Plan a change to this alternative').disabled, false);
+    await plan(ui);
+    const body = creation()[0].body;
+    assert.deepEqual(body.statementSource, selected.statementSource);
+    assert.equal(body.sourceReviewed, true);
+    assert.equal(body.consent, true);
+    assert.equal(Object.hasOwn(body, 'text'), false);
+    assert.equal(JSON.stringify(body).includes(selected.text), false);
+  });
+
+  it('clears review and model consent when a different source is chosen', async () => {
+    const ui = await mount('legacy', { context: { statementSources: [contribution, story] } });
+    const form = await memory(ui), controls = sourceControls(ui);
+    chooseSource(controls, contribution); check(controls.reviewed); check(form.consent);
+    chooseSource(controls, story);
+    assert.equal(form.consent.checked, false); assert.equal(controls.reviewed.checked, false);
+    assert.equal(ui.button('Plan a change to this alternative').disabled, true);
+    assert.equal(creation().length, 0);
+  });
+
+  it('keeps a denied source visible but cannot submit it', async () => {
+    const denied = { ...contribution, modelAllowed: false };
+    const ui = await mount('legacy', { context: { statementSources: [denied] } });
+    const form = await memory(ui), controls = sourceControls(ui);
+    const option = controls.select.children.find((node) => node.value === JSON.stringify(denied.statementSource));
+    assert.equal(option.disabled, true);
+    chooseSource(controls, denied); check(controls.reviewed); check(form.consent);
+    assert.equal(ui.button('Plan a change to this alternative').disabled, true);
+    assert.equal(creation().length, 0);
+  });
+
+  it('retries the exact source request even after its outcome is unknown', async () => {
+    const ui = await mount('legacy', { context: { statementSources: [contribution, story] } });
+    const form = await memory(ui), controls = sourceControls(ui);
+    chooseSource(controls, contribution); check(controls.reviewed); check(form.consent);
+    routes[`POST ${PROPOSALS}`] = () => Promise.resolve(json(503, {}));
+    ui.button('Plan a change to this alternative').dispatch('click'); await settle();
+    const original = clone(creation()[0].body);
+    form.instruction.value = 'A new owner instruction must not replace the pending source.';
+    ui.button('Retry the earlier alternative plan').dispatch('click'); await settle();
+    assert.deepEqual(creation()[1].body, original);
+  });
+
+  it('keeps voice provider, caption reviewer and model draft credit distinct', () => {
+    const lines = boundAttributionLines(story.attribution).join('\n');
+    assert.match(lines, /Provided by Synthetic speaker B/);
+    assert.match(lines, /Captions reviewed by Synthetic reviewer C/);
+    assert.match(lines, /Caption draft: Muse Voice Transcribe; reviewed by the owner/);
+    assert.doesNotMatch(lines, /Provided by Synthetic reviewer C/);
+  });
+
+  it('displays stored proposal attribution without replacing it from the current source choices', async () => {
+    const ui = await mount('legacy', { context: { statementSources: [contribution] } });
+    const form = await memory(ui), controls = sourceControls(ui);
+    chooseSource(controls, contribution); check(controls.reviewed); check(form.consent);
+    await plan(ui, 'translate', (value) => ({ ...value, statement: { text: 'Exact saved contributor words.',
+      source: contribution.statementSource, ownerReviewed: true, sha256: 'a'.repeat(64), attribution: { kind: 'contribution-text', providerLabel: 'Synthetic original provider' } } }));
+    const review = ui.find((node) => node.className === 'alternative-memory-review')[0];
+    assert.match(review.textContent, /From the contributor’s exact saved writing/);
+    assert.match(review.textContent, /Provided by Synthetic original provider/);
+    assert.doesNotMatch(review.textContent, /Synthetic contributor A/);
+  });
 });

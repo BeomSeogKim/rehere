@@ -15,9 +15,21 @@ export function timelineMemory(entry, proposals) {
   return { text: proposal.statement.text, reason: proposal.result?.reason ?? 'not available', mode: proposal.mode };
 }
 
+export function alternativeTimelineMemory(variant, proposals) {
+  if (variant.blocked || !variant.revision?.proposalId) return null;
+  const proposal = proposals.find((item) => item.id === variant.revision.proposalId);
+  if (!proposal || proposal.redacted || proposal.status !== 'applied'
+      || proposal.scope?.kind !== 'variant' || proposal.scope.parentVariantId !== variant.revision.parentVariantId
+      || proposal.appliedVariantId !== variant.id || typeof proposal.statement?.text !== 'string') return null;
+  const source = proposal.statement.source;
+  if (['contribution-text', 'story-captions'].includes(source?.kind)
+      && (proposal.statement.ownerReviewed !== true || proposal.statement.sha256 !== source.sourceSha256)) return null;
+  return proposal;
+}
+
 export function renderMemoryTimeline(container, { history, proposals, currentVersion, available, label, describe, actions }) {
   const summary = el('p', { className: 'hint', textContent: available
-    ? `Saved version ${currentVersion} · ${history.length} saved ${history.length === 1 ? 'version' : 'versions'}. Earlier versions remain available.`
+    ? `Saved version ${currentVersion} · ${history.length} saved ${history.length === 1 ? 'version' : 'versions'}. Earlier versions remain recorded.`
     : 'Saved versions could not be confirmed. Refresh before using this timeline.' });
   const list = el('ol', { className: 'memory-history', reversed: true });
   list.setAttribute('aria-label', 'Saved memory versions');

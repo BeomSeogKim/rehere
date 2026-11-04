@@ -20,6 +20,22 @@ const attributionLines = (attribution) => [
   ...(attribution?.reference ? [attribution.reference] : []),
   `${ORIGIN_WORDS[attribution?.originKind] ?? ORIGIN_WORDS.unknown}; attribution as given by the owner, not verified.`,
 ];
+const taggedSource = (value) => value && typeof value.text === 'string'
+  && ['contribution-text', 'story-captions'].includes(value.statementSource?.kind)
+  && /^[a-f0-9]{64}$/.test(value.statementSource.sourceSha256 ?? '');
+const sourceKey = (value) => JSON.stringify(value.statementSource);
+const sourceTitle = (source) => `${source.statementSource.kind === 'story-captions' ? 'Reviewed story captions' : 'Contributor writing'} · ${source.attribution?.providerLabel || 'Provider not given'}`;
+export function boundAttributionLines(attribution) {
+  return [
+    `Provided by ${attribution?.providerLabel || 'provider not given'}; attribution as recorded, not verified.`,
+    ...(attribution?.creator ? [`Words attributed to ${attribution.creator}, as recorded; authorship is not verified.`] : []),
+    ...(attribution?.kind === 'story-captions' ? [
+      `Captions reviewed by ${attribution.captionAuthorLabel || 'reviewer not given'}; the caption reviewer is not automatically the speaker.`,
+      ...(attribution.captionDraft ? [`Caption draft: ${attribution.captionDraft.label || attribution.captionDraft.model || 'model not recorded'}; reviewed by the owner.`] : []),
+    ] : []),
+    ...(attribution?.reference ? [attribution.reference] : []),
+  ];
+}
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const hidden = (proposal) => proposal?.redacted === true || typeof proposal?.statement?.text !== 'string';
 const statusText = (proposal) => ({ queued: 'Waiting to plan your instruction.', processing: 'Your instruction is being planned.', ready: 'A bounded change is proposed. Nothing has been saved.', clarify: 'More detail is needed. Nothing was saved.', applied: 'This proposal already created a saved alternative.', canceled: 'Planning canceled. No alternative was created.', interrupted: 'Planning was interrupted. No alternative was created.', stale: 'The parent or its time changed. Review it before planning again.', failed: 'A usable change could not be proposed. No alternative was created.' }[proposal?.status] ?? 'The proposal status could not be confirmed.');
@@ -65,6 +81,19 @@ export function mountAlternativeMemory(container, bridge) {
   const useSource = el('input', { type: 'checkbox' });
   const sourceChoice = el('label', { hidden: true }, [useSource, ' Use this place’s written source (whole text) instead of writing an instruction']);
   const sourceView = el('div', { className: 'written-source', hidden: true });
+  const sourceSelect = el('select');
+  sourceSelect.setAttribute('aria-label', 'Saved memory source for this alternative');
+  const sourceOptions = el('div', { className: 'memory-source-choices', hidden: true }, [
+    el('label', {}, ['Or choose saved words', sourceSelect]),
+  ]);
+  const boundSourceView = el('div', { className: 'written-source', hidden: true });
+  const sourceReviewed = el('input', { type: 'checkbox' });
+  sourceReviewed.setAttribute('aria-label', 'I reviewed the selected saved words and attribution');
+  const sourceReview = el('label', { className: 'memory-consent', hidden: true }, [sourceReviewed, ' I reviewed these exact saved words and their attribution; this does not verify historical truth']);
+  let reviewedBinding = null;
+  let sourcesUnavailable = false;
+  const boundSources = () => sourcesUnavailable ? [] : (bridge.statementSources?.() ?? []).filter(taggedSource);
+  const boundSource = () => boundSources().find((source) => sourceKey(source) === sourceSelect.value) ?? null;
   const plan = el('button', { type: 'button', textContent: 'Plan a change to this alternative' });
   const refresh = el('button', { type: 'button', className: 'secondary', textContent: 'Read saved alternative proposals' });
   const note = el('p', { className: 'form-message', role: 'status' });
@@ -120,19 +149,39 @@ export function mountAlternativeMemory(container, bridge) {
     if (nowLocked !== reportedLock) { reportedLock = nowLocked; bridge.setPending(nowLocked); }
     const binding = bridge.binding();
     const block = bridge.blocked?.() ?? null;
-    const written = writtenSourceOf(bridge.writtenSource?.());
+    const written = sourcesUnavailable ? null : writtenSourceOf(bridge.writtenSource?.());
+    const choices = boundSources();
+    const selectedSource = boundSource();
+    if (sourceSelect.value && !selectedSource && !createAttempt) {
+      consent.checked = false;
+      note.textContent = 'The selected saved memory is no longer available. Choose and review current words before planning.';
+    }
+    if (reviewedBinding !== JSON.stringify(selectedSource)) {
+      sourceReviewed.checked = false;
+      reviewedBinding = JSON.stringify(selectedSource);
+    }
+    sourceOptions.hidden = !choices.length;
+    sourceSelect.replaceChildren(el('option', { value: '', textContent: 'Use an owner instruction or the place’s written source' }),
+      ...choices.map((source) => el('option', { value: sourceKey(source), textContent: `${sourceTitle(source)}${source.modelAllowed ? '' : ' (model use off)'}`, disabled: source.modelAllowed !== true })));
+    sourceSelect.value = selectedSource ? sourceKey(selectedSource) : '';
+    sourceSelect.disabled = nowLocked;
+    boundSourceView.hidden = !selectedSource;
+    boundSourceView.replaceChildren(...(selectedSource ? [sourceText(selectedSource.text, 'Selected saved memory, full text'),
+      ...boundAttributionLines(selectedSource.attribution).map((line) => el('p', { className: 'hint', textContent: line })), sourceReview] : []));
+    sourceReview.hidden = !selectedSource;
+    sourceReviewed.disabled = nowLocked || selectedSource?.modelAllowed !== true;
     const sourceUsable = Boolean(written?.available && written.modelAllowed && /^[a-f0-9]{64}$/.test(written.sourceSha256 ?? ''));
     if (!written || (!sourceUsable && !createAttempt)) useSource.checked = false;
     sourceChoice.hidden = !written;
-    useSource.disabled = nowLocked || !sourceUsable;
-    sourceView.hidden = !written;
+    useSource.disabled = nowLocked || !sourceUsable || Boolean(selectedSource);
+    sourceView.hidden = !written || Boolean(selectedSource);
     sourceView.replaceChildren(...(!written ? [] : !written.available
       ? [el('p', { className: 'hint', textContent: SOURCE_REASONS[written.reason] ?? SOURCE_REASONS.unreadable })]
       : [sourceText(written.text, 'Written source, full text'),
         ...attributionLines(written.attribution).map((line) => el('p', { className: 'hint', textContent: line })),
         ...(written.modelAllowed ? [] : [el('p', { className: 'hint', textContent: 'Model use is off for this written source.' })])]));
-    text.hidden = useSource.checked;
-    const ready = useSource.checked ? sourceUsable : Boolean(text.value.trim()) && text.value.length <= TEXT_LIMIT;
+    text.hidden = useSource.checked || Boolean(selectedSource);
+    const ready = selectedSource ? selectedSource.modelAllowed === true && sourceReviewed.checked : useSource.checked ? sourceUsable : Boolean(text.value.trim()) && text.value.length <= TEXT_LIMIT;
     plan.disabled = busy || (!createAttempt && (!readable || nowLocked || Boolean(block) || !binding?.ready || !ready || !consent.checked));
     plan.textContent = createAttempt ? 'Retry the earlier alternative plan' : 'Plan a change to this alternative';
     text.disabled = consent.disabled = nowLocked;
@@ -163,8 +212,11 @@ export function mountAlternativeMemory(container, bridge) {
       cancel?.addEventListener('click', () => cancelPlan(proposal));
       review.replaceChildren(el('p', { className: 'hint', textContent: 'This proposal is no longer available under current sources or supporting recollections.' }), ...(retry ? [retry] : []), ...(cancel ? [cancel] : [])); return;
     }
-    const nodes = [el('p', { className: 'hint', textContent: `Stored proposal for ${bridge.nameOf(proposal.targetId)}. New alternative time: ${proposal.scope.timeMode === 'unknown' ? 'unknown' : 'explicitly re-confirm the parent assertion'}. The current scene is not its target.` }), proposal.statement.source ? sourceText(proposal.statement.text, 'Proposal instruction from the written source, full text') : el('p', { className: 'memory-text', textContent: proposal.statement.text }),
-      ...(proposal.statement.source ? [el('p', { className: 'hint', textContent: 'From this place’s written source.' })] : []),
+    const tagged = ['contribution-text', 'story-captions'].includes(proposal.statement.source?.kind);
+    const nodes = [el('p', { className: 'hint', textContent: `Stored proposal for ${bridge.nameOf(proposal.targetId)}. New alternative time: ${proposal.scope.timeMode === 'unknown' ? 'unknown' : 'explicitly re-confirm the parent assertion'}. The current scene is not its target.` }), proposal.statement.source ? sourceText(proposal.statement.text, 'Proposal instruction from the saved source, full text') : el('p', { className: 'memory-text', textContent: proposal.statement.text }),
+      ...(tagged ? [el('p', { className: 'hint', textContent: proposal.statement.source.kind === 'story-captions' ? 'From owner-reviewed saved story captions.' : 'From the contributor’s exact saved writing.' }),
+        ...boundAttributionLines(proposal.statement.attribution).map((line) => el('p', { className: 'hint', textContent: line }))]
+        : proposal.statement.source ? [el('p', { className: 'hint', textContent: 'From this place’s written source.' })] : []),
       el('p', { className: 'hint', textContent: statusText(proposal) })];
     const evidence = ['ready', 'clarify', 'applied'].includes(proposal.status) ? modelEvidence(proposal) : null;
     if (evidence) {
@@ -266,8 +318,12 @@ export function mountAlternativeMemory(container, bridge) {
     const binding = bridge.binding();
     const written = writtenSourceOf(bridge.writtenSource?.());
     // Only the server-resolved source identity is sent, never its words.
-    const statement = useSource.checked ? { statementSource: { sourceId: written.sourceId, sourceSha256: written.sourceSha256 } } : { text: text.value };
-    createAttempt ??= { requestId: crypto.randomUUID(), baseEraRevision: binding.baseEraRevision, targetId: binding.targetId, timeMode: binding.timeMode, ...statement, consent: true };
+    if (!createAttempt) {
+      const selectedSource = boundSource();
+      const statement = selectedSource ? { statementSource: structuredClone(selectedSource.statementSource), sourceReviewed: true }
+        : useSource.checked ? { statementSource: { sourceId: written.sourceId, sourceSha256: written.sourceSha256 } } : { text: text.value };
+      createAttempt = { requestId: crypto.randomUUID(), baseEraRevision: binding.baseEraRevision, targetId: binding.targetId, timeMode: binding.timeMode, ...statement, consent: true };
+    }
     busy = true; readToken += 1; clearPreview(); render();
     const result = await request(bridge.proposalUrl, createAttempt);
     if (disposed) return;
@@ -312,16 +368,18 @@ export function mountAlternativeMemory(container, bridge) {
   text.addEventListener('input', () => { clearPreview(); render(); });
   consent.addEventListener('change', () => { clearPreview(); render(); });
   useSource.addEventListener('change', () => { clearPreview(); render(); });
+  sourceSelect.addEventListener('change', () => { clearPreview(); useSource.checked = false; sourceReviewed.checked = false; consent.checked = false; render(); });
+  sourceReviewed.addEventListener('change', () => { clearPreview(); render(); });
   plan.addEventListener('click', create); refresh.addEventListener('click', read);
   const fullObjectNote = el('p', { className: 'hint', hidden: !bridge.binding()?.edit?.fullObject, textContent: 'For this estimated object, a plan can move it left or right, toward or away, or turn it. Its height stays as in the parent, and its front is not known, so a request to face something asks you for an explicit turn instead.' });
   container.replaceChildren(el('h4', { textContent: 'Revise this alternative from a remembered instruction' }), fullObjectNote,
-    el('p', { className: 'hint', textContent: 'Plan sends your instruction, the permitted source photo selections and this parent’s object layout to Meta. Parent time wording, contributors’ words and recordings are not added. Dates in your message do not change the selected unknown or re-confirmed time. Use public or synthetic photos only. The model cannot choose another parent, change the time, or infer relative size.' }), sourceChoice, sourceView, text,
+    el('p', { className: 'hint', textContent: 'Plan sends your instruction or explicitly chosen saved words, the permitted source photo selections and this parent’s object layout to Meta. Parent time wording and recordings are not added. Dates in your message do not change the selected unknown or re-confirmed time. Use public or synthetic photos only. The model cannot choose another parent, change the time, or infer relative size.' }), sourceChoice, sourceView, sourceOptions, boundSourceView, text,
     el('label', {}, [consent, ' Send this instruction and the permitted photo/layout context to Meta to propose one change to this alternative']),
     el('div', { className: 'actions' }, [plan, refresh]), note, list, review);
   read();
   return {
     sync() { if (previewed && candidateProblem(current())) clearPreview(); render(); },
-    invalidate(reason, unavailable = false) { clearPreview(); if (unavailable) proposals = proposals.map((proposal) => ({ ...proposal, statement: { text: null }, result: null, candidate: null, question: null })); note.textContent = reason; render(); },
+    invalidate(reason, unavailable = false) { clearPreview(); if (unavailable) { sourcesUnavailable = true; readable = false; proposals = proposals.map((proposal) => ({ ...proposal, statement: { text: null }, result: null, candidate: null, question: null })); } note.textContent = reason; render(); },
     inspect(id) { const proposal = proposals.find((item) => item.id === id); if (proposal) { selected = id; bridge.selectScope?.(proposal); if (ACTIVE.has(proposal.status)) poll(id); render(); } },
     hasPending: locked,
     dispose() { disposed = true; stopPoll(); readToken += 1; clearPreview(); container.replaceChildren(); },

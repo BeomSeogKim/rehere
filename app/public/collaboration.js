@@ -1,14 +1,14 @@
 // Written recollections from invited contributors, the owner's manual review
 // of them, saved alternatives with owner time assertions, and invitations.
-// Nothing here reads meaning from a recollection: any change to the scene is
-// a transform the owner sets by hand, previews on the real viewer and saves
-// explicitly. Recollections, photos and model reconstructions stay separate
+// Manual review and source-bound alternative proposals both require an owner
+// preview and explicit save. Recollections, photos and model reconstructions stay separate
 // kinds of evidence; none of them is shown as verified history.
 
 import { copyPose, isComposition, poseProblem } from './composition-scene.js';
 import { poseAxes, poseValues, poseWithAxis } from './composition-editor.js';
-import { formatTransform } from './memory-edit.js';
-import { MOTION_LIMIT, heldMotion, mountAlternativeMemory } from './alternative-memory.js';
+import { formatTransform, modelEvidence } from './memory-edit.js';
+import { alternativeTimelineMemory } from './memory-timeline.js';
+import { MOTION_LIMIT, boundAttributionLines, heldMotion, mountAlternativeMemory } from './alternative-memory.js';
 import { copyArrangement, objectState, withObject } from './arrangement.js';
 import { MAX_RECORDING_MS, createRecorder } from './recorder.js';
 import { register, registerElement, unregister } from './playback.js';
@@ -1691,6 +1691,8 @@ export function mountInvitations(container, { draftId }) {
 export function mountCollaboration(container, bridge) {
   let disposed = false;
   let state = null;
+  let lineageProposals = [];
+  const redactedLineageIds = new Set();
   let readToken = 0;
   let selectedId = null;
   let busy = false;
@@ -1745,7 +1747,7 @@ export function mountCollaboration(container, bridge) {
     el('p', {
       className: 'hint',
       textContent:
-        'These are people’s own recollections, kept as written. They are separate from what the photo shows and from the model’s reconstruction, and none of them is checked as historical fact. Any change to the scene is one you set by hand.',
+        'These are people’s own recollections, kept as written. They are separate from what the photo shows and from the model’s reconstruction, and none of them is checked as historical fact. Review a manual change, or explicitly choose permitted saved words when revising an alternative with a model proposal.',
     }),
     el('div', { className: 'actions access-links' }, [refreshButton]),
     status,
@@ -2234,6 +2236,8 @@ export function mountCollaboration(container, bridge) {
         ? 'a review candidate set by hand. It is not saved.'
         : `“${variantLabel(showing.id)}”. The current saved scene is unchanged.`;
     const current = el('li', {}, [
+      el('section', { className: 'memory-timeline' }, [el('h4', { textContent: 'Saved alternative lineage' }),
+        el('p', { className: 'hint', textContent: `Alternatives are separate from main saved version ${editor.version}. Each child names its parent; save order does not establish historical time. Inspect a saved memory proposal for its complete source and model record.` })]),
       el('span', { textContent: `Current saved scene, version ${editor.version}${showing ? ' (not shown)' : ' (shown)'}` }),
     ]);
     if (shownNow && showing.drawn) current.append(el('span', { className: 'hint', textContent: `Shown on the scene now: ${shownNow}` }));
@@ -2268,6 +2272,16 @@ export function mountCollaboration(container, bridge) {
           item.append(el('span', { className: 'hint', textContent: variant.targetId ? `Kept for ${bridge.targets.nameOf(variant.targetId)}.` : 'The object for this arrangement was not recorded.' }));
         }
         if (variant.revision?.proposalId) {
+          const applied = alternativeTimelineMemory(variant, lineageProposals);
+          if (applied) {
+            const kind = applied.statement.source?.kind;
+            item.append(el('p', { className: 'hint', textContent: kind === 'contribution-text' ? 'Saved child from reviewed contributor writing.'
+              : kind === 'story-captions' ? 'Saved child from reviewed story captions.' : 'Saved child from an owner instruction or written source.' }),
+            el('p', { className: 'memory-text', textContent: applied.statement.text }));
+            if (['contribution-text', 'story-captions'].includes(kind)) item.append(...boundAttributionLines(applied.statement.attribution).map((line) => el('p', { className: 'hint', textContent: line })));
+            const evidence = modelEvidence(applied);
+            if (evidence) item.append(el('div', { className: 'model-evidence' }, [el('p', { textContent: evidence.heading }), ...evidence.lines.map((line) => el('p', { className: 'hint', textContent: line }))]));
+          }
           const inspect = el('button', { type: 'button', className: 'secondary', textContent: 'Inspect saved memory proposal', disabled: busy || Boolean(pendingReview) || Boolean(revisionForm) || (!bridge.editor().clean && !showing) });
           inspect.addEventListener('click', () => {
             const parent = state.variants.find((item) => item.id === variant.revision.parentVariantId && !item.blocked);
@@ -2482,6 +2496,9 @@ export function mountCollaboration(container, bridge) {
         if (context.edit.objects) target.replaceChildren(el('option', { value: '', textContent: 'Choose one object' }), ...context.edit.objects.map((object) => el('option', { value: object.id, textContent: bridge.targets?.nameOf(object.id) ?? object.id })));
         if (context.latestEra && context.latestEra.kind !== 'unknown') time.append(el('option', { value: 'reconfirm-parent', textContent: 'Re-confirm the displayed parent time assertion' }));
         bindTarget();
+      } else {
+        mine.context.statementSources = context.statementSources ?? [];
+        mine.context.writtenSource = context.writtenSource ?? null;
       }
       mine.sync();
       return true;
@@ -2592,6 +2609,7 @@ export function mountCollaboration(container, bridge) {
           ready: alive() && mode.value === 'memory' && !mine.unavailable && !mine.stale && Boolean(time.value) && (!mine.context.edit.objects || Boolean(mine.targetId)) && (time.value !== 'reconfirm-parent' || reaffirm.checked) }),
         // The place's written source as revision-context resolved it, if any.
         writtenSource: () => mine.context?.writtenSource ?? null,
+        statementSources: () => mine.context?.statementSources ?? [],
         nameOf: (id) => bridge.targets?.nameOf(id) ?? 'the selected foreground',
         blocked: () => {
           const sources = bridge.memorySources ?? [];
@@ -2729,6 +2747,8 @@ export function mountCollaboration(container, bridge) {
   }
   async function readOnce() {
     const token = ++readToken;
+    lineageProposals = [];
+    if (state) renderCompare();
     const result = await request(`${bridge.jobUrl}/collaboration`);
     if (disposed || token !== readToken) return null;
     if (!result.ok || !Array.isArray(result.body?.contributions) || !Array.isArray(result.body?.variants)) {
@@ -2736,6 +2756,15 @@ export function mountCollaboration(container, bridge) {
       status.textContent = 'Recollections could not be loaded. Try Refresh.';
       return false;
     }
+    const recentChildren = result.body.variants.filter((variant) => !variant.blocked && variant.revision?.proposalId)
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? ''))).slice(0, 3);
+    const parents = [...new Set(recentChildren.map((variant) => variant.revision.parentVariantId))];
+    const lists = await Promise.all(parents.map((id) => request(`${bridge.jobUrl}/variants/${encodeURIComponent(id)}/proposals`)));
+    if (disposed || token !== readToken) return null;
+    lineageProposals = lists.flatMap((list) => list.ok && Array.isArray(list.body) ? list.body : []).filter((proposal) => {
+      if (proposal.redacted || typeof proposal.statement?.text !== 'string') redactedLineageIds.add(proposal.id);
+      return !redactedLineageIds.has(proposal.id);
+    });
     // Other panels (sharing) hear about a real change only: a fresh valid
     // read that differs from the last one seen, including a photo's
     // availability at the same revision. The first read is not a change.
