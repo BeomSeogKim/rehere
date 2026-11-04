@@ -18,7 +18,8 @@ class Rejected(Exception):
 
 def triangle_counts(surface):
     width, height = surface["width"], surface["height"]
-    depth, regions = surface["depth"], surface["regions"]
+    depth = surface["depth"]
+    regions = surface.get("regions", surface.get("foreground"))
     span = surface["assumptions"]["max_triangle_depth_span"]
     counts = {0: 0, 1: 0, 2: 0}
     for y in range(height - 1):
@@ -40,10 +41,70 @@ def encode(image, kind, **options):
     return out.getvalue()
 
 
+def corrected_legacy_files(input_dir, request, parent):
+    from PIL import Image
+
+    if "schema_version" in parent or "foreground" not in parent:
+        raise Rejected()
+    mask_bytes = (input_dir / "outline.png").read_bytes()
+    if hashlib.sha256(mask_bytes).hexdigest() != request["maskSha256"]:
+        raise Rejected()
+    size = tuple(parent["source"]["image_size"])
+    with Image.open(io.BytesIO(mask_bytes), formats=("PNG",)) as decoded:
+        if decoded.size != size or getattr(decoded, "n_frames", 1) != 1:
+            raise Rejected()
+        rgba = decoded.convert("RGBA")
+    if any(r != g or r != b or r not in (0, 255) or a != 255 for r, g, b, a in rgba.get_flattened_data()):
+        raise Rejected()
+    mask = rgba.getchannel("R")
+    pixels = mask.load()
+    width, height = parent["width"], parent["height"]
+    # Match the audited outline validator's source-pixel grid nodes exactly.
+    foreground = [int(pixels[int(x * (size[0] - 1) / (width - 1) + .5),
+                             int(y * (size[1] - 1) / (height - 1) + .5)] != 0)
+                  for y in range(height) for x in range(width)]
+    if foreground != request["foreground"] or foreground == parent["foreground"]:
+        raise Rejected()
+    source = {**parent["source"], "selected_object": {
+        **parent["source"]["selected_object"], "box_xyxy": request["box"],
+        "selection_kind": "owner-confirmed visible outline",
+    }}
+    surface = {**parent, "source": source, "foreground": foreground, "outline": OUTLINE}
+    counts = triangle_counts(surface)
+    coverage = sum(foreground) / len(foreground)
+    if coverage > .6 or counts[1] < 32 or counts[0] < 1:
+        raise Rejected()
+    texture = (input_dir / "texture.jpg").read_bytes()
+    with Image.open(io.BytesIO(texture), formats=("JPEG",)) as decoded:
+        if decoded.size != size:
+            raise Rejected()
+        rgb = decoded.convert("RGB")
+    overlay = Image.composite(Image.blend(rgb, Image.new("RGB", size, (30, 150, 220)), .45), rgb, mask)
+    parent_summary = json.loads((input_dir / "summary.json").read_bytes())
+    summary = {
+        "source_id": source["source_id"], "source_sha256": source["sha256"],
+        "texture_sha256": hashlib.sha256(texture).hexdigest(), "image_size": list(size),
+        "box_xyxy": request["box"], "grid": [width, height], "mask_coverage": coverage,
+        "foreground_triangles": counts[1], "background_triangles": counts[0], "outline": OUTLINE,
+        "outline_sha256": request["maskSha256"],
+        "grid_sampling": "nearest source pixel at floor(node*(source_size-1)/(grid_size-1)+0.5)",
+        "models": {"depth": parent_summary.get("models", {}).get("depth")},
+        "evidence": "Owner-confirmed outline; retained model depth; no new inference or unseen surfaces.",
+    }
+    return {
+        "texture.jpg": texture, "depth-preview.png": (input_dir / "depth-preview.png").read_bytes(),
+        "mask.png": mask_bytes, "mask-overlay.jpg": encode(overlay, "JPEG", quality=90),
+        "surface.json": (json.dumps(surface, separators=(",", ":"), ensure_ascii=False) + "\n").encode(),
+        "summary.json": (json.dumps(summary, indent=2, ensure_ascii=False) + "\n").encode(),
+    }
+
+
 def corrected_files(input_dir, request):
     from PIL import Image, ImageChops, ImageFilter
 
     surface = json.loads((input_dir / "surface.json").read_bytes())
+    if request.get("kind") == "legacy-outline-repair":
+        return corrected_legacy_files(input_dir, request, surface)
     previous = surface["regions"]
     regions, objects = request["regions"], request["objects"]
     target = 1 if request["targetId"] == "object-1" else 2

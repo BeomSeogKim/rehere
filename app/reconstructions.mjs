@@ -229,6 +229,15 @@ export function parseOutlineRequest(body) {
   return { requestId: body.requestId, sourceSurfaceSha256: body.sourceSurfaceSha256, targetId: body.targetId, regions: [...body.regions] };
 }
 
+function parseOutlineRepair(body) {
+  if (!exactKeys(body, ['requestId', 'outlineId', 'sourceSha256', 'outlineSha256', 'parentSurfaceSha256', 'baseVersion', 'confirmed'])
+      || ![body.requestId, body.outlineId].every((id) => typeof id === 'string' && UUID_PATTERN.test(id))
+      || ![body.sourceSha256, body.outlineSha256, body.parentSurfaceSha256].every((value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value))
+      || !Number.isInteger(body.baseVersion) || body.baseVersion < 1 || body.confirmed !== true) throw new RequestError(400, OUTLINE_MESSAGES.input);
+  const { requestId, outlineId, sourceSha256, outlineSha256, parentSurfaceSha256, baseVersion } = body;
+  return { requestId, outlineId, sourceSha256, outlineSha256, parentSurfaceSha256, baseVersion };
+}
+
 function correctedObjects(surface, request) {
   const target = OBJECT_IDS.indexOf(request.targetId) + 1;
   if (surface.regions.length !== request.regions.length) throw new RequestError(400, OUTLINE_MESSAGES.input);
@@ -334,7 +343,7 @@ const SOURCE_REDACTED_PROPOSAL = 'This proposal used a photo that is no longer a
 // the manifest contract plus whether the photo's current uses or withdrawn or
 // ungranted contributions block use. `source` is the photo's current uses.
 export function publicManifest(manifest, source = { place: true, model: true }) {
-  const { edits, proposals, collaboration, shares, stories, outlineCorrection, compositionCreation, ...rest } = manifest;
+  const { edits, proposals, collaboration, shares, stories, outlineCorrection, outlineRepair, compositionCreation, ...rest } = manifest;
   const ready = manifest.status === 'ready';
   const sourceBlocked = ready && !source.place;
   const contributionBlocked = usageBlocked(manifest);
@@ -1134,7 +1143,7 @@ export class ReconstructionStore {
         const sameSelection = request.objects
           ? sameValues(existing.objects?.map(({ id, label, box }) => ({ id, label, box })), request.objects)
           : !existing.objects && sameValues(existing.box, request.box);
-        if (existing.outlineCorrection || existing.draftId !== draftId || existing.sourceId !== request.sourceId || !sameSelection) {
+        if (existing.outlineCorrection || existing.outlineRepair || existing.draftId !== draftId || existing.sourceId !== request.sourceId || !sameSelection) {
           throw new RequestError(409, 'This build request was already used for a different photo or box.');
         }
         return { manifest: existing, start: false };
@@ -1420,9 +1429,12 @@ export class ReconstructionStore {
     return { derivedAssets, pivots };
   }
 
-  async #outlineParent(draftId, jobId, surfaceSha256) {
+  async #outlineParent(draftId, jobId, surfaceSha256, legacy = false) {
     const manifest = await this.editableScene(draftId, jobId);
-    if (manifest.status !== 'ready' || !isTwoObject(manifest) || isComposition(manifest)) throw new RequestError(409, 'Only a finished single-photo two-object scene can have its outline corrected.');
+    const unsupported = legacy ? manifest.status !== 'ready' || isTwoObject(manifest) || manifest.representation !== undefined || manifest.edit?.fullObject
+      : manifest.status !== 'ready' || !isTwoObject(manifest) || isComposition(manifest);
+    if (unsupported) throw new RequestError(409, legacy ? 'Only a finished one-object photo scene can use this outline.'
+      : 'Only a finished single-photo two-object scene can have its outline corrected.');
     assertSceneUsable(manifest, 'place');
     const { source, size } = await this.verifiedOriginal(draftId, manifest.sourceId, 'place');
     if (source.sha256 !== manifest.sourceSha256) throw new RequestError(409, CHECKSUM_MESSAGE);
@@ -1442,8 +1454,61 @@ export class ReconstructionStore {
     }
     if (sha256(files['surface.json']) !== surfaceSha256) throw new RequestError(409, 'The scene outline changed. Reopen it before correcting it.');
     const verified = await this.verifyOutputs(assets, manifest, size);
-    if (!verified || !sameValues(verified.pivots, objectPivots(manifest))) throw new RequestError(409, OUTLINE_MESSAGES.surface);
-    return { manifest, size, files, surface: JSON.parse(files['surface.json'].toString('utf8')) };
+    if (!verified || (!legacy && !sameValues(verified.pivots, objectPivots(manifest)))) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+    const surface = JSON.parse(files['surface.json'].toString('utf8'));
+    if (legacy && surface.schema_version !== undefined) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+    return { manifest, size, files, surface };
+  }
+
+  async #repairInputs(draftId, jobId, request, replay = false) {
+    const parent = await this.#outlineParent(draftId, jobId, request.parentSurfaceSha256, true);
+    const bound = await this.fullObjects.parent(draftId, jobId, parent.manifest.sourceId, request.sourceSha256,
+      request.parentSurfaceSha256, request.baseVersion, 'place', !replay);
+    const outline = await this.fullObjects.outline(draftId, jobId, request.outlineId);
+    const saved = outline.record.request;
+    if (saved.sourceId !== parent.manifest.sourceId || saved.sourceSha256 !== request.sourceSha256
+        || saved.parentSurfaceSha256 !== request.parentSurfaceSha256 || saved.baseVersion !== request.baseVersion
+        || saved.maskSha256 !== request.outlineSha256 || saved.confirmed !== true || outline.record.dto.confirmed !== true) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+    await this.fullObjects.recheckOutline(bound, outline.record, outline.maskPath);
+    const foreground = Array(parent.surface.width * parent.surface.height).fill(0);
+    for (const index of outline.record.validation.coveredGridIndices) foreground[index] = 1;
+    if (sameValues(foreground, parent.surface.foreground)) throw new RequestError(400, 'Change the visible outline before saving a new scene.');
+    return { ...parent, repair: request, mask: outline.mask, foreground, box: [...outline.record.validation.bounds] };
+  }
+
+  async repairOutline(draftId, parentJobId, body) {
+    const request = parseOutlineRepair(body);
+    if (![draftId, parentJobId].every((id) => UUID_PATTERN.test(id))) throw new RequestError(404, 'This scene could not be found.');
+    await this.recover();
+    const digest = sha256(JSON.stringify(['legacy-outline-repair', draftId, parentJobId, request]));
+    const accepted = await this.serialize(async () => {
+      const existing = await this.findRequest(request.requestId);
+      if (existing) {
+        if (existing.outlineRepair?.requestDigest !== digest) throw new RequestError(409, OUTLINE_MESSAGES.changed);
+        await this.#repairInputs(draftId, parentJobId, request, true);
+        assertSceneUsable(existing, 'place');
+        if (!(await this.sceneSourceUses(existing)).place) throw new RequestError(409, SOURCE_BLOCKED_MESSAGE);
+        await this.#outlineParent(draftId, existing.id, existing.derivedAssets?.find((asset) => asset.name === 'surface.json')?.sha256, true);
+        return { status: 200, manifest: existing };
+      }
+      if (this.activeComposition?.requestId === request.requestId) throw new RequestError(409, OUTLINE_MESSAGES.changed);
+      if (this.activeOutline) {
+        if (this.activeOutline.requestId !== request.requestId) throw new RequestError(409, 'Another outline correction is being saved.');
+        if (this.activeOutline.digest !== digest) throw new RequestError(409, OUTLINE_MESSAGES.changed);
+        return { status: 200, operation: this.activeOutline };
+      }
+      const parent = await this.#repairInputs(draftId, parentJobId, request);
+      if (this.closed) throw new RequestError(503, OUTLINE_MESSAGES.stopped);
+      const operation = { id: randomUUID(), draftId, sourceId: parent.manifest.sourceId, requestId: request.requestId,
+        digest, controller: new AbortController(), done: null };
+      this.activeOutline = operation;
+      operation.done = this.#runOutline(operation, parentJobId, request, parent, null);
+      return { status: 201, operation };
+    });
+    const manifest = accepted.manifest ?? await accepted.operation.done;
+    const current = await this.readManifest(draftId, manifest.id);
+    if (!current) throw new RequestError(404, 'This scene could not be found.');
+    return { status: accepted.status, manifest: publicManifest(current, await this.sceneSourceUses(current)) };
   }
 
   async correctOutline(draftId, parentJobId, body) {
@@ -1498,7 +1563,11 @@ export class ReconstructionStore {
       await mkdir(inputDir, { recursive: true });
       await mkdir(childDir);
       for (const [name, bytes] of Object.entries(parent.files)) await writeFile(path.join(inputDir, name), bytes, { flag: 'wx', mode: 0o600 });
-      await writeFile(requestPath, JSON.stringify({ regions: request.regions, targetId: request.targetId, objects }), { flag: 'wx', mode: 0o600 });
+      if (parent.repair) await writeFile(path.join(inputDir, 'outline.png'), parent.mask, { flag: 'wx', mode: 0o600 });
+      const workerRequest = parent.repair
+        ? { kind: 'legacy-outline-repair', foreground: parent.foreground, box: parent.box, maskSha256: request.outlineSha256 }
+        : { regions: request.regions, targetId: request.targetId, objects };
+      await writeFile(requestPath, JSON.stringify(workerRequest), { flag: 'wx', mode: 0o600 });
       const launch = await this.serialize(async () => {
         stopped();
         await this.permittedPhoto(draftId, parent.manifest.sourceId, 'place');
@@ -1512,7 +1581,14 @@ export class ReconstructionStore {
       if (result?.exitCode === 4) throw new RequestError(409, OUTLINE_MESSAGES.rejected);
       if (result?.exitCode !== 0) throw new RequestError(503, OUTLINE_MESSAGES.failed);
       const now = new Date().toISOString();
-      const manifest = {
+      const manifest = parent.repair ? {
+        id, draftId, sourceId: parent.manifest.sourceId, sourceSha256: parent.manifest.sourceSha256,
+        requestId: request.requestId, status: 'ready', createdAt: now, updatedAt: now, error: null,
+        box: parent.box, outline: { kind: 'owner-corrected' },
+        outlineRepair: { parentJobId, parentSurfaceSha256: request.parentSurfaceSha256, baseVersion: request.baseVersion,
+          outlineId: request.outlineId, outlineSha256: request.outlineSha256, requestDigest: operation.digest },
+        edit: { version: 1, offset: [0, 0, 0], yaw: 0 }, edits: [], derivedAssets: [],
+      } : {
         id, draftId, sourceId: parent.manifest.sourceId, sourceSha256: parent.manifest.sourceSha256,
         requestId: request.requestId, status: 'ready', createdAt: now, updatedAt: now, error: null,
         outline: { kind: 'owner-corrected' },
@@ -1524,20 +1600,35 @@ export class ReconstructionStore {
       const verified = await this.verifyOutputs(outputDir, manifest, parent.size);
       if (!verified) throw new RequestError(409, OUTLINE_MESSAGES.rejected);
       const actual = JSON.parse(await readFile(path.join(outputDir, 'surface.json'), 'utf8'));
-      const expected = {
+      const expected = parent.repair ? {
+        ...parent.surface, foreground: parent.foreground, outline: { kind: 'owner-corrected' },
+        source: { ...parent.surface.source, selected_object: { ...parent.surface.source.selected_object,
+          box_xyxy: parent.box, selection_kind: 'owner-confirmed visible outline' } },
+      } : {
         schema_version: 2, source: { ...parent.surface.source, selected_objects: objects }, objects,
         width: parent.surface.width, height: parent.surface.height, depth: parent.surface.depth,
         regions: request.regions, assumptions: parent.surface.assumptions, outline: { kind: 'owner-corrected' },
       };
       if (!isDeepStrictEqual(actual, expected) || ['texture.jpg', 'depth-preview.png'].some((name) =>
         verified.derivedAssets.find((entry) => entry.name === name).sha256 !== sha256(parent.files[name]))) throw new RequestError(409, OUTLINE_MESSAGES.surface);
+      if (parent.repair) {
+        const mask = verified.derivedAssets.find((entry) => entry.name === 'mask.png');
+        const meshes = objectSurfaceMeshes(actual), foregroundTriangles = meshes.objects[0].indices.length / 3;
+        const backgroundTriangles = meshes.background.indices.length / 3;
+        const coverage = actual.foreground.filter(Boolean).length / actual.foreground.length;
+        const summary = JSON.parse(await readFile(path.join(outputDir, 'summary.json'), 'utf8'));
+        if (mask.sha256 !== request.outlineSha256 || coverage > .6 || foregroundTriangles < MIN_REGION_TRIANGLES || backgroundTriangles < 1
+            || summary.foreground_triangles !== foregroundTriangles || summary.background_triangles !== backgroundTriangles
+            || summary.mask_coverage !== coverage || summary.outline_sha256 !== request.outlineSha256) throw new RequestError(409, OUTLINE_MESSAGES.rejected);
+      }
       manifest.derivedAssets = verified.derivedAssets;
-      manifest.objects = manifest.objects.map((object) => ({ ...object, pivot: verified.pivots.find((entry) => entry.id === object.id).pivot }));
+      if (!parent.repair) manifest.objects = manifest.objects.map((object) => ({ ...object, pivot: verified.pivots.find((entry) => entry.id === object.id).pivot }));
       await writeJsonAtomic(path.join(childDir, 'manifest.json'), manifest);
       const publish = async () => {
         stopped();
         // Recheck original, all parent hashes and current grants inside publication authority.
-        await this.#outlineParent(draftId, parentJobId, request.sourceSurfaceSha256);
+        if (parent.repair) await this.#repairInputs(draftId, parentJobId, request);
+        else await this.#outlineParent(draftId, parentJobId, request.sourceSurfaceSha256);
         await mkdir(path.join(this.rootDir, draftId), { recursive: true });
         stopped();
         // Atomic commit: readers see either no child, or its complete ready directory.

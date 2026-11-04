@@ -332,6 +332,30 @@ The original camera view and a depth-inspection view make the limits visible.
 The local viewer requires WebGL; the original memory remains readable when
 it is unavailable.
 
+A confirmed source-resolution outline can also create a new single-object
+partial scene without running a model. The owner checks the visible outline
+and saves it through the existing outline editor, then explicitly saves a new
+partial scene. The child starts at its original photo pose with no copied
+edits, stories or shares. Its parent, original mask, depth and history stay
+unchanged. The outline is an owner assertion about visible pixels, not verified
+object identity, hidden geometry or historical truth.
+
+`POST /api/drafts/<id>/reconstructions/<job>/outline-repairs` accepts
+`requestId`, `outlineId`, `sourceSha256`, `outlineSha256`,
+`parentSurfaceSha256`, `baseVersion` and `confirmed: true`. It uses only an
+existing confirmed outline bound to this source, parent surface and version.
+A successful new child returns 201; the exact request returns the same child
+with 200 while current access and source integrity still allow it. Stale or
+changed bindings are refused. No model permission is needed for this
+deterministic operation, but current place permission is required.
+
+The child keeps the full-resolution outline bytes and maps each depth-grid
+node to source pixel `floor(node*(sourceSize-1)/(gridSize-1)+0.5)`.
+It retains the single-object limits: at most 60% selected grid nodes, at least
+32 foreground triangles and at least one background triangle. Depth-jump and
+unseen regions stay empty; thin selected details may not survive that grid.
+These corrections do not fill the background exposed by moving the object.
+
 On a wide desktop with enough vertical space, the scene stays beside the
 scrolling editor. Narrow or short views use a single column. The photo credit
 and the limits of the reconstruction stay beside the scene; selected-object

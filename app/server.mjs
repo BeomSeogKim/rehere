@@ -148,6 +148,7 @@ const JOBS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions$/;
 const JOB_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)$/;
 const JOB_EDIT_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/edit$/;
 const OUTLINE_CORRECTIONS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/outline-corrections$/;
+const OUTLINE_REPAIRS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/outline-repairs$/;
 const FULL_OBJECT_OUTLINE_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/full-object\/outlines\/([^/]+)(\/mask\.png)?$/;
 const FULL_OBJECT_OUTLINES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/full-object\/outlines$/;
 const FULL_OBJECT_BUILDS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/full-object\/builds$/;
@@ -977,6 +978,14 @@ export function createAppServer({
       if (Number(req.headers['content-length']) > cap) throw new RequestError(413, 'The outline is too large.');
       const { status, outline } = await fullObjects.putOutline(draftId, jobId, id, request, await readBody(req, cap));
       sendJson(res, status, outline);
+      return;
+    }
+    const repairMatch = OUTLINE_REPAIRS_PATH.exec(pathname);
+    if (repairMatch) {
+      await requireOwner();
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      const { status, manifest } = await reconstructions.repairOutline(repairMatch[1], repairMatch[2], await readJsonBody(req));
+      sendJson(res, status, manifest);
       return;
     }
     const outlineMatch = OUTLINE_CORRECTIONS_PATH.exec(pathname);

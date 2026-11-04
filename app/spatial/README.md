@@ -294,6 +294,20 @@ explicit consent before transmission.
 
 ## Tests
 
+`correct_outline.py` is a separate deterministic producer used by the server
+for reviewed outline corrections. Its legacy one-foreground mode consumes an
+already audited full-source binary PNG, preserves its exact bytes as
+`mask.png`, and reuses the parent's depth, texture and depth preview. It maps
+grid nodes with the audited outline validator's nearest source-pixel rule,
+checks the existing single-object coverage and triangle limits, and writes a
+complete new output set. It imports Pillow and the standard library only;
+there is no depth, segmentation or object-model call. The server owns source,
+grant, parent/version and hash checks and atomic child publication. This
+worker does not approve an outline or replace the parent.
+
+Run `python -B -m unittest test_correct_outline` for synthetic deterministic
+correction tests, including unchanged schema-2 behavior and legacy gates.
+
 The tests cover argument, box, image, grid, depth-range, mask, two-object
 argument, overlap, unassigned-pixel and region checks and do not load models:
 

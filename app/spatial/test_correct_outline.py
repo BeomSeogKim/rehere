@@ -145,6 +145,76 @@ class OutlineTests(unittest.TestCase):
         self.assertEqual(main(args), 5)
         self.assertEqual({p.name: p.read_bytes() for p in output.iterdir()}, before)
 
+    def legacy(self, box=(6, 8, 28, 40)):
+        from PIL import ImageDraw
+        self.surface.pop("schema_version", None)
+        self.surface.pop("objects", None)
+        self.surface["source"].pop("selected_objects", None)
+        self.surface["source"]["selected_object"] = {"id": "foreground", "box_xyxy": [6, 8, 22, 40]}
+        self.surface["foreground"] = [int(r == 1) for r in self.surface.pop("regions", self.regions)]
+        mask = Image.new("L", (64, 48))
+        ImageDraw.Draw(mask).rectangle((box[0], box[1], box[2] - 1, box[3] - 1), fill=255)
+        mask.save(self.input / "outline.png")
+        self.save_parent()
+        (self.input / "summary.json").write_text(json.dumps({"models": {"depth": {"id": "synthetic-depth"}}}))
+        foreground = [int(mask.getpixel((int(x * 63 / 31 + .5), int(y * 47 / 23 + .5))) != 0)
+                      for y in range(24) for x in range(32)]
+        return {"kind": "legacy-outline-repair", "box": list(box), "foreground": foreground,
+                "maskSha256": hashlib.sha256((self.input / "outline.png").read_bytes()).hexdigest()}
+
+    def test_legacy_exact_confirmed_mask_grid_and_parent_invariance(self):
+        request = self.legacy()
+        before = {p.name: p.read_bytes() for p in self.input.iterdir()}
+        files = corrected_files(self.input, request)
+        surface = json.loads(files["surface.json"])
+        self.assertNotIn("schema_version", surface)
+        self.assertEqual(surface["foreground"], request["foreground"])
+        self.assertEqual(surface["depth"], self.surface["depth"])
+        self.assertEqual(surface["assumptions"], self.surface["assumptions"])
+        self.assertEqual(surface["source"]["selected_object"]["box_xyxy"], request["box"])
+        self.assertEqual(files["mask.png"], before["outline.png"])
+        for name in ("texture.jpg", "depth-preview.png"):
+            self.assertEqual(files[name], before[name])
+        summary = json.loads(files["summary.json"])
+        self.assertEqual(summary["models"], {"depth": {"id": "synthetic-depth"}})
+        self.assertEqual(summary["foreground_triangles"], triangle_counts(surface)[1])
+        self.assertEqual(summary["mask_coverage"], sum(request["foreground"]) / 768)
+        self.assertEqual({p.name: p.read_bytes() for p in self.input.iterdir()}, before)
+        self.request = request
+        self.test_loads_no_inference_dependencies_and_is_deterministic()
+
+    def test_legacy_retains_single_object_coverage_and_depth_gates(self):
+        for box in [(0, 0, 64, 48), (0, 0, 3, 3)]:
+            with self.subTest(box=box), self.assertRaises(Rejected):
+                corrected_files(self.input, self.legacy(box))
+        request = self.legacy()
+        self.surface["depth"] = [3 if i % 2 else 5 for i in range(768)]
+        self.save_parent()
+        with self.assertRaises(Rejected):
+            corrected_files(self.input, request)
+
+    def test_legacy_rejects_mismatched_mask_grid_schema_and_noop(self):
+        request = self.legacy()
+        for changed in [{"maskSha256": "0" * 64}, {"foreground": [0] * 768}]:
+            with self.subTest(changed=changed), self.assertRaises(Rejected):
+                corrected_files(self.input, {**request, **changed})
+        self.surface["foreground"] = request["foreground"]
+        self.save_parent()
+        with self.assertRaises(Rejected):
+            corrected_files(self.input, request)
+        self.surface["schema_version"] = 1
+        self.save_parent()
+        with self.assertRaises(Rejected):
+            corrected_files(self.input, request)
+
+    def test_legacy_rejects_nonbinary_transparent_and_wrong_size_masks(self):
+        request = self.legacy()
+        for size, colour in [((64, 48), (128, 128, 128, 255)), ((64, 48), (255, 255, 255, 0)), ((63, 48), (255, 255, 255, 255))]:
+            Image.new("RGBA", size, colour).save(self.input / "outline.png")
+            changed = {**request, "maskSha256": hashlib.sha256((self.input / "outline.png").read_bytes()).hexdigest()}
+            with self.subTest(size=size, colour=colour), self.assertRaises(Rejected):
+                corrected_files(self.input, changed)
+
 
 if __name__ == "__main__":
     unittest.main()
