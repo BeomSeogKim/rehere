@@ -509,6 +509,45 @@ describe('share store issue and visit', () => {
     assert.match(listed[0].reason, /withdrawn/);
   });
 
+  it('reports an expired link on a replayed issue', async () => {
+    const ctx = await setup();
+    const preview = await ctx.preview([ctx.versionView(1)]);
+    const requestId = randomUUID();
+    const token = visitToken();
+    const receipt = await ctx.issue(preview, { requestId, token });
+    assert.equal(receipt.status, 'active');
+    ctx.now.value += SHARE_LIMITS.snapshotMs;
+    const replayed = await ctx.issue(preview, { requestId, token });
+    assert.equal(replayed.status, 'expired');
+    assert.equal(replayed.id, receipt.id);
+    assert.equal(replayed.digest, receipt.digest);
+    assert.equal(replayed.previewId, receipt.previewId);
+    const listed = await ctx.shares.list(ctx.draftId, ctx.jobId, ctx.owner);
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].status, 'expired');
+    assert.equal(replayed.status, listed[0].status);
+  });
+
+  it('reports a suspended link on a replayed issue', async () => {
+    const ctx = await setup();
+    const contribution = await ctx.submit();
+    await ctx.review(contribution);
+    const preview = await ctx.preview([ctx.versionView(2)]);
+    const requestId = randomUUID();
+    const token = visitToken();
+    const receipt = await ctx.issue(preview, { requestId, token });
+    assert.equal(receipt.status, 'active');
+    await ctx.collaboration.withdraw(ctx.draftId, ctx.jobId, ctx.alex, contribution.id, { requestId: randomUUID() });
+    const replayed = await ctx.issue(preview, { requestId, token });
+    assert.equal(replayed.status, 'suspended');
+    assert.equal(replayed.id, receipt.id);
+    assert.equal(replayed.digest, receipt.digest);
+    assert.equal(replayed.previewId, receipt.previewId);
+    const listed = await ctx.shares.list(ctx.draftId, ctx.jobId, ctx.owner);
+    assert.equal(listed[0].status, 'suspended');
+    assert.equal(replayed.status, listed[0].status);
+  });
+
   it('never leaves a withdrawn dependency visitable after a concurrent issue', async () => {
     for (let attempt = 0; attempt < 4; attempt++) {
       const ctx = await setup();

@@ -822,7 +822,7 @@ export class ShareStore {
           const reason = await this.#liveIssue(manifest, existing.frozen);
           if (reason) this.#throwReason(reason);
         }
-        return this.#receipt(existing);
+        return { ...this.#receipt(existing), status: (await this.#status(manifest, existing)).status };
       }
       if (await this.#findSnapshot(tokenVerifier)) throw fail(409, 'This link key was already used. Prepare a new one.');
       // Link keys of deleted places stay retired for good. An unreadable
