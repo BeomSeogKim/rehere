@@ -55,7 +55,9 @@ selected arrangements and permitted writing behind revocable local links.
 Owners can narrow imported source uses or stop dependent use without rewriting
 originals; current restrictions also govern existing snapshots.
 Imported recordings can be attached to exact saved arrangements with
-human-supplied captions and explicitly included in visitor snapshots.
+owner-reviewed captions, which may start from an optional Muse Voice
+Transcribe draft that is off by default, and explicitly included in visitor
+snapshots.
 Scoped contributors can submit photos and recordings for owner review.
 A saved visitor snapshot can be exported as a frozen, read-only
 [static copy](app/STATIC-DEMO.md) that needs no application server, only static file hosting; it does not follow

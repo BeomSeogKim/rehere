@@ -101,8 +101,10 @@ replacing the pinned Small model requires a new license check.
 
 ## Hosted model API
 
-The optional planner calls Meta's Muse Spark through Meta's API under Meta's
-own terms. No model is distributed with Rehere for it.
+The optional planner calls Meta's Muse Spark, and the optional caption drafts
+call Meta's Muse Voice Transcribe, both through Meta's API under Meta's own
+terms. Both are off by default. Neither model's weights are bundled or
+distributed with Rehere.
 
 ## Photographs, recordings and memories
 

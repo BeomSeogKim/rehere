@@ -117,12 +117,15 @@ Recorded stories connect a permitted imported recording to an explicitly chosen
 saved arrangement and its foreground object, or one named object of a
 two-object scene. Use the whole first audio track or explicitly select an
 excerpt by its start and end in the original. The original stays unchanged;
-caption times start at 0:00 of the selected playback. Human-supplied captions
-and provider attribution accompany the converted copy, with explicit
+caption times start at 0:00 of the selected playback. Captions, either human
+supplied or an owner-reviewed AI draft credited as such, and provider
+attribution accompany the converted copy, with explicit
 visitor selection and current withdrawal checks. See [recorded stories](STORIES.md).
 
-Not included: automatic transcription, multi-view alignment, hosted account
-integration, and recovery of input that never reached the server.
+Automatic captions exist only as the optional, off-by-default
+[AI caption drafts](#ai-caption-drafts), which the owner must review before
+saving. Not included: multi-view alignment, hosted account integration, and
+recovery of input that never reached the server.
 
 Saved visitor snapshots can include selected arrangements and permitted written
 recollections. Preview the actual visitor screen before issuing a local link;
