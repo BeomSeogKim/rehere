@@ -6,8 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { crc32, deflateSync } from 'node:zlib';
 import { exportStaticVisit } from '../export-static-visit.mjs';
-import { checkEntryCss, checkEntryHtml, fetchFromExport, loadEntry, stripJpegMetadata, verifyExportFolder } from '../judge-entry.mjs';
+import { checkEntryCss, checkEntryHtml, checkPng, fetchFromExport, loadEntry, stripJpegMetadata, verifyExportFolder } from '../judge-entry.mjs';
 
 const ENTRY = fileURLToPath(new URL('../entry/', import.meta.url));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -30,6 +31,53 @@ const jpegWith = (...extra) => Buffer.concat([Buffer.from([0xff, 0xd8]), segment
 const EXIF = segment(0xe1, Buffer.from('Exif\0\0MM\0*\0\0\0\b\0\0', 'latin1'));
 const PHOTOSHOP = segment(0xed, Buffer.from('Photoshop 3.0\0abc', 'latin1'));
 const COMMENT = segment(0xfe, Buffer.from('a private note', 'latin1'));
+
+// A small PNG built chunk by chunk, so a test can add a forbidden chunk, break a checksum or append data.
+const chunk = (type, data = Buffer.alloc(0)) => {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, 'latin1'), data])));
+  return Buffer.concat([length, Buffer.from(type, 'latin1'), data, crc]);
+};
+const header = (width, height) => {
+  const data = Buffer.alloc(13);
+  data.writeUInt32BE(width, 0);
+  data.writeUInt32BE(height, 4);
+  data.set([8, 6, 0, 0, 0], 8);
+  return data;
+};
+function png({ width = 4, height = 4, extra = [], tail = Buffer.alloc(0), noEnd = false, idat = null, ihdr = null } = {}) {
+  const image = idat ?? deflateSync(Buffer.alloc(height * (1 + width * 4)));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr ?? chunk('IHDR', header(width, height)), ...extra, chunk('IDAT', image), ...(noEnd ? [] : [chunk('IEND')]), tail]);
+}
+
+describe('overlay images', () => {
+  it('accepts a plain PNG and refuses every way of carrying more than an image', () => {
+    assert.deepEqual(checkPng(png({ extra: [chunk('pHYs', Buffer.alloc(9)), chunk('sRGB', Buffer.from([0]))] })), { width: 4, height: 4 });
+    for (const [name, bytes, message] of [
+      ['not a PNG', Buffer.from('GIF89a'.repeat(10)), /not a PNG/],
+      ['tEXt', png({ extra: [chunk('tEXt', Buffer.from('Comment\0private'))] }), /tEXt chunk/],
+      ['iTXt', png({ extra: [chunk('iTXt', Buffer.from('XML:com.adobe.xmp\0\0\0\0\0x'))] }), /iTXt chunk/],
+      ['eXIf', png({ extra: [chunk('eXIf', Buffer.from('MM\0*'))] }), /eXIf chunk/],
+      ['tIME', png({ extra: [chunk('tIME', Buffer.alloc(7))] }), /tIME chunk/],
+      ['iCCP', png({ extra: [chunk('iCCP', Buffer.from('p\0\0x'))] }), /iCCP chunk/],
+      ['a private chunk', png({ extra: [chunk('prVt', Buffer.from('x'))] }), /prVt chunk/],
+      ['data after IEND', png({ tail: Buffer.from('trailing bytes') }), /after its end chunk|truncated/],
+      ['no IEND', png({ noEnd: true }), /incomplete/],
+      ['header not first', Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('sRGB', Buffer.from([0])), chunk('IHDR', header(4, 4)), chunk('IDAT', deflateSync(Buffer.alloc(80))), chunk('IEND')]), /does not start with its header/],
+      ['a second header', png({ extra: [chunk('IHDR', header(4, 4))] }), /malformed header/],
+      ['too wide', png({ width: 5000, height: 1 }), /pixels on a side/],
+      ['zero height', png({ ihdr: chunk('IHDR', header(4, 0)) }), /pixels on a side/],
+      ['image data bigger than the header declares', png({ idat: deflateSync(Buffer.alloc(100_000)) }), /does not decode within its declared size/],
+      ['image data that is not zlib', png({ idat: Buffer.from('not zlib data') }), /does not decode/],
+    ]) assert.throws(() => checkPng(bytes, 'x.png'), message, name);
+    const broken = png();
+    broken[broken.length - 20] ^= 0xff;
+    assert.throws(() => checkPng(broken, 'x.png'), /bad checksum|does not decode/);
+    assert.throws(() => checkPng(Buffer.alloc(3 * 1024 ** 2, 1), 'x.png'), /larger than/);
+  });
+});
 
 describe('metadata strip', () => {
   it('drops Exif, Photoshop and comment segments and keeps the rest byte for byte', () => {
@@ -239,6 +287,101 @@ describe('building a site from an earlier export with an entry', () => {
     await assert.rejects(build(childViews({ edit: edit(0) })), /does not record a 5 degree turn/);
     await assert.rejects(build(childViews({ evidence: { arrangement: 'alternative' } })), /not recorded as memory/);
     await assert.doesNotReject(build(childViews()));
+  });
+
+  // A second entry page with overlay images, written beside the real entry files; the overlays folder holds exactly what the JSON lists.
+  const LODGE_PAGE = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Lodge index test page</title><link rel="stylesheet" href="entry.css"></head>
+<body><a href="index.html">Back to the entry page</a>
+<img src="entry/a16.jpg" width="10" height="10" alt="Black-and-white photograph of a dining room">
+<img src="entry/lodge/a16-all.png" width="4" height="4" alt="Overlay outlining every table in the photograph">
+<a href="lodge-index.json">Derived data</a></body>
+</html>
+`;
+  async function withLodge(entry, { page = LODGE_PAGE, overlays = [['a16-all.png', png()]], mutate = null } = {}) {
+    const overlaysDir = await tempDir();
+    const listed = overlays.map(([file, bytes]) => ({ file, bytes: bytes.length, sha256: sha256(bytes) }));
+    for (const [file, bytes] of overlays) await writeFile(path.join(overlaysDir, file), bytes);
+    await writeFile(path.join(entry.dir, 'lodge-index.html'), page);
+    const json = { overlays: listed, note: 'derived data only' };
+    await mutate?.({ json, overlaysDir, listed });
+    await writeFile(path.join(entry.dir, 'lodge-index.json'), `${JSON.stringify(json, null, 2)}\n`);
+    return { ...entry, overlaysDir };
+  }
+  const exportWith = async (entry) => exportStaticVisit({
+    origin: 'http://snapshot.invalid', token: `rhv_${'J'.repeat(43)}`, outDir: path.join(await tempDir(), 'x'), confirmPublicMaterial: true, fetchImpl: fetchFromExport(await earlierExport()), entry,
+  });
+
+  it('adds a second entry page and its overlays to the closed inventory, through the same gate', async () => {
+    const { entry } = await entryAndPhotos();
+    const lodge = await withLodge(entry);
+    const earlier = await earlierExport();
+    const outDir = path.join(await tempDir(), 'site');
+    await exportStaticVisit({ origin: 'http://snapshot.invalid', token: `rhv_${'K'.repeat(43)}`, outDir, confirmPublicMaterial: true, fetchImpl: fetchFromExport(earlier), entry: lodge });
+    const files = await walk(outDir);
+    for (const name of ['index.html', 'lodge-index.html', 'lodge-index.json', 'entry/lodge/a16-all.png', 'snapshot.html']) assert.ok(files.includes(name), name);
+    const listing = JSON.parse(await readFile(path.join(outDir, 'EXPORT.json'), 'utf8')).files;
+    assert.ok(listing.some((item) => item.path === 'entry/lodge/a16-all.png'));
+    assert.equal(await verifyExportFolder(outDir), listing.length);
+    assert.match(await readFile(path.join(outDir, 'index.html'), 'utf8'), /Three photographs of a place that is gone/);
+  });
+
+  it('lets the three-stop page link to the second page only when that page exists', async () => {
+    const { entry } = await entryAndPhotos();
+    const link = (html) => html.replace('<p class="brand">Rehere</p>', '<p class="brand">Rehere</p><a href="lodge-index.html">Lodge index</a>');
+    const original = await readFile(path.join(entry.dir, 'index.html'), 'utf8');
+    await writeFile(path.join(entry.dir, 'index.html'), link(original));
+    await assert.rejects(exportWith(entry), /unlisted file: lodge-index\.html/);
+    await assert.doesNotReject(exportWith(await withLodge(entry)));
+  });
+
+  it('refuses a second page that breaks the gate or points outside its listed files', async () => {
+    for (const [name, page, message] of [
+      ['an unlisted overlay', LODGE_PAGE.replace('a16-all.png', 'a16-other.png'), /unlisted file/],
+      ['an external link', LODGE_PAGE.replace('<a href="index.html">', '<a href="https://example.org/">'), /approved source/],
+      ['an inline style', LODGE_PAGE.replace('<body>', '<body style="margin:0">'), /inline styles/],
+      ['a script', LODGE_PAGE.replace('</body>', '<script>1</script></body>'), /scripts/],
+      ['an image without alt text', LODGE_PAGE.replace('alt="Overlay outlining every table in the photograph"', 'alt="x"'), /alt text/],
+      ['a missing language', LODGE_PAGE.replace('<html lang="en">', '<html>'), /lang/],
+      ['a root-absolute image', LODGE_PAGE.replace('src="entry/lodge/a16-all.png"', 'src="/entry/lodge/a16-all.png"'), /root-absolute/],
+      ['a file of the snapshot', LODGE_PAGE.replace('href="index.html"', 'href="data/manifest.json"'), /unlisted file/],
+    ]) {
+      const { entry } = await entryAndPhotos();
+      await assert.rejects(exportWith(await withLodge(entry, { page })), message, name);
+    }
+  });
+
+  it('refuses overlays that differ from the list, carry metadata, or are not exactly the listed files', async () => {
+    const cases = [
+      ['a changed overlay', { mutate: ({ listed, json }) => { json.overlays = listed.map((item) => ({ ...item, sha256: 'a'.repeat(64) })); } }, /differs from its listed size or SHA-256/],
+      ['a wrong size', { mutate: ({ listed, json }) => { json.overlays = listed.map((item) => ({ ...item, bytes: item.bytes + 1 })); } }, /differs from its listed size/],
+      ['an overlay with a text chunk', { overlays: [['a16-all.png', png({ extra: [chunk('tEXt', Buffer.from('Comment\0x'))] })]] }, /tEXt chunk/],
+      ['an unlisted extra file', { mutate: async ({ overlaysDir }) => writeFile(path.join(overlaysDir, 'extra.png'), png()) }, /exactly the listed files/],
+      ['a missing file', { mutate: async ({ overlaysDir }) => rm(path.join(overlaysDir, 'a16-all.png')) }, /exactly the listed files/],
+      ['a path in a name', { overlays: [['a16-all.png', png()]], mutate: ({ json }) => { json.overlays[0].file = '../a16-all.png'; } }, /unsafe or duplicate/],
+      ['an upper-case name', { overlays: [['A16.png', png()]] }, /unsafe or duplicate/],
+      ['a duplicate name', { mutate: ({ json }) => { json.overlays.push({ ...json.overlays[0] }); } }, /unsafe or duplicate/],
+      ['more than 64 overlays', { mutate: ({ json }) => { json.overlays = Array.from({ length: 65 }, (_, i) => ({ file: `o${i}.png`, bytes: 1, sha256: 'b'.repeat(64) })); } }, /at most 64/],
+      ['no overlays list', { mutate: ({ json }) => { delete json.overlays; } }, /overlays list/],
+    ];
+    for (const [name, options, message] of cases) {
+      const { entry } = await entryAndPhotos();
+      await assert.rejects(exportWith(await withLodge(entry, options)), message, name);
+    }
+    const { entry } = await entryAndPhotos();
+    const lodge = await withLodge(entry);
+    await assert.rejects(exportWith({ dir: lodge.dir, photosDir: lodge.photosDir }), /needs --entry-overlays/);
+  });
+
+  it('applies the exporter scan to the derived JSON as well', async () => {
+    for (const [name, mutate, message] of [
+      ['an email address', ({ json }) => { json.note = 'ask someone@example.org'; }, /email address/],
+      ['an API route', ({ json }) => { json.note = 'see /api/visit'; }, /API route/],
+    ]) {
+      const { entry } = await entryAndPhotos();
+      await assert.rejects(exportWith(await withLodge(entry, { mutate })), message, name);
+    }
   });
 
   it('serves only the files an earlier export wrote and answers everything else with 404', async () => {

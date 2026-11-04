@@ -3,6 +3,7 @@
 // the exporter rebuild a site from an earlier, hash-verified export when the live snapshot no longer exists.
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
+import { crc32, inflateSync } from 'node:zlib';
 import path from 'node:path';
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -53,7 +54,9 @@ function startTags(html) {
 const BLOCKED_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed', 'form', 'base', 'svg', 'math', 'frame', 'frameset', 'applet']);
 const BLOCKED_ATTRS = new Set(['style', 'srcset', 'action', 'formaction', 'data', 'ping', 'poster', 'background', 'xlink:href']);
 
-export function checkEntryHtml(html, photos) {
+// options.requirePhotos (default true): the three-stop page must show every pinned photograph with its caption and sources; a second
+// page need not. options.targets: further local files this page may point to (other entry pages, listed overlay images).
+export function checkEntryHtml(html, photos, { requirePhotos = true, targets = [] } = {}) {
   const tags = startTags(html);
   for (const { tag, attrs } of tags) {
     if (BLOCKED_TAGS.has(tag) || [...attrs.keys()].some((name) => name.startsWith('on') || BLOCKED_ATTRS.has(name))) fail('The entry page must not carry inline styles, scripts or event handlers.');
@@ -72,12 +75,12 @@ export function checkEntryHtml(html, photos) {
         continue;
       } else {
         const file = value.split(/[?#]/)[0];
-        const known = ['', 'snapshot.html', 'entry.css'].includes(file) || photos.some((photo) => `entry/${photo.file}` === file);
+        const known = ['', 'snapshot.html', 'entry.css', ...targets].includes(file) || photos.some((photo) => `entry/${photo.file}` === file);
         if (!known) fail(`The entry page points to an unlisted file: ${value}`);
       }
     }
   }
-  for (const photo of photos) {
+  for (const photo of requirePhotos ? photos : []) {
     if (!html.includes(`src="entry/${photo.file}"`)) fail(`The entry page does not show ${photo.file}.`);
     if (!html.includes(photo.caption)) fail(`The entry page lacks the verbatim caption of ${photo.hbs}.`);
     if (!html.includes(photo.locUrl) || !html.includes(photo.commonsUrl)) fail(`The entry page lacks the source links of ${photo.hbs}.`);
@@ -109,12 +112,92 @@ export function checkEntryAgainstSnapshot({ html, route }, manifest) {
   if (view.evidence?.arrangement !== route.arrangement) fail(`The view "${route.label}" is not recorded as ${route.arrangement}.`);
 }
 
+// Overlay images ship in the release asset, never in Git. Each is checked chunk by chunk: a valid signature and CRCs, IHDR first and
+// IEND last with nothing after it, a bounded size, and only plain image chunks, so no text, Exif, time or profile block can ride along.
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_CHUNKS = new Set(['IHDR', 'PLTE', 'tRNS', 'IDAT', 'IEND', 'pHYs', 'sRGB', 'gAMA']);
+const MAX_OVERLAY_BYTES = 2 * 1024 ** 2;
+const MAX_OVERLAYS = 64;
+const MAX_PNG_SIDE = 4096;
+const OVERLAY_NAME = /^[a-z0-9][a-z0-9-]{0,63}\.png$/;
+
+export function checkPng(bytes, name = 'PNG') {
+  if (bytes.length > MAX_OVERLAY_BYTES) fail(`${name} is larger than ${MAX_OVERLAY_BYTES} bytes.`);
+  if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) fail(`${name} is not a PNG file.`);
+  let at = 8;
+  let sawHeader = false;
+  let ended = false;
+  let width = 0;
+  let height = 0;
+  const data = [];
+  while (at < bytes.length) {
+    if (ended) fail(`${name} has data after its end chunk.`);
+    if (at + 12 > bytes.length) fail(`${name} is truncated.`);
+    const length = bytes.readUInt32BE(at);
+    const type = bytes.toString('latin1', at + 4, at + 8);
+    const end = at + 12 + length;
+    if (end > bytes.length) fail(`${name} has a chunk that runs past the end of the file.`);
+    if (!PNG_CHUNKS.has(type)) fail(`${name} carries a ${type} chunk; only plain image chunks are allowed.`);
+    if (crc32(bytes.subarray(at + 4, at + 8 + length)) !== bytes.readUInt32BE(at + 8 + length)) fail(`${name} has a chunk with a bad checksum.`);
+    if (!sawHeader && type !== 'IHDR') fail(`${name} does not start with its header chunk.`);
+    if (type === 'IHDR') {
+      if (sawHeader || length !== 13) fail(`${name} has a malformed header chunk.`);
+      width = bytes.readUInt32BE(at + 8);
+      height = bytes.readUInt32BE(at + 12);
+      if (!width || !height || width > MAX_PNG_SIDE || height > MAX_PNG_SIDE) fail(`${name} is larger than ${MAX_PNG_SIDE} pixels on a side.`);
+      sawHeader = true;
+    }
+    if (type === 'IDAT') data.push(bytes.subarray(at + 8, at + 8 + length));
+    if (type === 'IEND') {
+      if (length !== 0) fail(`${name} has a malformed end chunk.`);
+      ended = true;
+    }
+    at = end;
+  }
+  if (!ended || data.length === 0) fail(`${name} is incomplete.`);
+  try {
+    inflateSync(Buffer.concat(data), { maxOutputLength: height * (1 + width * 8) + 64 });
+  } catch {
+    fail(`${name} has image data that does not decode within its declared size.`);
+  }
+  return { width, height };
+}
+
+// The second entry page and the derived data it uses. lodge-index.json must list every overlay as {file, bytes, sha256}; the
+// overlay folder must hold exactly those files.
+async function loadLodge({ dir, overlaysDir }) {
+  const raw = await readFile(path.join(dir, 'lodge-index.json'), 'utf8');
+  const config = JSON.parse(raw);
+  const listed = config?.overlays;
+  if (!Array.isArray(listed) || listed.length > MAX_OVERLAYS) fail(`lodge-index.json needs an overlays list of at most ${MAX_OVERLAYS} entries.`);
+  if (!overlaysDir) fail('The lodge index page needs --entry-overlays, the folder of its overlay images.');
+  const names = listed.map((item) => item?.file);
+  if (names.some((name) => typeof name !== 'string' || !OVERLAY_NAME.test(name)) || new Set(names).size !== names.length) fail('lodge-index.json lists an unsafe or duplicate overlay name.');
+  const present = (await readdir(overlaysDir)).sort();
+  if (JSON.stringify(present) !== JSON.stringify([...names].sort())) fail(`The overlay folder must hold exactly the listed files. Listed: ${[...names].sort().join(', ')}. Present: ${present.join(', ')}.`);
+  const files = new Map([['lodge-index.json', Buffer.from(raw)]]);
+  for (const item of listed) {
+    const bytes = await readFile(path.join(overlaysDir, item.file));
+    if (!Number.isInteger(item.bytes) || bytes.length !== item.bytes || !/^[0-9a-f]{64}$/.test(item.sha256 ?? '') || sha256(bytes) !== item.sha256) fail(`${item.file} differs from its listed size or SHA-256.`);
+    checkPng(bytes, item.file);
+    files.set(`entry/lodge/${item.file}`, bytes);
+  }
+  return { files, targets: ['lodge-index.html', 'lodge-index.json', 'index.html', ...names.map((name) => `entry/lodge/${name}`)] };
+}
+
 // Loads the hand-written entry (index.html, entry.css, photos.json) and the prepared, hash-pinned photo files.
-export async function loadEntry({ dir, photosDir }) {
+export async function loadEntry({ dir, photosDir, overlaysDir }) {
   const config = JSON.parse(await readFile(path.join(dir, 'photos.json'), 'utf8'));
-  const html = checkEntryHtml(await readFile(path.join(dir, 'index.html'), 'utf8'), config.photos);
+  const hasLodge = await readFile(path.join(dir, 'lodge-index.html'), 'utf8').then(() => true, () => false);
+  const lodge = hasLodge ? await loadLodge({ dir, overlaysDir }) : null;
+  const html = checkEntryHtml(await readFile(path.join(dir, 'index.html'), 'utf8'), config.photos, { targets: hasLodge ? ['lodge-index.html'] : [] });
   const css = checkEntryCss(await readFile(path.join(dir, 'entry.css'), 'utf8'));
   const files = new Map([['index.html', Buffer.from(html)], ['entry.css', Buffer.from(css)]]);
+  if (lodge) {
+    const page = checkEntryHtml(await readFile(path.join(dir, 'lodge-index.html'), 'utf8'), config.photos, { requirePhotos: false, targets: lodge.targets });
+    files.set('lodge-index.html', Buffer.from(page));
+    for (const [name, bytes] of lodge.files) files.set(name, bytes);
+  }
   for (const photo of config.photos) {
     const bytes = await readFile(path.join(photosDir, photo.file));
     if (bytes.length !== photo.bytes || sha256(bytes) !== photo.sha256) fail(`${photo.file} differs from its pinned size or SHA-256.`);

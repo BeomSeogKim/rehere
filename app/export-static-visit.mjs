@@ -213,7 +213,7 @@ function scan(files, { token, origin }) {
     if (bytes.includes(token)) fail(`${name} contains the visit capability.`);
     if (bytes.includes(origin)) fail(`${name} contains the source origin.`);
     if (LOCAL_PATHS.some((prefix) => bytes.includes(prefix))) fail(`${name} contains a local path.`);
-    if (name === 'index.html' || name === 'snapshot.html' || name.startsWith('data/')) {
+    if (name.endsWith('.html') || name.startsWith('data/') || name.endsWith('.json')) {
       if (bytes.includes('/api/')) fail(`${name} references an API route.`);
       if (name.endsWith('.json') && /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(bytes.toString('utf8'))) fail(`${name} contains an email address.`);
     }
@@ -345,7 +345,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       origin: fromExport ? 'http://snapshot.invalid' : option('--origin'), outDir: option('--out'),
       token: fromExport ? `rhv_${randomBytes(32).toString('base64url')}` : process.env.REHERE_VISIT_TOKEN, confirmPublicMaterial: args.includes('--confirm-public-material'),
       credit: creditFile ? await readFile(creditFile, 'utf8') : null, fetchImpl: fromExport ? fetchFromExport(fromExport) : fetch,
-      entry: entryDir ? { dir: entryDir, photosDir: option('--entry-photos') } : null,
+      entry: entryDir ? { dir: entryDir, photosDir: option('--entry-photos'), overlaysDir: option('--entry-overlays') } : null,
     });
     console.log(`Exported "${result.title}" (${result.files} files, ${result.bytes} bytes) to ${result.outDir}`);
     console.log(`Marked synthetic: ${result.synthetic}. Contributor labels shown to visitors: ${result.contributorLabels.join(', ') || 'none'}.`);
