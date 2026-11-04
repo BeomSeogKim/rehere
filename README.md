@@ -70,6 +70,8 @@ The production deployment stack is not selected.
 
 Requirements: Git, Bash, Perl, and Python 3. Repository checks require no
 API keys or application packages.
+Run the repository commands below from a Git checkout; the content guard
+needs Git metadata and cannot run from an extracted source archive.
 
 ```sh
 git config core.hooksPath .githooks
