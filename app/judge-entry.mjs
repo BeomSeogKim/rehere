@@ -134,6 +134,7 @@ export function checkEntryAgainstSnapshot({ html, route }, manifest) {
   const pinnedStory = route.story;
   const storyFields = new Set(['id', 'viewId', 'target', 'title', 'providerLabel', 'captionAuthorLabel', 'durationMs', 'cues', 'audio']);
   if (!pinnedStory || story.title !== pinnedStory.title || story.providerLabel !== pinnedStory.providerLabel
+      || !pinnedStory.target || JSON.stringify(story.target) !== JSON.stringify(pinnedStory.target)
       || story.captionAuthorLabel !== pinnedStory.captionAuthorLabel || Object.hasOwn(story, 'captionDraft')
       || story.durationMs !== pinnedStory.durationMs || story.audio.size !== pinnedStory.audioBytes
       || JSON.stringify(story.cues) !== JSON.stringify(pinnedStory.cues)

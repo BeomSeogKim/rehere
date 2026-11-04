@@ -77,6 +77,10 @@
     },
     "storyId": "171999ee-e976-41e2-b11a-b4613363c4fa",
     "story": {
+      "target": {
+        "id": "selected-foreground",
+        "label": "Selected foreground object"
+      },
       "title": "Synthetic editorial replacement, not a recollection",
       "providerLabel": "Synthetic voice (OpenAI TTS)",
       "captionAuthorLabel": "Demo editor (script-copied cue; listening/editorial review pending)",

@@ -203,7 +203,7 @@ describe('building a site from an earlier export with an entry', () => {
   const WAV = pcmWav(Buffer.alloc(PENN_ROUTE.story.audioBytes - 44));
   const snapshot = (views = childViews()) => ({
     id: PENN_ROUTE.snapshotId, title: 'Synthetic test place', synthetic: true, startViewId: views[0].id, views,
-    stories: [{ id: PENN_ROUTE.storyId, viewId: PENN_ROUTE.original.viewId, title: PENN_ROUTE.story.title, providerLabel: PENN_ROUTE.story.providerLabel, captionAuthorLabel: PENN_ROUTE.story.captionAuthorLabel, durationMs: PENN_ROUTE.story.durationMs,
+    stories: [{ id: PENN_ROUTE.storyId, viewId: PENN_ROUTE.original.viewId, target: structuredClone(PENN_ROUTE.story.target), title: PENN_ROUTE.story.title, providerLabel: PENN_ROUTE.story.providerLabel, captionAuthorLabel: PENN_ROUTE.story.captionAuthorLabel, durationMs: PENN_ROUTE.story.durationMs,
       cues: structuredClone(PENN_ROUTE.story.cues), audio: { type: 'audio/wav', size: WAV.length } }],
     contributorPhotos: [], contributorRecordings: [],
   });
@@ -389,6 +389,13 @@ describe('building a site from an earlier export with an entry', () => {
       (s) => { s.sourceRange = { startMs: 0, endMs: 9950 }; },
       (s) => { s.sourceId = randomUUID(); },
       (s) => { s.audio.model = 'unapproved provenance'; },
+      (s) => { delete s.target; },
+      (s) => { s.target = null; },
+      (s) => { s.target = { id: 'unapproved-object', label: 'Unapproved' }; },
+      (s) => { s.target.id = 'unapproved-object'; },
+      (s) => { s.target.label = 'Unapproved'; },
+      (s) => { s.target.model = 'unapproved provenance'; },
+      (s) => { s.target = [s.target, s.target]; },
     ]) bad((m) => mutate(m.stories[0]), /static editorial replacement/);
     bad((m) => { m.contributorRecordings = [{ id: randomUUID() }]; }, /static editorial replacement/);
     for (const text of ['Synthetic voice (OpenAI TTS)', 'One 0-9950 ms whole-track cue is copied manually from that script', 'Listening and editorial review are pending.', 'not a newly saved story in the running app']) {
