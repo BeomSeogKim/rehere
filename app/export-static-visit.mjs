@@ -60,6 +60,16 @@ const fail = (message) => {
 };
 const escapeHtml = (text) => text.replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char]);
 
+// A credit line is reviewed text supplied by a person, shown under the page:
+// plain ASCII, https links only, never markup.
+const CREDIT_LIMIT = 1500;
+function creditHtml(credit) {
+  if (typeof credit !== 'string' || credit.trim() === '' || credit.length > CREDIT_LIMIT || !/^[\x20-\x7e\n]+$/.test(credit)) fail('The credit must be plain ASCII text of at most 1500 characters.');
+  if (/\b(?!https:\/\/)[a-z][a-z0-9+.-]*:\/\//i.test(credit)) fail('The credit may link only to https addresses.');
+  const paragraphs = credit.trim().split(/\n+/).map((line) => escapeHtml(line).replace(/https:\/\/[^\s<]+/g, (url) => `<a href="${url}" rel="noreferrer noopener">${url}</a>`));
+  return `<footer class="source-credit">${paragraphs.map((line) => `<p>${line}</p>`).join('')}</footer>`;
+}
+
 // An unsafe name must never become a path or a request: exact allowlists only.
 const safeAsset = (viewId, name) => (UUID.test(viewId) && ASSET_NAMES.includes(name)) || (viewId === 'evidence' && EVIDENCE_NAME.test(name));
 
@@ -98,15 +108,20 @@ function vendorText(target, source) {
   return text;
 }
 
-const pageHtml = (template, date) => {
+const pageHtml = (template, date, credit) => {
   const notice = `<aside class="offline-notice" role="note"><strong>${escapeHtml(NOTICE.heading)}.</strong> ${escapeHtml(NOTICE.text.replace('{date}', date))}</aside>`;
   const style = '<style>.offline-notice{margin:0;padding:.75rem 1rem;border-bottom:2px solid #8a6d00;background:#fff4c2;color:#2b2200;font:15px/1.4 system-ui,sans-serif}'
+    + '.source-credit{max-width:60rem;margin:1.5rem auto;padding:0 1rem;font:14px/1.5 system-ui,sans-serif;opacity:.85}.source-credit p{margin:.4rem 0}.source-credit a{color:inherit;overflow-wrap:anywhere}'
     + '@media (prefers-color-scheme:dark){.offline-notice{background:#3a2f00;color:#fff1b8;border-color:#d4aa00}}</style>';
   let html = template
     .replace('href="/style.css"', 'href="./style.css"')
     .replace('src="/visitor-entry.js"', 'src="./static-entry.js"')
     .replace('<title>Rehere · shared view</title>', `<title>Rehere · offline snapshot</title>\n  ${style}`)
     .replace('<body>', `<body>\n  ${notice}\n  <noscript><p class="offline-notice">This snapshot needs JavaScript to draw the scene.</p></noscript>`);
+  if (credit !== null) {
+    if (!html.includes('</body>')) fail('The visitor page template changed; update the exporter.');
+    html = html.replace('</body>', `  ${creditHtml(credit)}\n</body>`);
+  }
   if (!html.includes('./static-entry.js') || !html.includes('./style.css') || !html.includes('offline-notice')) fail('The visitor page template changed; update the exporter.');
   if (/(?:href|src)="\//.test(html)) fail('The exported page still has a root-absolute reference.');
   return html;
@@ -193,7 +208,7 @@ function scan(files, { token, origin }) {
 }
 
 export async function exportStaticVisit({
-  origin, token, outDir, confirmPublicMaterial = false, limits = LIMITS, fetchImpl = fetch, now = () => new Date(), publicDir = PUBLIC_DIR, threeDir = THREE_DIR,
+  origin, token, outDir, confirmPublicMaterial = false, credit = null, limits = LIMITS, fetchImpl = fetch, now = () => new Date(), publicDir = PUBLIC_DIR, threeDir = THREE_DIR,
 }) {
   if (!confirmPublicMaterial) fail('Confirm that the snapshot holds only public or synthetic material (--confirm-public-material).');
   if (typeof token !== 'string' || !TOKEN.test(token)) fail('The visit capability is missing or malformed.');
@@ -268,7 +283,7 @@ export async function exportStaticVisit({
   if (!again?.equals(manifestBytes)) fail('The snapshot changed or became unavailable during the export.');
 
   const date = now().toISOString().slice(0, 10);
-  put('index.html', pageHtml(await readFile(path.join(publicDir, 'visit.html'), 'utf8'), date));
+  put('index.html', pageHtml(await readFile(path.join(publicDir, 'visit.html'), 'utf8'), date, credit));
   const style = await readFile(path.join(publicDir, 'style.css'), 'utf8');
   if (/url\(\s*['"]?\//.test(style)) fail('style.css has a root-absolute url().');
   put('style.css', style);
@@ -288,7 +303,7 @@ export async function exportStaticVisit({
   }
   return {
     outDir: root, snapshotId: manifest.id, title: manifest.title, synthetic: manifest.synthetic === true, files: files.size, bytes: total,
-    externalLinks: [...externalLinks], contributorLabels: [...new Set((manifest.contributorPhotos ?? []).concat(manifest.contributorRecordings ?? []).map((item) => item.providerLabel).filter(Boolean))],
+    credited: credit !== null, externalLinks: [...externalLinks], contributorLabels: [...new Set((manifest.contributorPhotos ?? []).concat(manifest.contributorRecordings ?? []).map((item) => item.providerLabel).filter(Boolean))],
   };
 }
 
@@ -299,12 +314,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     return index === -1 ? null : args[index + 1] ?? null;
   };
   try {
+    const creditFile = option('--credit-file');
     const result = await exportStaticVisit({
       origin: option('--origin'), outDir: option('--out'), token: process.env.REHERE_VISIT_TOKEN, confirmPublicMaterial: args.includes('--confirm-public-material'),
+      credit: creditFile ? await readFile(creditFile, 'utf8') : null,
     });
     console.log(`Exported "${result.title}" (${result.files} files, ${result.bytes} bytes) to ${result.outDir}`);
     console.log(`Marked synthetic: ${result.synthetic}. Contributor labels shown to visitors: ${result.contributorLabels.join(', ') || 'none'}.`);
     if (result.externalLinks.length) console.log(`Links inside the snapshot text (review them): ${result.externalLinks.join(' ')}`);
+    if (!result.credited) console.log('No --credit-file was given: the page shows only the photo credit recorded in the snapshot.');
     console.log('Review the folder before publishing it; this copy does not follow later revocation or withdrawal.');
   } catch (error) {
     console.error(`Export failed: ${error instanceof TypeError ? 'invalid --origin or --out.' : error.message}`);

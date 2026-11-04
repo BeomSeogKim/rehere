@@ -35,6 +35,13 @@ reviewed and that its sources allow public display. The command prints the
 snapshot title, whether it is marked synthetic, and every contributor label
 that visitors will see. Review those and the folder before publishing.
 
+Add `--credit-file <path>` to show a reviewed source and rights line under the
+page. It must be plain ASCII text with https links only, and it states the
+rights for the photograph in the snapshot, so use a file written for that
+photograph; for example [the credit for HABS AZ-135-A photograph 26](demo/habs-az-135-a-26.credit.txt)
+belongs only to a snapshot made from that photograph. Without it, the page
+shows only the credit recorded in the snapshot.
+
 Preview locally with any file server, for example
 `python3 -m http.server 8080 --bind 127.0.0.1 --directory ../demo-site`.
 The page uses relative paths, so it also works from a sub-path.

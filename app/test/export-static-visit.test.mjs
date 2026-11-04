@@ -314,4 +314,24 @@ describe('static visitor export', () => {
       assert.ok(visits.includes(literal), literal);
     }
   });
+
+  it('shows a reviewed credit line as escaped text with https links only', async () => {
+    const { routes } = snapshot();
+    await withVisitor(routes, async (origin) => {
+      const credit = 'Photograph: "Test" <b>x</b>.\nSource: https://example.org/item?a=1&b=2';
+      const { outDir, credited } = await exportInto(origin, { credit });
+      assert.equal(credited, true);
+      const html = await readFile(path.join(outDir, 'index.html'), 'utf8');
+      assert.match(html, /<footer class="source-credit"><p>Photograph: &quot;Test&quot; &lt;b&gt;x&lt;\/b&gt;\.<\/p><p>Source: <a href="https:\/\/example\.org\/item\?a=1&amp;b=2" rel="noreferrer noopener">/);
+      assert.doesNotMatch(html, /<b>x<\/b>/);
+      const plain = await exportInto(origin);
+      assert.equal(plain.credited, false);
+      assert.doesNotMatch(await readFile(path.join(plain.outDir, 'index.html'), 'utf8'), /<footer/);
+    });
+    await withVisitor(snapshot().routes, async (origin) => {
+      for (const credit of ['see http://example.org', 'javascript://x', 'caf\u00e9', '', 'x'.repeat(1501)]) {
+        await assert.rejects(exportInto(origin, { credit }), /credit/, credit.slice(0, 20));
+      }
+    });
+  });
 });
