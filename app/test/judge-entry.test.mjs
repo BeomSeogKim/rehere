@@ -122,6 +122,8 @@ describe('the entry page and its pinned photographs', () => {
       'The one partial scene in this demo: only what the camera saw is rebuilt, and unseen surfaces stay empty. One owner-approved change turns the chest by 5 degrees; the earlier version is one click away.',
       'Notes, the voice and the contributor in this demo are labelled synthetic test material; all roles are played by the demo operator.',
       'This is a read-only offline copy: withdrawal is enforced only in the running app.',
+      '<a href="lodge-index.html">See what SAM 3.1 outlines in these photographs</a>',
+      "Thirty one-noun requests to Meta's SAM 3.1, shown with what they missed. Model estimates, not measurements.",
       'a U.S. Government work with no known restrictions on images made by the U.S. Government',
       'snapshot.html?version=Alternative%20arrangement%202',
     ]) assert.ok(html.includes(text), text);
@@ -134,8 +136,11 @@ describe('the entry page and its pinned photographs', () => {
   it('accepts the real page and refuses scripts, styles, handlers, other links, missing alt text or captions', async () => {
     const { photos } = JSON.parse(await readFile(path.join(ENTRY, 'photos.json'), 'utf8'));
     const html = await readFile(path.join(ENTRY, 'index.html'), 'utf8');
-    assert.equal(checkEntryHtml(html, photos), html);
-    const bad = (change, pattern) => assert.throws(() => checkEntryHtml(change(html), photos), pattern);
+    const withPage = { targets: ['lodge-index.html'] };
+    assert.equal(checkEntryHtml(html, photos, withPage), html);
+    assert.throws(() => checkEntryHtml(html, photos), /unlisted file: lodge-index\.html/, 'the link to the second page is refused when that page is not part of the build');
+    assert.equal(html.split('href="lodge-index.html"').length - 1, 1, 'one link to the second page');
+    const bad = (change, pattern) => assert.throws(() => checkEntryHtml(change(html), photos, withPage), pattern);
     bad((h) => h.replace('</head>', '<style>p{}</style></head>'), /inline styles/);
     bad((h) => h.replace('<body>', '<body onload="x()">'), /inline styles|handlers/);
     bad((h) => h.replace('</body>', '<script>1</script></body>'), /scripts/);
@@ -162,7 +167,7 @@ describe('entry page gate against attacker-style forms', () => {
       '<img src="https://tracker.example/p.gif" alt="a tracking pixel for a test">', '<img src="entry/a16.jpg" srcset="https://tracker.example/p.jpg 1x" alt="a photograph for a test">',
       '<meta http-equiv="refresh" content="0;url=https://evil.example/">', '<link rel="preload" href="https://evil.example/x">', '<link rel="stylesheet" href="https://evil.example/x.css">',
       '<img src="entry/a16.jpg" onerror ="x()" alt="a photograph for a test">', '<svg/onload="x()"></svg>', '<iframe src="entry/a16.jpg"></iframe>', '<form action="https://evil.example/"></form>', '<base href="https://evil.example/">',
-    ]) assert.throws(() => checkEntryHtml(add(fragment), photos), /inline styles|approved source|http-equiv|only its own|root-absolute|unlisted/, fragment);
+    ]) assert.throws(() => checkEntryHtml(add(fragment), photos, { targets: ['lodge-index.html'] }), /inline styles|approved source|http-equiv|only its own|root-absolute|unlisted/, fragment);
   });
 
   it('refuses a stylesheet that imports or loads anything', () => {
@@ -206,6 +211,11 @@ describe('building a site from an earlier export with an entry', () => {
     const entryDir = path.join(base, 'entry');
     const photosDir = path.join(base, 'photos');
     await cp(ENTRY, entryDir, { recursive: true, filter: (source) => !path.basename(source).startsWith('lodge-index.') });
+    // Without the second page the link to it must go too, or the gate (rightly) refuses the folder.
+    const page = await readFile(path.join(entryDir, 'index.html'), 'utf8');
+    const withoutLink = page.replace(/\n    <p class="route"><a href="lodge-index\.html">[^\n]*<\/p>/, '');
+    assert.notEqual(withoutLink, page, 'the real entry page links to the second page');
+    await writeFile(path.join(entryDir, 'index.html'), withoutLink);
     const config = JSON.parse(await readFile(path.join(entryDir, 'photos.json'), 'utf8'));
     await mkdir(photosDir);
     for (const [index, photo] of config.photos.entries()) {
