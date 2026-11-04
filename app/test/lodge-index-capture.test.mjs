@@ -95,6 +95,16 @@ describe('lodge index capture', () => {
     assert.deepEqual((await readdir(changed.dir)).filter((name) => name.startsWith('attempt-')), []);
   });
 
+  it('stops when the request digest a response reports differs from the one that was sent', async () => {
+    let calls = 0;
+    const segmenter = { async segment() { calls += 1; return { responseId: 'resp_other', imagesProcessed: 1, latencyMs: 1, recordedAt: 'now', requestDigest: '0'.repeat(64), outputText: '' }; } };
+    const dir = await tempDir();
+    const results = await runCapture({ segmenter, photos: [photo('AZ-135-A-16', 'a16.jpg')], dir });
+    assert.equal(calls, 1, 'nothing is sent after a digest mismatch');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].digestMatches, false);
+  });
+
   it('refuses to overwrite an earlier attempt file', async () => {
     const { dir, segmenter } = await setup(async () => stream(''));
     await runCapture({ segmenter, photos: [photo('AZ-135-A-16', 'a16.jpg')], nouns: ['chair'], dir });

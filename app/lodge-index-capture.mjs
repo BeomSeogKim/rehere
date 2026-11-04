@@ -2,7 +2,7 @@
 // Grant-gated capture of the SAM 3.1 lodge index through the production live segmenter. One concept noun per request, an
 // attempt file created (O_EXCL) before every dispatch, no retries, and the batch stops at the first failed or unclear call.
 // Raw provider output goes only to a private recordings file in the private folder, never to Git.
-//   sealbox run -p rehere -- node lodge-index-capture.mjs <pinned photos dir> <NEW private dir>
+//   MODEL_API_KEY=<key in the environment> node lodge-index-capture.mjs <pinned photos dir> <NEW private dir>
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fsyncSync, openSync, writeSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BudgetLedger } from './meta-model.mjs';
 import { createLiveSegmenter, IMAGE_USD, parseInstances, segmentationBody, segmentationDigest, segmentationRecorder } from './meta-segmentation.mjs';
-import { LODGE_GRANT, LODGE_LIMITS, LODGE_NOUNS, LODGE_PHOTO_FILES, nounSlug } from './lodge-index.mjs';
+import { LODGE_BATCH, LODGE_LIMITS, LODGE_NOUNS, LODGE_PHOTO_FILES, nounSlug } from './lodge-index.mjs';
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -32,7 +32,7 @@ export async function runCapture({ segmenter, photos, nouns = LODGE_NOUNS, dir, 
         return results;
       }
       const requestDigest = segmentationDigest(segmentationBody({ prompt: noun, imageBytes: photo.bytes, format: 'jpeg' }));
-      const attempt = { grant: LODGE_GRANT, photo: photo.hbs, photoSha256: photo.sha256, noun, index: index + 1, requestDigest, status: 'dispatching', createdAt: new Date().toISOString() };
+      const attempt = { batch: LODGE_BATCH, photo: photo.hbs, photoSha256: photo.sha256, noun, index: index + 1, requestDigest, status: 'dispatching', createdAt: new Date().toISOString() };
       const file = path.join(dir, `attempt-${photo.file.replace(/\.jpg$/, '')}-${nounSlug(noun)}.json`);
       writeExclusive(file, attempt);
       headers.current = null;
@@ -85,7 +85,7 @@ async function main() {
   const ledger = new BudgetLedger({ file: path.join(outDir, 'ledger.json'), limits: LODGE_LIMITS });
   const segmenter = createLiveSegmenter({ apiKey: process.env.MODEL_API_KEY, ledger, fetch: fetchOnce, recorder: segmentationRecorder(path.join(outDir, 'recordings.json')) });
   const results = await runCapture({ segmenter, photos, dir: outDir, headers });
-  const summary = { grant: LODGE_GRANT, imageUsdEstimate: IMAGE_USD, requests: results.length, results, ledger: JSON.parse(await readFile(path.join(outDir, 'ledger.json'), 'utf8')) };
+  const summary = { batch: LODGE_BATCH, imageUsdEstimate: IMAGE_USD, requests: results.length, results, ledger: JSON.parse(await readFile(path.join(outDir, 'ledger.json'), 'utf8')) };
   await writeFile(path.join(outDir, 'capture-summary.json'), JSON.stringify(summary, null, 1), { mode: 0o600 });
   for (const item of results) console.log(`${item.photo} | ${item.noun} | ${item.status} | ${item.responseId ?? '-'} | instances=${item.instances?.length ?? '-'}${item.error ? ` | ${item.error}` : ''}`);
   if (results.some((item) => item.status !== 'returned')) process.exitCode = 1;

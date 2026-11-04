@@ -61,7 +61,7 @@ describe('lodge index data', () => {
     assert.ok(!/\/(?:Users|private|tmp|home|var)\//.test(text), 'no local path');
     assert.ok(!text.includes('/api/'), 'no API route');
     assert.ok(!/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(text), 'no email address');
-    assert.ok(!/rhv_|sk-[A-Za-z0-9]|Bearer|MODEL_API_KEY|w3-lodge/.test(text), 'no capability, key or internal grant id');
+    assert.ok(!/rhv_|sk-[A-Za-z0-9]|Bearer|MODEL_API_KEY|w3-lodge|lodge-index-batch/.test(text), 'no capability, key or internal batch id');
     assert.deepEqual(Object.keys(data), ['note', 'model', 'modelId', 'parser', 'requests', 'listPriceEstimateUsd', 'nouns', 'overlays', 'photos']);
   });
 });

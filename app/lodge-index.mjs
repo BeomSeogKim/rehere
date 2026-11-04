@@ -5,7 +5,7 @@ import { overlayPng } from './lodge-overlays.mjs';
 // Canyon Lodge. These are 2D model estimates, not measurements. This module holds the fixed batch (photos and concept nouns)
 // shared by the capture runner, the overlay generator and the page builder.
 
-export const LODGE_GRANT = 'w3-lodge-index-01';
+export const LODGE_BATCH = 'lodge-index-batch-1';
 // One concept per request: lists return zero matches. The list is fixed before any call.
 export const LODGE_NOUNS = Object.freeze(['chair', 'table', 'rocking chair', 'chandelier', 'window', 'fireplace', 'rug', 'bench', 'lamp', 'door']);
 export const LODGE_PHOTO_FILES = Object.freeze(['a16.jpg', 'a19.jpg', 'a26.jpg']);
@@ -27,7 +27,7 @@ const HABS_RIGHTS = 'https://www.loc.gov/rr/print/res/114_habs.html';
 // truth exists for these photographs. Only results that were looked at carry a note.
 export const LODGE_NOTES = Object.freeze({
   'AZ-135-A-16/chair': 'Outlines cover chairs in the near and middle rows; chairs in the distant rows are mostly not outlined.',
-  'AZ-135-A-16/table': 'Outlines follow the tablecloths, not the table legs or the chairs; several distant tables are not outlined.',
+  'AZ-135-A-16/table': 'Outlines mostly follow the tablecloths; one or two run down a pedestal base; chairs are not included; several distant tables are not outlined.',
   'AZ-135-A-16/chandelier': 'Three outlines, one on each of the three hanging fixtures.',
   'AZ-135-A-16/window': 'Outlines cover the three large windows, the window on the right wall and several smaller panes; some panes are not outlined.',
   'AZ-135-A-16/lamp': 'Two of the hanging fixtures that the chandelier request also returned come back again as lamps, plus a small object at the lower right edge. The same object can answer two different nouns.',
@@ -82,6 +82,7 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 function confidenceLine(instances) {
   const values = instances.map((item) => item.confidence).filter((value) => value !== null).sort((a, b) => a - b);
   if (!values.length) return 'no confidence returned';
+  if (values.length === 1) return `model confidence ${values[0].toFixed(2)}`;
   const middle = values.length % 2 ? values[(values.length - 1) / 2] : (values[values.length / 2 - 1] + values[values.length / 2]) / 2;
   return `model confidence ${values[0].toFixed(2)} to ${values[values.length - 1].toFixed(2)} (median ${middle.toFixed(2)})`;
 }
@@ -97,7 +98,7 @@ function renderCard(photo, result) {
 <div class="lodge-stack"><img src="entry/${esc(photo.file)}" width="${photo.width}" height="${photo.height}" alt="${esc(photo.alt)}"><img class="lodge-overlay" src="entry/lodge/${esc(result.overlay)}" width="${photo.width}" height="${photo.height}" alt="Outlines of the ${plural(count, 'instance')} that SAM 3.1 returned for ${esc(result.noun)}, drawn over the photograph"></div>
 <p class="lodge-meta">${plural(count, 'instance')}; ${confidenceLine(result.instances)}. The confidence is the model's own number, not a measure of accuracy. Response <code>${esc(result.responseId)}</code></p>
 ${result.note ? `<p class="lodge-note">Page author's reading by eye: ${esc(result.note)}</p>` : ''}
-<details><summary>Instances, boxes and confidences</summary><table class="lodge-table"><thead><tr><th scope="col">Instance</th><th scope="col">Box x1, y1, x2, y2 (pixels)</th><th scope="col">Confidence</th><th scope="col">Mask area (pixels)</th></tr></thead><tbody>${rows}</tbody></table></details></div>`;
+<details><summary>Instances, boxes and confidences</summary><table class="lodge-table"><thead><tr><th scope="col">Instance</th><th scope="col">Box x1, y1, x2, y2 (pixels; x2 and y2 exclusive)</th><th scope="col">Confidence</th><th scope="col">Mask area (pixels)</th></tr></thead><tbody>${rows}</tbody></table></details></div>`;
 }
 
 export function renderLodgePage(data, photos) {
