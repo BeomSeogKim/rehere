@@ -147,6 +147,7 @@ let outlinePuts;
 let savedOutlines;
 let objectBuilds;
 let objectBuildById;
+let repairedChild;
 
 before(async () => {
   globalThis.document = { createElement: (tag) => new FakeElement(tag) };
@@ -163,10 +164,11 @@ before(async () => {
     if (options.method === 'POST') {
       let respond;
       const promise = new Promise((resolve) => (respond = resolve));
-      posts.push({ body: JSON.parse(options.body), respond });
+      posts.push({ url, body: JSON.parse(options.body), respond });
       return promise;
     }
     if (url.endsWith('/surface.json')) return json(200, surfaceBody);
+    if (repairedChild && url.endsWith(`/${repairedChild.id}`)) return json(200, repairedChild);
     if (url.endsWith('/reconstructions')) return json(200, [job]);
     if (url.endsWith('/proposals')) return heldProposals ? heldProposals.promise : json(200, proposals);
     if (url.endsWith('/collaboration')) return json(200, collaboration);
@@ -201,6 +203,7 @@ beforeEach(() => {
   savedOutlines = [];
   objectBuilds = [];
   objectBuildById = null;
+  repairedChild = null;
   delete globalThis.mockFullObjectCreateViewer;
   heldGets = null;
   gets = [];
@@ -228,7 +231,8 @@ async function openScene({ sources = [], text = '', textRecord = null } = {}) {
   const container = new FakeElement('section');
   const draft = { id: DRAFT_ID, photos: [{ name: 'photo-1.jpg', sourceId: SOURCE_ID }], sources, text, textSourceId: 'text-id' };
   const granted = { kind: 'photo', origin: { kind: 'public', reference: '' }, permissions: { place: true, model: true, share: false } };
-  const space = mountSpace(container, { draft, sourceFor: (id) => id === 'text-id' ? textRecord : granted });
+  const opened = [];
+  const space = mountSpace(container, { draft, sourceFor: (id) => id === 'text-id' ? textRecord : granted, onScene: (id) => opened.push(id) });
   await settle();
   const find = (predicate) => container.findAll(predicate);
   const button = (text) => find((node) => node.tag === 'button' && node.textContent === text)[0];
@@ -242,7 +246,7 @@ async function openScene({ sources = [], text = '', textRecord = null } = {}) {
   };
   const axis = (label) => find((node) => node.tag === 'input' && node.attributes['aria-label'] === label)[0];
   const canvases = () => find((node) => node.tag === 'canvas');
-  return { space, button, editStatus, viewMessage, axis, canvases, find, source: granted };
+  return { space, button, editStatus, viewMessage, axis, canvases, find, source: granted, opened };
 }
 
 const count = (entry) => globalThis.viewerLog.filter((item) => item === entry).length;
@@ -748,6 +752,115 @@ describe('source-bound full object owner flow', () => {
     assert.equal(globalThis.document.activeElement.textContent, 'The object or current scene could not be verified. Nothing was changed.');
     assert.equal(view.find((node) => node.className === 'scene-inspector')[0].hidden, false);
     view.space.dispose();
+  });
+});
+
+describe('legacy one-object corrected partial scenes', () => {
+  async function confirmedOutline(view) {
+    view.button('Correct the partial scene outline').dispatch('click');
+    await settle();
+    const editor = globalThis.outlineComponent;
+    editor.host.dispatch('load', { type: 'load', target: { tagName: 'IMG' } });
+    await settle();
+    const pending = editor.options.onConfirm({ mask: new Blob(['synthetic mask']), maskSha256: 'd'.repeat(64), crop: [0, 0, 600, 500] });
+    const put = outlinePuts.at(-1);
+    const outlineId = put.url.split('/').at(-1);
+    put.respond(json(201, { outlineId, sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), maskSha256: 'd'.repeat(64), width: 600, height: 500, parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1, confirmed: true }));
+    assert.equal(await pending, true);
+    return outlineId;
+  }
+  const child = () => ({ ...structuredClone(job), id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', outline: { kind: 'owner-corrected' }, edit: { version: 1, offset: [0, 0, 0], yaw: 0 } });
+
+  it('requires an audited outline and explicitly saves one separate child without model permission', async () => {
+    const view = await openScene();
+    const parent = structuredClone(job);
+    assert.equal(view.button('Save as new partial scene'), undefined);
+    view.source.permissions.model = false;
+    const outlineId = await confirmedOutline(view);
+    assert.equal(posts.length, 0, 'outline confirmation does not create a child or run a model');
+    assert.equal(view.button('Create estimated shape').disabled, true);
+    view.button('Save as new partial scene').dispatch('click');
+    assert.equal(posts.length, 1);
+    const sent = posts[0];
+    assert.match(sent.url, /\/outline-repairs$/);
+    assert.deepEqual(sent.body, { requestId: sent.body.requestId, outlineId, sourceSha256: 'b'.repeat(64), outlineSha256: 'd'.repeat(64), parentSurfaceSha256: 'c'.repeat(64), baseVersion: 1, confirmed: true });
+    assert.equal(view.axis('Left / right').disabled, true);
+    repairedChild = child();
+    sent.respond(json(201, repairedChild));
+    await settle();
+    assert.equal(view.opened.at(-1), repairedChild.id);
+    assert.ok(gets.some((url) => url.endsWith(`/${repairedChild.id}`)));
+    assert.deepEqual(job, parent, 'the frontend does not mutate its parent manifest');
+    assert.equal(posts.some((request) => /\/edit$|\/builds$/.test(request.url)), false);
+    view.space.dispose();
+  });
+
+  it('keeps the same correction request after uncertain and 403/409 outcomes, without replacing its outline', async () => {
+    const view = await openScene();
+    const outlineId = await confirmedOutline(view);
+    objectBuilds = [{ id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', status: 'ready', sourceId: SOURCE_ID, sourceSha256: 'b'.repeat(64), outlineId, outlineSha256: 'd'.repeat(64), object: { sha256: 'e'.repeat(64) } }];
+    view.button('Find saved outlines and shapes').dispatch('click'); await settle();
+    const oldShape = view.button('Check shape · Ready');
+    view.button('Save as new partial scene').dispatch('click');
+    const original = structuredClone(posts.at(-1).body);
+    for (const status of [503, 403, 409]) {
+      posts.at(-1).respond(json(status, { error: status === 403 ? 'Photo use stopped.' : 'Correction not accepted.' }));
+      await settle();
+      assert.equal(view.button('Change the outline').disabled, true);
+      assert.equal(view.button('Create estimated shape').disabled, true);
+      oldShape.dispatch('click');
+      assert.ok(view.button('Retry saving the partial scene'), 'recovery cannot replace an unresolved correction');
+      const putCount = outlinePuts.length;
+      view.button('Check and refine the outline').dispatch('click');
+      await settle();
+      assert.equal(outlinePuts.length, putCount);
+      view.button('Retry saving the partial scene').dispatch('click');
+      assert.deepEqual(posts.at(-1).body, original);
+    }
+    repairedChild = child();
+    posts.at(-1).respond(json(200, repairedChild));
+    await settle();
+    assert.equal(view.opened.at(-1), repairedChild.id);
+    view.space.dispose();
+  });
+
+  it('holds malformed success responses instead of opening the parent or another source', async () => {
+    for (const changed of [{ id: JOB_ID }, { sourceId: 'wrong' }, { sourceSha256: 'a'.repeat(64) }, { edit: { version: 2, offset: [0, 0, 0], yaw: 0 } }, { edit: { version: 1, offset: [1, 0, 0], yaw: 0 } }, { outline: null }]) {
+      const view = await openScene();
+      await confirmedOutline(view);
+      view.button('Save as new partial scene').dispatch('click');
+      posts.at(-1).respond(json(201, { ...child(), ...changed }));
+      await settle();
+      assert.equal(view.opened.at(-1), JOB_ID);
+      assert.ok(view.button('Retry saving the partial scene'));
+      assert.equal(view.axis('Left / right').disabled, true);
+      view.space.dispose();
+    }
+  });
+
+  it('refuses a dirty parent or a locally stopped place grant before requesting a child', async () => {
+    const view = await openScene();
+    await confirmedOutline(view);
+    const field = view.axis('Left / right');
+    field.value = '0.5'; field.dispatch('input');
+    view.button('Save as new partial scene').dispatch('click');
+    assert.equal(posts.length, 0);
+    view.button('Revert to saved').dispatch('click');
+    view.source.permissions.place = false;
+    view.button('Save as new partial scene').dispatch('click');
+    assert.equal(posts.length, 0);
+    view.space.dispose();
+  });
+
+  it('does not reopen a late child after the saved place has closed', async () => {
+    const view = await openScene();
+    await confirmedOutline(view);
+    view.button('Save as new partial scene').dispatch('click');
+    const opened = [...view.opened];
+    view.space.dispose();
+    posts.at(-1).respond(json(201, child()));
+    await settle();
+    assert.deepEqual(view.opened, opened);
   });
 });
 

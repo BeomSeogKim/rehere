@@ -1294,6 +1294,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const placeStatus = el('p', { className: 'hint', role: 'status' });
     const placeAction = el('button', { type: 'button', className: 'secondary', textContent: 'Change from a memory' });
     const improveObject = el('button', { type: 'button', textContent: 'Explore an estimated shape' });
+    const refinePartial = el('button', { type: 'button', className: 'secondary', textContent: 'Correct the partial scene outline' });
     const visitAction = el('button', { type: 'button', className: 'secondary', textContent: 'Prepare a visit', hidden: true });
     let placeSummary = { kind: 'checking' };
     let lastWords = null;
@@ -1327,6 +1328,11 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       startObjectOutline();
       objectSection.scrollIntoView?.({ block: 'start' });
     });
+    refinePartial.addEventListener('click', () => {
+      objectSection.open = true;
+      startObjectOutline();
+      objectSection.scrollIntoView?.({ block: 'start' });
+    });
     inspection = savedFullObject ? null : inspectObject({
       job, jobId, token, depth: true,
       state: () => ({ target: 'selected-foreground', version: session.saved.version, ready: !session.uncertain && !conflict && !saving && !reloading }),
@@ -1342,8 +1348,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       el('p', { className: 'hint', textContent: 'The scene begins with one photograph. Its shape and depth are estimates; a memory is someone’s account.' }),
       placeWords,
       fullWordsDetails,
-      ...(!savedFullObject ? [el('p', { className: 'hint', textContent: 'Check the object in the photo, then review an estimated shape.' })] : []),
-      el('div', { className: 'actions' }, [...(!savedFullObject ? [improveObject] : []), placeAction, ...(inspection ? [inspection.trigger] : []), originalPhoto, visitAction]),
+      ...(!savedFullObject ? [el('p', { className: 'hint', textContent: 'Check the visible outline. Save a separate corrected partial scene, or review an estimated shape.' })] : []),
+      el('div', { className: 'actions' }, [...(!savedFullObject ? [refinePartial, improveObject] : []), placeAction, ...(inspection ? [inspection.trigger] : []), originalPhoto, visitAction]),
       placeStatus,
     ]);
     placeLanding.setAttribute('aria-label', 'This place');
@@ -1382,7 +1388,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     // This path starts from the already source-bound, single-object scene.
     // The parent remains the source of truth for grants, version and bytes.
     const objectSection = el('details', { className: 'source-details' });
-    const objectSummary = el('summary', { textContent: 'Make this object viewable from more sides' });
+    const objectSummary = el('summary', { textContent: 'Check or refine the object outline' });
     const objectStatus = el('p', { className: 'hint', role: 'status' });
     const objectStatusHome = el('div', {}, [objectStatus]);
     const objectWork = el('div');
@@ -1398,6 +1404,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     let outlineAttempt = null;
     let outlinePending = false;
     let buildAttempt = null;
+    let repairAttempt = null;
     let useAttempt = null;
     let useBuildId = null;
     let previewGeneration = 0;
@@ -1473,7 +1480,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         objectOutline = value;
         knownOutlines.set(value.outlineId, value);
         outlineAttempt = null;
-        objectStatus.textContent = 'Outline saved. You can now request an estimated object.';
+        objectStatus.textContent = 'Outline saved. Choose whether to save a corrected partial scene or request an estimated object.';
         showOutlineActions();
         return true;
       }
@@ -1486,21 +1493,27 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     function showOutlineActions() {
       const hadFocus = objectWork.contains(document.activeElement);
       const create = el('button', { type: 'button', textContent: 'Create estimated shape' });
+      const repair = el('button', { type: 'button', textContent: repairAttempt ? 'Retry saving the partial scene' : 'Save as new partial scene' });
       const change = el('button', { type: 'button', className: 'secondary', textContent: 'Change the outline' });
       const blocked = buildBlockedReason(sourceFor(job.sourceId)) || (job.modelBlocked ? 'This photo cannot currently be used to create the shape.' : null);
-      create.disabled = Boolean(blocked);
+      create.disabled = Boolean(blocked) || repairAttempt !== null;
+      change.disabled = repairAttempt !== null;
+      repair.disabled = objectBusy;
       create.addEventListener('click', () => startObjectBuild());
+      repair.addEventListener('click', () => startOutlineRepair());
       change.addEventListener('click', () => startObjectOutline(objectOutline));
-      objectWork.replaceChildren(el('p', { className: 'hint', textContent: 'Creating the shape takes processing time. Unseen sides and colour are estimates; check the result before using it.' }),
-        ...(blocked ? [el('p', { className: 'hint', textContent: blocked })] : []), el('div', { className: 'actions' }, [create, change]));
+      objectWork.replaceChildren(el('p', { className: 'hint', textContent: 'A corrected partial scene reuses the saved photo and estimated depth, runs no model, and starts at the original photo position. The previous scene and its saved versions are kept. Hidden areas stay empty.' }),
+        el('div', { className: 'actions' }, [repair, change]),
+        el('p', { className: 'hint', textContent: 'Creating an estimated shape is a separate model operation. Unseen sides and colour are estimates; check the result before using it.' }),
+        ...(blocked ? [el('p', { className: 'hint', textContent: blocked })] : []), el('div', { className: 'actions' }, [create]));
       objectEditor?.dispose(); objectEditor = null;
       unlockObject();
-      if (hadFocus) create.focus();
+      if (hadFocus) repair.focus();
     }
     async function startObjectOutline(existing = null) {
       if (!objectCurrent()) return;
       if (objectBusy) { objectStatus.textContent = 'Wait for the current request to finish.'; return; }
-      if (buildAttempt || useAttempt || outlineAttempt) {
+      if (buildAttempt || useAttempt || outlineAttempt || repairAttempt) {
         objectStatus.textContent = 'An earlier request has an unconfirmed outcome. Retry it or check saved outlines and shapes first.'; return;
       }
       if (lockedBy.has('object')) {
@@ -1554,8 +1567,47 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         closeObjectWork(); objectStatus.textContent = 'The outline editor could not be opened. The saved scene is unchanged.';
       }
     }
+    async function startOutlineRepair() {
+      if (!objectCurrent() || objectBusy || !objectOutline) return;
+      if (!repairAttempt) {
+        if (!parentReady() || !cleanObjectParent() || objectOutline.baseVersion !== session.saved.version || objectOutline.parentSurfaceSha256 !== parentHash) {
+          objectStatus.textContent = 'Load the current saved scene and confirm an outline for that version before saving a corrected partial scene.'; return;
+        }
+        if (sourceFor(job.sourceId)?.permissions?.place !== true || job.usageBlocked) {
+          objectStatus.textContent = 'This photo no longer allows reconstruction of this place. No corrected scene was requested.'; return;
+        }
+        repairAttempt = { requestId: crypto.randomUUID(), outlineId: objectOutline.outlineId, sourceSha256: sourceHash,
+          outlineSha256: objectOutline.maskSha256, parentSurfaceSha256: parentHash, baseVersion: session.saved.version, confirmed: true };
+      }
+      const attempt = repairAttempt;
+      objectBusy = true; lockedBy.add('outline-repair'); showEdit();
+      objectStatus.textContent = 'Saving a separate corrected partial scene…';
+      showOutlineActions();
+      const result = await postJson(`${base}/${jobId}/outline-repairs`, attempt);
+      const child = result.body;
+      const accepted = [200, 201].includes(result.status) && result.ok
+        && typeof child?.id === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(child.id) && child.id !== jobId
+        && child.status === 'ready' && child.sourceId === job.sourceId && child.sourceSha256 === sourceHash
+        && child.outline?.kind === 'owner-corrected' && child.edit?.version === 1
+        && Array.isArray(child.edit.offset) && child.edit.offset.length === 3 && child.edit.offset.every((value) => value === 0) && child.edit.yaw === 0
+        && !child.schema_version && !child.objects && !child.edit.objects && !child.edit.fullObject;
+      if (!objectCurrent()) {
+        if (!disposed && accepted) loadJobs({ resumePolling: false });
+        return;
+      }
+      objectBusy = false;
+      if (accepted) {
+        repairAttempt = null; lockedBy.delete('outline-repair');
+        status.textContent = 'A separate corrected partial scene was saved at the original photo position. Check its outline; the previous scene is kept.';
+        loadJobs({ resumePolling: false }); openScene(child.id); return;
+      }
+      objectStatus.textContent = result.status === 0 || result.status >= 500 || result.ok
+        ? 'The new scene’s save could not be confirmed. Retry saving repeats exactly the same request. If you leave, check the saved scene list before starting another correction.'
+        : `${serverError(result, 'The correction was not accepted.')} Retry saving repeats the same request. Check saved scenes before starting another correction.`;
+      showOutlineActions();
+    }
     async function startObjectBuild() {
-      if (!objectCurrent() || objectBusy || !objectOutline || !cleanObjectParent()) return;
+      if (!objectCurrent() || objectBusy || repairAttempt || !objectOutline || !cleanObjectParent()) return;
       if (objectOutline.baseVersion !== session.saved.version || objectOutline.parentSurfaceSha256 !== parentHash) {
         objectStatus.textContent = 'This outline belongs to an older saved scene. Check and confirm an outline for the current version.'; return;
       }
@@ -1810,6 +1862,10 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
     recoveryButton.addEventListener('click', async () => {
       if (!objectCurrent() || objectBusy) return;
+      if (repairAttempt) {
+        others.open = true; loadJobs({ resumePolling: false });
+        objectStatus.textContent = 'Check the saved scene list. Retry saving here repeats the same correction request; another outline or shape cannot replace it.'; return;
+      }
       objectBusy = true; objectStatus.textContent = 'Checking saved outlines and shapes…';
       const [outlines, builds] = await Promise.all([request(`${objectRoot}/outlines`, { cache: 'no-store' }), request(`${objectRoot}/builds`, { cache: 'no-store' })]);
       if (!objectCurrent()) return;
@@ -1843,6 +1899,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     });
     function openRecovery(open) {
       if (!objectCurrent()) return;
+      if (repairAttempt) { objectStatus.textContent = 'Resolve the partial-scene save or check saved scenes before opening another outline or shape.'; return; }
       if (objectBusy || outlinePending) { objectStatus.textContent = 'Wait for the current request to finish.'; return; }
       if (!lockedBy.has('object')) { open(); return; }
       objectStatus.textContent = 'Opening a saved item closes the current review and discards any unsaved outline changes.';
@@ -1850,7 +1907,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
       const discard = el('button', { type: 'button', className: 'secondary', textContent: 'Discard unsaved work and open' });
       keep.addEventListener('click', () => { recoveryChoice.replaceChildren(); objectStatus.textContent = 'Your current work is still open.'; });
       discard.addEventListener('click', () => {
-        if (objectBusy || outlinePending) { objectStatus.textContent = 'Wait for the current request to finish.'; return; }
+        if (objectBusy || outlinePending || repairAttempt) { objectStatus.textContent = 'Wait for the current request to finish or resolve the partial-scene save.'; return; }
         if (outlineAttempt?.id === missingOutlineId && !outlinePending) outlineAttempt = null;
         recoveryChoice.replaceChildren(); closeObjectWork(); open();
       });
@@ -1859,7 +1916,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
     outlineButton.addEventListener('click', () => startObjectOutline());
     objectSection.append(objectSummary,
-      el('p', { className: 'hint', textContent: 'Check the object in the photo, then decide whether to create and use an estimated shape.' }),
+      el('p', { className: 'hint', textContent: 'Check only visible object pixels against the photo. A confirmed outline can create a separate corrected partial scene without running a model, or be used for a separate estimated shape.' }),
       el('div', { className: 'actions' }, [outlineButton, recoveryButton]), objectStatusHome, objectLists, recoveryChoice, objectWork);
 
     const manualEdit = el('details', { className: 'source-details' }, [
