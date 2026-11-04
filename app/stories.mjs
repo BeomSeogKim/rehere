@@ -48,6 +48,27 @@ const BLOCKED = {
   range: 'The selected part of the recording no longer matches its record.',
 };
 
+// Fixed browser messages for AI caption draft outcomes. A replayed request
+// answers with its recorded outcome and never sends the recording again.
+const DRAFT_MESSAGES = {
+  notConfigured: [503, 'AI caption drafts are not set up on this computer. Write the captions yourself.'],
+  noModelUse: [403, 'This recording does not allow model processing. Change its permissions to request an AI caption draft, or write the captions yourself.'],
+  busy: [409, 'Another recorded story or caption draft is being prepared right now. Try again when it finishes.'],
+  pending: [409, 'This caption draft is still being made.'],
+  'not-sent': [409, 'The caption draft stopped before the recording was sent. Nothing was saved; send a new request to try again.'],
+  restricted: [409, 'The recording, its permissions or the saved view changed, so the recording was not sent. Review it and try again.'],
+  changed: [409, 'The recording, its permissions or the saved view changed while the draft was made, so its answer was discarded.'],
+  canceled: [409, 'The caption draft was stopped because the recording may no longer be used for it or the app is closing. Any answer was discarded.'],
+  budget: [409, 'The local spending limit for caption drafts was reached, so nothing was sent.'],
+  tooLong: [400, 'AI caption drafts are limited to whole recordings of 60 seconds or less. Write the captions yourself.'],
+  empty: [422, 'No speech was recognized in this recording. Write the captions yourself.'],
+  invalid: [502, 'The draft from Muse Voice Transcribe did not fit this recording, so it was not used. Write the captions yourself.'],
+  provider: [502, 'Muse Voice Transcribe could not make a draft. Nothing was saved; write the captions yourself or send a new request.'],
+  timeout: [504, 'Muse Voice Transcribe did not answer in time. Nothing was saved; write the captions yourself or send a new request.'],
+  unknown: [502, 'Rehere could not confirm whether Muse Voice Transcribe answered. Nothing was applied and this request is not sent again; send a new request if you want another draft.'],
+};
+const draftFailure = (reason) => DRAFT_MESSAGES[reason] ?? DRAFT_MESSAGES.unknown;
+
 const fail = (status, message) => new RequestError(status, message);
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const isId = (value) => typeof value === 'string' && UUID.test(value);
@@ -97,11 +118,17 @@ function validRange(range) {
 // A two-object scene also names the one object the story is about.
 // An optional sourceRange selects an excerpt; without it the whole first
 // track is used and the request (and its digest) is exactly as before.
+// An optional captionDraftId names the reviewed AI draft the captions started
+// from; drafts cover only a whole recording.
 export function parseStoryRequest(body, twoObjects = false) {
   const keys = twoObjects ? [...STORY_KEYS, 'targetId'] : STORY_KEYS;
-  const hasRange = body !== null && typeof body === 'object' && Object.hasOwn(body, 'sourceRange');
-  if (!exactKeys(body, hasRange ? [...keys, 'sourceRange'] : keys)) throw fail(400, UNREADABLE);
+  const optional = ['sourceRange', 'captionDraftId'].filter((key) => body !== null && typeof body === 'object' && Object.hasOwn(body, key));
+  const hasRange = optional.includes('sourceRange');
+  const hasDraft = optional.includes('captionDraftId');
+  if (!exactKeys(body, [...keys, ...optional])) throw fail(400, UNREADABLE);
   if (hasRange && !validRange(body.sourceRange)) throw fail(400, 'The selected part of the recording could not be read.');
+  if (hasDraft && !isId(body.captionDraftId)) throw fail(400, UNREADABLE);
+  if (hasDraft && hasRange) throw fail(400, 'An AI caption draft covers the whole recording, so it cannot be used for an excerpt.');
   const view = parseView(body.view);
   const cues = parseCues(body.cues);
   const valid = isId(body.requestId) && isId(body.voiceSourceId) && view && cues && filled(body.title, STORY_LIMITS.title)
@@ -111,7 +138,14 @@ export function parseStoryRequest(body, twoObjects = false) {
   return {
     requestId: body.requestId, voiceSourceId: body.voiceSourceId, view, title: body.title, cues, ...(twoObjects && { targetId: body.targetId }),
     ...(hasRange && { sourceRange: { startMs: body.sourceRange.startMs, endMs: body.sourceRange.endMs } }),
+    ...(hasDraft && { captionDraftId: body.captionDraftId }),
   };
+}
+
+export function parseCaptionDraftRequest(body) {
+  const view = exactKeys(body, ['requestId', 'voiceSourceId', 'view']) ? parseView(body.view) : null;
+  if (!view || !isId(body.requestId) || !isId(body.voiceSourceId)) throw fail(400, UNREADABLE);
+  return { requestId: body.requestId, voiceSourceId: body.voiceSourceId, view };
 }
 
 // The object a story is about: the owner's named object, or the one
@@ -123,15 +157,30 @@ const storyTarget = (context, showLabel = true) => {
 };
 
 const storiesOf = (manifest) => manifest.stories ?? { items: [], receipts: [] };
+const draftsOf = (manifest) => manifest.captionDrafts ?? [];
 const viewKey = (view) => (view.kind === 'version' ? `version:${view.version}` : `variant:${view.variantId}`);
+const draftAttribution = (story) => story.captionDraft && { captionDraft: { model: story.captionDraft.model, label: story.captionDraft.label } };
+
+// The owner's copy of a completed draft. The cues are returned once and not
+// kept; they stay unconfirmed until the owner reviews them and saves a story.
+const draftView = (record, cues) => ({
+  draft: {
+    id: record.id, model: record.call.model, modelLabel: record.call.modelLabel, voiceSourceId: record.voiceSourceId, voiceSha256: record.voiceSha256,
+    view: { ...record.view }, durationMs: record.durationMs, cues: cues.map((cue) => ({ ...cue })), confirmed: false,
+  },
+});
+// Visitor snapshots pin a story's content. AI draft provenance joins the pin
+// only when present, so stories saved without it keep their earlier pin.
+const contentPin = (story) => sha256(JSON.stringify(story.captionDraft ? [story.title, story.cues, story.context, story.captionDraft] : [story.title, story.cues, story.context]));
 
 // Recorded stories bound to one saved arrangement of one ready scene. Records
 // live in the scene manifest and playback copies beside it, so saving, a
 // withdrawal and a source restriction share the reconstruction mutex.
 export class StoryStore {
-  constructor({ reconstructions, audioDecoder }) {
+  constructor({ reconstructions, audioDecoder, transcriber = null }) {
     this.reconstructions = reconstructions;
     this.audioDecoder = audioDecoder;
+    this.transcriber = transcriber;
   }
 
   #owner(principal) {
@@ -198,6 +247,125 @@ export class StoryStore {
       },
       recording: { name: draft.voice.name, type: draft.voice.type, size: voice.size, sha256: voice.sha256 },
     };
+  }
+
+  // The completed AI draft a new story's captions started from. It must be a
+  // successful draft of this exact recording and saved view revision; a story
+  // keeps only its ID, model and label.
+  #reviewedDraft(manifest, captionDraftId, context) {
+    const record = draftsOf(manifest).find((item) => item.id === captionDraftId);
+    const matches = record?.status === 'drafted' && record.voiceSourceId === context.voice.sourceId && record.voiceSha256 === context.voice.sha256
+      && JSON.stringify(record.view) === JSON.stringify(context.view) && !context.voice.sourceRange;
+    if (!matches) throw fail(409, 'This AI caption draft does not belong to the chosen recording and saved view. Request a new draft or write the captions yourself.');
+    return { id: record.id, model: record.call.model, label: record.call.modelLabel };
+  }
+
+  // The context a caption draft depends on: everything a whole-recording story
+  // needs, plus model use of the recording that is sent. Photos are not sent,
+  // so their model use is not required.
+  async #draftContext(manifest, request) {
+    const resolved = await this.#context(manifest, request);
+    const draft = await this.reconstructions.drafts.get(manifest.draftId);
+    if (!(await this.reconstructions.sourcePolicies.canUse(draft, request.voiceSourceId, 'model'))) throw fail(...DRAFT_MESSAGES.noModelUse);
+    return resolved;
+  }
+
+  // An AI caption draft of one whole saved recording. The attempt is recorded
+  // before anything is decoded or sent, so a repeated request ID never sends
+  // the recording again; it answers with the recorded outcome. Model use is
+  // checked under the mutex when the request is admitted, immediately before
+  // sending and before the result is returned. Only the draft's binding and
+  // call metadata are kept, not its text.
+  async draftCaptions(draftId, jobId, principal, body) {
+    this.#owner(principal);
+    const request = parseCaptionDraftRequest(body);
+    const { requestId, ...values } = request;
+    const requestDigest = sha256(JSON.stringify(values));
+    const r = this.reconstructions;
+    await r.recover();
+    const admitted = await r.serialize(async () => {
+      const manifest = await this.#scene(draftId, jobId);
+      const existing = draftsOf(manifest).find((item) => item.requestId === requestId);
+      if (existing) {
+        if (existing.requestDigest !== requestDigest) throw fail(409, 'This request was already used with different values.');
+        if (existing.status === 'pending' && r.activeStory?.draftRecordId === existing.id) throw fail(...DRAFT_MESSAGES.pending);
+        if (existing.status === 'drafted') throw fail(409, 'This draft was already made, but its text is not kept. Send a new request for another draft.');
+        throw fail(...draftFailure(existing.status === 'failed' ? existing.reason : 'unknown'));
+      }
+      if (!this.transcriber) throw fail(...DRAFT_MESSAGES.notConfigured);
+      if (r.closed) throw fail(503, 'The app is shutting down. Try again later.');
+      if (r.activeStory) throw fail(...DRAFT_MESSAGES.busy);
+      const { context, recording } = await this.#draftContext(manifest, request);
+      const record = {
+        id: randomUUID(), requestId, requestDigest, status: 'pending', reason: null, voiceSourceId: context.voice.sourceId, voiceSha256: context.voice.sha256,
+        view: { ...request.view }, durationMs: null, cueCount: null, call: null, createdAt: new Date().toISOString(), completedAt: null,
+      };
+      await r.update(manifest, { captionDrafts: [...draftsOf(manifest), record] });
+      // Only the recording is sent, so only its model use aborts the call.
+      const slot = { draftId, sourceIds: [context.voice.sourceId], purpose: 'model', draftRecordId: record.id, controller: new AbortController(), done: null };
+      r.activeStory = slot;
+      return { context, recording, slot, record };
+    });
+
+    const { slot, record } = admitted;
+    let settle;
+    slot.done = new Promise((resolve) => {
+      settle = resolve;
+    });
+    const stillAdmitted = async () => {
+      if (slot.controller.signal.aborted || r.closed) throw fail(...DRAFT_MESSAGES.canceled);
+      const manifest = await this.#scene(draftId, jobId);
+      const { context } = await this.#draftContext(manifest, request);
+      if (JSON.stringify(context) !== JSON.stringify(admitted.context)) throw fail(...DRAFT_MESSAGES.changed);
+      return manifest;
+    };
+    // Recorded in `finally` unless a successful draft was already recorded.
+    let outcome = { status: 'failed', reason: 'not-sent', call: null };
+    try {
+      const decoded = await this.#decode(draftId, admitted.recording, slot.controller.signal, stillAdmitted);
+      outcome = { status: 'unknown', reason: 'unknown', call: null, durationMs: decoded.durationMs };
+      const result = await this.transcriber({
+        wav: pcmWav(decoded.pcm), durationMs: decoded.durationMs, signal: slot.controller.signal,
+        admit: (start) => r.serialize(async () => {
+          await stillAdmitted();
+          return { value: start() };
+        }),
+      });
+      const sent = result.call?.dispatched === true;
+      outcome = { status: result.ok ? 'drafted' : sent && result.unknown ? 'unknown' : 'failed', reason: result.ok ? null : result.reason, call: result.call ?? null, durationMs: decoded.durationMs };
+      if (!result.ok) {
+        // A refused admission names the actual reason when it is still current.
+        if (result.reason === 'restricted') await r.serialize(stillAdmitted);
+        throw fail(...draftFailure(result.reason));
+      }
+      return await r.serialize(async () => {
+        let manifest;
+        try {
+          manifest = await stillAdmitted();
+        } catch (error) {
+          outcome = { ...outcome, status: 'failed', reason: 'changed' };
+          throw error;
+        }
+        const done = { ...record, status: 'drafted', durationMs: decoded.durationMs, cueCount: result.cues.length, call: result.call, completedAt: new Date().toISOString() };
+        await r.update(manifest, { captionDrafts: draftsOf(manifest).map((item) => (item.id === record.id ? done : item)) });
+        outcome = null;
+        return draftView(done, result.cues);
+      });
+    } finally {
+      if (outcome) await this.#recordDraftOutcome(draftId, jobId, record.id, outcome);
+      if (r.activeStory === slot) r.activeStory = null;
+      settle();
+    }
+  }
+
+  async #recordDraftOutcome(draftId, jobId, recordId, { status, reason, call, durationMs = null }) {
+    const r = this.reconstructions;
+    await r.serialize(async () => {
+      const manifest = await r.readManifest(draftId, jobId);
+      if (!manifest || (await r.placeDeleted(draftId))) return;
+      const completedAt = new Date().toISOString();
+      await r.update(manifest, { captionDrafts: draftsOf(manifest).map((item) => (item.id === recordId ? { ...item, status, reason, call, durationMs, completedAt } : item)) });
+    }).catch(() => {});
   }
 
   // Null when the story may be used for `purpose` ('place' privately, 'share'
@@ -269,6 +437,7 @@ export class StoryStore {
       view: { ...context.view, label: context.label, era: available ? context.era : null },
       voice: { sourceId: context.voice.sourceId, provider: context.voice.provider },
       captionAuthor: { displayName: story.captionAuthor.displayName },
+      ...draftAttribution(story),
       cues: available ? story.cues.map((cue) => ({ ...cue })) : [],
       durationMs: story.durationMs,
       audio: available ? { type: WAV_TYPE, size: story.audio.size } : null,
@@ -319,9 +488,10 @@ export class StoryStore {
       if (r.closed) throw fail(503, 'The app is shutting down. Try again later.');
       if (r.activeStory) throw fail(409, 'Another recorded story is being prepared right now. Try again when it finishes.');
       const { context, recording } = await this.#context(manifest, request);
+      const captionDraft = request.captionDraftId ? this.#reviewedDraft(manifest, request.captionDraftId, context) : null;
       const slot = { draftId, sourceIds: [context.voice.sourceId, ...(context.photos ?? [context.photo]).map(({ sourceId }) => sourceId)], controller: new AbortController(), done: null };
       r.activeStory = slot;
-      return { context, recording, slot };
+      return { context, recording, slot, captionDraft };
     });
     if (admitted.story) return this.#project(admitted.manifest, admitted.story);
 
@@ -371,6 +541,7 @@ export class StoryStore {
         const story = {
           id: storyId, requestId, requestDigest, status: 'ready', title: request.title, cues: request.cues, context: saved,
           captionAuthor: { principalId: principal.id, displayName: principal.displayName }, captionConfirmed: true,
+          ...(admitted.captionDraft && { captionDraft: admitted.captionDraft }),
           durationMs: wav.durationMs, audio: { type: WAV_TYPE, size: wav.bytes.length, sha256: sha256(wav.bytes) },
           createdAt: new Date().toISOString(), withdrawnAt: null,
         };
@@ -395,6 +566,25 @@ export class StoryStore {
   // started inside a final admission under the mutex and awaited outside it,
   // so a restriction saved while the original was read always prevents the start.
   async #prepare(draftId, recording, cues, signal, stillAdmitted, sourceRange = undefined) {
+    const decoded = await this.#decode(draftId, recording, signal, stillAdmitted);
+    if (sourceRange) {
+      // The whole decoded track must be valid PCM in the fixed layout before
+      // any part of it is taken; then exactly [start, end) is kept.
+      const { pcm } = decoded;
+      const valid = Buffer.isBuffer(pcm) && pcm.length > 0 && pcm.length % 2 === 0 && pcm.length <= MAX_PCM_BYTES
+        && decoded.sampleRate === SAMPLE_RATE && decoded.channels === 1 && decoded.bitsPerSample === 16;
+      if (!valid) throw fail(...DECODE_MESSAGES['decode-failed']);
+      if (sourceRange.endMs * PCM_BYTES_PER_MS > pcm.length) throw fail(400, 'The selected part ends after the recording ends. Adjust the end time.');
+      const durationMs = sourceRange.endMs - sourceRange.startMs;
+      if (cues.at(-1).endMs > durationMs) throw fail(400, 'A caption ends after the selected part ends. Caption times start at the beginning of the selected part.');
+      return { bytes: pcmWav(pcm.subarray(sourceRange.startMs * PCM_BYTES_PER_MS, sourceRange.endMs * PCM_BYTES_PER_MS)), durationMs, sourceSampleCount: pcm.length / 2 };
+    }
+    const { durationMs } = decoded;
+    if (cues.at(-1).endMs > durationMs) throw fail(400, 'A caption ends after the recording ends. Adjust the caption times.');
+    return { bytes: pcmWav(decoded.pcm), durationMs };
+  }
+
+  async #decode(draftId, recording, signal, stillAdmitted) {
     const asset = await this.reconstructions.drafts.asset(draftId, recording.name);
     const bytes = asset && (await readFile(asset.file));
     if (!bytes || bytes.length !== recording.size || sha256(bytes) !== recording.sha256) {
@@ -415,21 +605,7 @@ export class StoryStore {
       throw fail(...(known ?? DECODE_MESSAGES['decode-failed']));
     }
     if (signal.aborted) throw fail(...DECODE_MESSAGES.aborted);
-    if (sourceRange) {
-      // The whole decoded track must be valid PCM in the fixed layout before
-      // any part of it is taken; then exactly [start, end) is kept.
-      const { pcm } = decoded;
-      const valid = Buffer.isBuffer(pcm) && pcm.length > 0 && pcm.length % 2 === 0 && pcm.length <= MAX_PCM_BYTES
-        && decoded.sampleRate === SAMPLE_RATE && decoded.channels === 1 && decoded.bitsPerSample === 16;
-      if (!valid) throw fail(...DECODE_MESSAGES['decode-failed']);
-      if (sourceRange.endMs * PCM_BYTES_PER_MS > pcm.length) throw fail(400, 'The selected part ends after the recording ends. Adjust the end time.');
-      const durationMs = sourceRange.endMs - sourceRange.startMs;
-      if (cues.at(-1).endMs > durationMs) throw fail(400, 'A caption ends after the selected part ends. Caption times start at the beginning of the selected part.');
-      return { bytes: pcmWav(pcm.subarray(sourceRange.startMs * PCM_BYTES_PER_MS, sourceRange.endMs * PCM_BYTES_PER_MS)), durationMs, sourceSampleCount: pcm.length / 2 };
-    }
-    const { durationMs } = decoded;
-    if (cues.at(-1).endMs > durationMs) throw fail(400, 'A caption ends after the recording ends. Adjust the caption times.');
-    return { bytes: pcmWav(decoded.pcm), durationMs };
+    return decoded;
   }
 
   async withdraw(draftId, jobId, principal, storyId, body) {
@@ -491,9 +667,10 @@ export class StoryStore {
       && (view.kind === 'version' || view.eraRevision === story.context.view.eraRevision));
     if (matches.length !== 1) return null;
     return {
-      pinned: { storyId: story.id, viewId: matches[0].id, audioSha256: story.audio.sha256, contentSha256: sha256(JSON.stringify([story.title, story.cues, story.context])) },
+      pinned: { storyId: story.id, viewId: matches[0].id, audioSha256: story.audio.sha256, contentSha256: contentPin(story) },
       publicStory: {
         viewId: matches[0].id, target: storyTarget(story.context), title: story.title, providerLabel: story.context.voice.provider, captionAuthorLabel: story.captionAuthor.displayName,
+        ...draftAttribution(story),
         cues: story.cues.map((cue) => ({ ...cue })), durationMs: story.durationMs, audio: { type: WAV_TYPE, size: story.audio.size },
         ...(story.context.voice.sourceRange && { sourceRange: { ...story.context.voice.sourceRange } }),
       },
@@ -506,7 +683,7 @@ export class StoryStore {
   async shareIssue(manifest, pinned) {
     const story = storiesOf(manifest).items.find((item) => item.id === pinned.storyId);
     if (!story || story.audio.sha256 !== pinned.audioSha256) return true;
-    if (sha256(JSON.stringify([story.title, story.cues, story.context])) !== pinned.contentSha256) return true;
+    if (contentPin(story) !== pinned.contentSha256) return true;
     if (await this.#blocked(manifest, story, 'share')) return true;
     return !(await this.#audioMatches(manifest, story, pinned.audioSha256));
   }

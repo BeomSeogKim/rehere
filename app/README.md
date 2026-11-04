@@ -492,6 +492,43 @@ served at `/vendor/THREE-LICENSE`. The MIT notice for three-mesh-bvh is served
 privately at `/vendor/THREE-MESH-BVH-LICENSE`. The project is licensed under
 Apache-2.0; see the [third-party notices](../THIRD-PARTY-NOTICES.md).
 
+## AI caption drafts
+
+A recorded story's captions can start from an AI draft by Meta's Muse Voice
+Transcribe (`muse-voice-transcribe-1.0`), reviewed and corrected by the owner
+before saving. See [recorded stories](STORIES.md#draft-captions-with-ai) for the
+review, binding and attribution rules.
+
+Drafting is disabled by default and separate from the planner. An operator
+must supply `MODEL_API_KEY` in the server environment and explicitly set
+`REHERE_TRANSCRIBE_LIVE=1` for that process. Each draft sends one whole
+recording of at most 60 seconds once, with no automatic retries. Before
+sending, the server reserves the estimated cost from the decoded duration at
+the published $0.18 per audio hour. Default local limits are $0.005 per draft,
+$0.05 total and 10 drafts; `REHERE_TRANSCRIBE_TOTAL_USD` and
+`REHERE_TRANSCRIBE_MAX_REQUESTS` can lower them. Reservations persist in
+`data/transcribe-budget.json`. The API reports no usage, so a sent request
+keeps its full estimate; only a request that was never sent, or an error
+response the provider documents as unbilled, is settled at zero. These are
+local estimates and limits, not provider-enforced caps or billing receipts.
+
+Each attempt is recorded in the scene before anything is decoded or sent, with
+its call metadata: whether it was sent, the HTTP status, the provider's request
+and session IDs when returned (null otherwise), latency, admitted duration and
+estimated cost. A repeated request ID answers from that record and never sends
+again. This is a single-process local demo guard: an attempt interrupted by a
+restart stays pending and is reported as an unknown outcome, and its
+reservation is not reconciled with the provider. Exactly-once delivery across
+restarts and durable provider settlement are not provided.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/drafts/<id>/reconstructions/<job>/stories/caption-drafts` | Draft captions with `requestId`, `voiceSourceId` and `view` |
+
+See the official [speech-to-text documentation](https://dev.meta.ai/docs/speech-to-text)
+for the provider contract and price. Retention terms are not stated there, so
+use only public or synthetic recordings unless the account terms allow more.
+
 ## Upload limits
 
 Both the resumable entry screen and the legacy multipart endpoint check the

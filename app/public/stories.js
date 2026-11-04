@@ -1,8 +1,8 @@
 // The owner's recorded stories for one ready scene: connect a saved recording
 // of this memory to one exact saved view with human-written captions, list the
 // stories and withdraw them. A story never changes after it is saved; a
-// correction is a new story. Captions are written by the owner, not
-// transcribed or checked.
+// correction is a new story. Captions are written by the owner, or started
+// from an AI draft the owner explicitly requested and then reviewed.
 
 import { viewChoices } from './shares.js';
 import { createStoryPlayer, formatMs, formatPosition } from './story-player.js';
@@ -50,6 +50,15 @@ export function cuesProblem(cues, durationHintMs = null, excerptMs = null) {
     return `The last caption ends at ${formatMs(previousEnd)}, after the recording’s end at about ${formatMs(durationHintMs)}.`;
   }
   return null;
+}
+
+// The model behind optional caption drafts; a draft covers a whole recording.
+export const DRAFT_MODEL_LABEL = 'Muse Voice Transcribe';
+export const DRAFT_LIMIT_MS = 60_000;
+
+// How a story's captions are credited, for the owner and visitors alike.
+export function captionCredit(captionDraft, author) {
+  return captionDraft ? `Captions AI-drafted (${captionDraft.label || DRAFT_MODEL_LABEL}), reviewed by ${author}` : `Captions written by ${author}`;
 }
 
 // Recordings of this memory the owner can still use to build a story.
@@ -130,6 +139,23 @@ export function mountStories(container, bridge) {
   ]);
   const cueRows = el('div', { className: 'story-cue-rows' });
   const addCue = el('button', { type: 'button', className: 'secondary', textContent: 'Add a caption' });
+  // Optional AI caption draft: offered only for a whole recording whose
+  // provider allowed model processing, and sent only after a second,
+  // explicit confirmation. Its cues land unconfirmed in the editor.
+  const draftAsk = el('button', { type: 'button', className: 'secondary', textContent: `Draft captions with ${DRAFT_MODEL_LABEL}` });
+  const draftSend = el('button', { type: 'button', textContent: 'Send the recording for a draft' });
+  const draftCancel = el('button', { type: 'button', className: 'secondary', textContent: 'Cancel' });
+  const draftConfirm = el('div', { hidden: true }, [
+    el('p', { className: 'hint', textContent: `The whole recording (60 seconds at most) is sent once to Meta’s ${DRAFT_MODEL_LABEL} model. The draft replaces the captions in this form; you must review and correct every caption before confirming. The draft text is not kept by Rehere; if it is lost, request a new draft or write the captions yourself.` }),
+    el('div', { className: 'actions access-links' }, [draftSend, draftCancel]),
+  ]);
+  const draftNote = el('p', { className: 'hint', role: 'status' });
+  const draftControls = el('div', {}, [el('div', { className: 'actions access-links' }, [draftAsk]), draftConfirm, draftNote]);
+  // pendingDraft: the request in flight and exactly what the form held when it
+  // was sent. appliedDraft: the draft the current cues started from.
+  let pendingDraft = null;
+  let draftRetry = null;
+  let appliedDraft = null;
   const confirmed = el('input', { type: 'checkbox' });
   const save = el('button', { type: 'button', textContent: 'Save story' });
   const abandon = el('button', { type: 'button', className: 'secondary', textContent: 'Stop waiting for the earlier save', hidden: true });
@@ -175,11 +201,12 @@ export function mountStories(container, bridge) {
       ]),
       el('fieldset', { className: 'source-permissions' }, [
         el('legend', { textContent: 'Captions' }),
-        el('p', { className: 'hint', textContent: 'Write what is heard, with start and end times as minutes:seconds from 0:00 of the part you chose (for example 0:04.5). Rehere does not transcribe or check them.' }),
+        el('p', { className: 'hint', textContent: 'Write what is heard, with start and end times as minutes:seconds from 0:00 of the part you chose (for example 0:04.5). Rehere does not check them. For a whole recording you may ask for an AI draft to review instead of starting from nothing.' }),
         cueRows,
         el('div', { className: 'actions access-links' }, [addCue]),
+        draftControls,
       ]),
-      el('label', { className: 'memory-consent' }, [confirmed, ' These captions, written by me, convey the meaningful audible content of the part chosen to play (the whole recording or the excerpt); they are not checked by Rehere']),
+      el('label', { className: 'memory-consent' }, [confirmed, ' These captions, written or reviewed by me, convey the meaningful audible content of the part chosen to play (the whole recording or the excerpt); they are not checked by Rehere']),
       el('div', { className: 'actions' }, [save, abandon]),
       message,
       status,
@@ -194,8 +221,84 @@ export function mountStories(container, bridge) {
     const remove = el('button', { type: 'button', className: 'secondary', textContent: 'Remove caption' });
     const row = el('div', { className: 'story-cue-row' }, [field('Start', start), field('End', end), field('Caption', text), remove]);
     row.read = () => ({ startMs: parseTime(start.value), endMs: parseTime(end.value), text: text.value });
-    remove.addEventListener('click', () => row.remove());
+    for (const input of [start, end, text]) input.addEventListener('input', cuesEdited);
+    remove.addEventListener('click', () => {
+      row.remove();
+      cuesEdited();
+    });
     cueRows.append(row);
+  }
+
+  // Any edit to captions that started from a draft needs a fresh confirmation.
+  function cuesEdited() {
+    if (appliedDraft) confirmed.checked = false;
+  }
+
+  const voiceOf = (id) => bridge.sources.find((record) => record.id === id && record.kind === 'voice');
+  const draftSelection = () => JSON.stringify({ voiceSourceId: voiceSelect.value, view: viewSelect.value, whole: whole.checked, target: targetSelect?.value ?? null });
+
+  function renderDraft() {
+    const record = voiceOf(voiceSelect.value);
+    const hint = bridge.durationHintMs?.(voiceSelect.value) ?? null;
+    const offered = Boolean(record) && record.permissions?.model === true && whole.checked && !(Number.isFinite(hint) && hint > DRAFT_LIMIT_MS);
+    draftAsk.hidden = !offered;
+    draftAsk.disabled = Boolean(pendingDraft);
+    if (!offered) draftConfirm.hidden = true;
+  }
+
+  // A draft applies only to the exact recording, view and part chosen, so a
+  // different choice ends the attribution of captions already drafted.
+  function draftContextChanged() {
+    if (appliedDraft && appliedDraft.selection !== draftSelection()) {
+      appliedDraft = null;
+      draftNote.textContent = 'The recording, view or part changed after the AI draft was applied. The captions in the form will be saved as written by you; request a new draft if you want AI drafting credited.';
+    }
+    renderDraft();
+  }
+
+  async function sendDraft() {
+    const choice = choices.find((entry) => entry.key === viewSelect.value);
+    if (!choice) {
+      draftNote.textContent = 'Choose the saved view first; the draft is bound to it.';
+      return;
+    }
+    const body = {
+      requestId: draftRetry?.selection === draftSelection() ? draftRetry.requestId : crypto.randomUUID(),
+      voiceSourceId: voiceSelect.value,
+      view: { kind: choice.kind, version: choice.version, variantId: choice.variantId, eraRevision: choice.eraRevision },
+    };
+    const mine = { body, selection: draftSelection(), cues: JSON.stringify(readCues()) };
+    pendingDraft = mine;
+    draftRetry = null;
+    draftConfirm.hidden = true;
+    draftNote.textContent = `Waiting for ${DRAFT_MODEL_LABEL}. Nothing is applied until it answers.`;
+    renderDraft();
+    const result = await postJson(`${bridge.jobUrl}/stories/caption-drafts`, body);
+    if (disposed || pendingDraft !== mine) return;
+    pendingDraft = null;
+    renderDraft();
+    if (result.status === 0) {
+      // The outcome is unknown: a retry repeats this request ID, which the
+      // server answers from its record without sending the recording again.
+      draftRetry = { requestId: body.requestId, selection: mine.selection };
+      draftNote.textContent = 'Rehere could not confirm whether the draft was made. Sending again repeats the same request; it is never sent to the model twice.';
+      return;
+    }
+    const draft = result.body?.draft;
+    if (!result.ok || !draft || !Array.isArray(draft.cues)) {
+      draftNote.textContent = reasonOf(result) || 'The caption draft could not be made. Write the captions yourself.';
+      return;
+    }
+    // A late answer never replaces newer choices or caption edits.
+    if (draftSelection() !== mine.selection || JSON.stringify(readCues()) !== mine.cues) {
+      draftNote.textContent = 'The AI draft arrived after you changed the recording, view, part or captions, so it was not applied. Your captions are unchanged.';
+      return;
+    }
+    cueRows.replaceChildren();
+    for (const cue of draft.cues) addCueRow({ start: formatPosition(cue.startMs), end: formatPosition(cue.endMs), text: cue.text });
+    confirmed.checked = false;
+    appliedDraft = { id: draft.id, selection: mine.selection };
+    draftNote.textContent = `AI draft from ${draft.modelLabel || DRAFT_MODEL_LABEL} applied. It may be wrong: listen, correct every caption, then confirm.`;
   }
 
   const readCues = () => [...cueRows.children].filter((row) => row.read).map((row) => row.read());
@@ -242,7 +345,7 @@ export function mountStories(container, bridge) {
         item.append(
           el('p', { className: 'space-choice-label', textContent: story.title }),
           el('p', { className: 'hint', textContent: `${story.view?.label ?? 'Saved view'} · ${eraText(story.view?.era)} · ${story.target?.label ?? TARGET_LABEL}` }),
-          el('p', { className: 'hint', textContent: `Recording by ${story.voice?.provider || 'an unnamed provider'}. Captions written by ${story.captionAuthor?.displayName || 'the owner'}. ${Number.isFinite(story.durationMs) ? `Length ${formatMs(story.durationMs)}. ` : ''}You hear a converted playback copy; the original is unchanged.` }),
+          el('p', { className: 'hint', textContent: `Recording by ${story.voice?.provider || 'an unnamed provider'}. ${captionCredit(story.captionDraft, story.captionAuthor?.displayName || 'the owner')}. ${Number.isFinite(story.durationMs) ? `Length ${formatMs(story.durationMs)}. ` : ''}You hear a converted playback copy; the original is unchanged.` }),
           player.element,
           withdrawControl(story),
         );
@@ -389,6 +492,7 @@ export function mountStories(container, bridge) {
       ...(excerpt.checked ? { sourceRange: { startMs: rangeStart.value.trim() === '' ? 0 : parseTime(rangeStart.value), endMs: parseTime(rangeEnd.value) } } : {}),
       cues: readCues(),
       captionConfirmed: confirmed.checked === true,
+      ...(appliedDraft && appliedDraft.selection === draftSelection() && whole.checked ? { captionDraftId: appliedDraft.id } : {}),
     };
   }
 
@@ -424,12 +528,22 @@ export function mountStories(container, bridge) {
   const contentChanged = () => {
     confirmed.checked = false;
     renderPart();
+    draftContextChanged();
   };
   voiceSelect.addEventListener('change', contentChanged);
   whole.addEventListener('change', contentChanged);
   excerpt.addEventListener('change', contentChanged);
   rangeStart.addEventListener('input', contentChanged);
   rangeEnd.addEventListener('input', contentChanged);
+  viewSelect.addEventListener('change', draftContextChanged);
+  targetSelect?.addEventListener('change', draftContextChanged);
+  draftAsk.addEventListener('click', () => {
+    draftConfirm.hidden = false;
+  });
+  draftCancel.addEventListener('click', () => {
+    draftConfirm.hidden = true;
+  });
+  draftSend.addEventListener('click', sendDraft);
 
   function resetForm() {
     title.value = '';
@@ -442,6 +556,9 @@ export function mountStories(container, bridge) {
     renderPart();
     cueRows.replaceChildren();
     addCueRow();
+    appliedDraft = null;
+    draftNote.textContent = '';
+    renderDraft();
   }
 
   async function send(attempt, retrying) {
@@ -526,10 +643,14 @@ export function mountStories(container, bridge) {
     renderUnresolved();
     load();
   });
-  addCue.addEventListener('click', () => addCueRow());
+  addCue.addEventListener('click', () => {
+    addCueRow();
+    cuesEdited();
+  });
 
   renderVoices();
   renderPart();
+  renderDraft();
   addCueRow();
   load();
   return {
@@ -538,6 +659,7 @@ export function mountStories(container, bridge) {
     showAll,
     dispose() {
       disposed = true;
+      pendingDraft = null;
       readToken += 1;
       for (const player of players.splice(0)) player.dispose();
       container.replaceChildren();

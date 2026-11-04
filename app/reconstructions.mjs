@@ -2477,8 +2477,9 @@ export class ReconstructionStore {
       // Also on an exact replay: running work that the saved policy no longer
       // allows is asked to stop again, and the answer reflects that attempt.
       // Story decoding and outline correction need only place use, so a
-      // model- or share-only reduction leaves that local work running.
-      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, 'place'], [this.activeOutline, 'place'], [this.activeComposition, 'place'], [this.fullObjects?.active, 'model']];
+      // model- or share-only reduction leaves that local work running. A
+      // caption draft in the story slot sends its recording to a model.
+      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, this.activeStory?.purpose ?? 'place'], [this.activeOutline, 'place'], [this.activeComposition, 'place'], [this.fullObjects?.active, 'model']];
       const running = work.filter(([item, purpose]) => item?.draftId === draftId
         && (item.sourceIds ?? [item.sourceId]).includes(sourceId) && !allows(policy, purpose)).map(([item]) => item);
       if (running.length > 0) {

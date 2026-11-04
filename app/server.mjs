@@ -15,6 +15,7 @@ import { StoryStore } from './stories.mjs';
 import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
+import { metaTranscriberFromEnv } from './meta-transcribe.mjs';
 import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner, pythonOutlineRunner } from './reconstructions.mjs';
 import { FullObjectStore } from './full-objects.mjs';
 import { OBJECT_IDS } from './arrangements.mjs';
@@ -180,6 +181,7 @@ const VISIT_STORY_PATH = /^\/api\/visit\/stories\/([^/]+)\/audio\.wav$/;
 const VISIT_RECORDING_PATH = /^\/api\/visit\/recordings\/([^/]+)\/audio\.wav$/;
 const PREVIEW_RECORDING_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews\/([^/]+)\/recordings\/([^/]+)\/audio\.wav$/;
 const PREVIEW_STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/shares\/previews\/([^/]+)\/stories\/([^/]+)\/audio\.wav$/;
+const CAPTION_DRAFTS_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/caption-drafts$/;
 const STORIES_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories$/;
 const STORY_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)$/;
 const STORY_ACTION_PATH = /^\/api\/drafts\/([^/]+)\/reconstructions\/([^/]+)\/stories\/([^/]+)\/(audio\.wav|withdraw)$/;
@@ -408,6 +410,7 @@ export function createAppServer({
   outlineRunner = pythonOutlineRunner(),
   outlineTimeoutMs,
   proposalModel = null,
+  captionTranscriber = null,
   prepareModelImage = pythonModelImage(),
   accessStore = new AccessStore({ dataDir }),
   audioDecoder = createAudioDecoder(),
@@ -434,7 +437,7 @@ export function createAppServer({
   const fullObjects = new FullObjectStore({ reconstructions, validateMask: fullObjectMaskValidator, runFullObject });
   reconstructions.fullObjects = fullObjects;
   const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder, prepareRecording: recordingPreparer });
-  const stories = new StoryStore({ reconstructions, audioDecoder });
+  const stories = new StoryStore({ reconstructions, audioDecoder, transcriber: captionTranscriber });
   const intakes = new IntakeStore({ dataDir, drafts: store, verifier: mediaVerifier, placeCommits: placeDeletions });
   const deletions = new PlaceDeletionService({ dataDir, placeDeletions, reconstructions, intakes, accessStore });
   // Pending deletions resume once at startup; an explicit retry is also possible.
@@ -790,6 +793,15 @@ export function createAppServer({
       return;
     }
 
+    // Matched before the story routes, whose ID segment would otherwise take it.
+    const captionDraftsMatch = CAPTION_DRAFTS_PATH.exec(pathname);
+    if (captionDraftsMatch) {
+      const [, draftId, jobId] = captionDraftsMatch;
+      if (!UUID.test(draftId) || !UUID.test(jobId)) throw new RequestError(404, NOT_FOUND);
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      sendJson(res, 201, await stories.draftCaptions(draftId, jobId, owner, await readJsonBody(req)));
+      return;
+    }
     const storiesMatch = STORIES_PATH.exec(pathname);
     const storyMatch = STORY_PATH.exec(pathname);
     const storyActionMatch = STORY_ACTION_PATH.exec(pathname);
@@ -1379,7 +1391,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error(error.message);
     process.exit(1);
   }
-  const app = createAppServer({ proposalModel: metaModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'model-budget.json') }), visitorOrigin: settings?.origin ?? null });
+  const app = createAppServer({
+    proposalModel: metaModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'model-budget.json') }),
+    captionTranscriber: metaTranscriberFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'transcribe-budget.json') }),
+    visitorOrigin: settings?.origin ?? null,
+  });
   listenAll(app, port, settings?.port ?? null).then(() => {
     if (!settings) {
       console.log(`Rehere is running at http://127.0.0.1:${port}/`);

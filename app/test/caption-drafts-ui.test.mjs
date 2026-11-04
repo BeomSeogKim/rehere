@@ -1,0 +1,237 @@
+import assert from 'node:assert/strict';
+import { after, before, beforeEach, describe, it } from 'node:test';
+import { FakeElement } from './fake-dom.mjs';
+import { installViewerShim } from './viewer-shim.mjs';
+
+installViewerShim();
+const { captionCredit, mountStories } = await import('../public/stories.js');
+
+const JOB_URL = '/api/drafts/11111111-1111-4111-8111-111111111111/reconstructions/cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const DRAFTS_URL = `${JOB_URL}/stories/caption-drafts`;
+const VOICE = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const DRAFT_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const ASK = 'Draft captions with Muse Voice Transcribe';
+const SEND = 'Send the recording for a draft';
+
+const json = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => body });
+const settle = async () => {
+  for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve));
+};
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const voice = (model = true) => ({ id: VOICE, kind: 'voice', provider: 'Owner', permissions: { place: true, model, share: false }, policy: { revision: 0, stopped: false } });
+const draftAnswer = () => json(201, {
+  draft: {
+    id: DRAFT_ID, model: 'muse-voice-transcribe-1.0', modelLabel: 'Muse Voice Transcribe', voiceSourceId: VOICE, voiceSha256: 'a'.repeat(64),
+    view: { kind: 'version', version: 1, variantId: null, eraRevision: null }, durationMs: 2000, confirmed: false,
+    cues: [{ startMs: 0, endMs: 1200, text: 'Synthetic fixture speech.' }, { startMs: 1400, endMs: 2000, text: 'Second part.' }],
+  },
+});
+
+let requests;
+let routes;
+
+before(() => {
+  globalThis.document = { createElement: (tag) => new FakeElement(tag) };
+  globalThis.fetch = (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({ url, method: options.method ?? 'GET', body });
+    const handler = routes[`${options.method ?? 'GET'} ${url}`];
+    return handler ? handler(body) : Promise.resolve(json(404, { error: 'Not found.' }));
+  };
+});
+
+after(() => {
+  delete globalThis.document;
+  delete globalThis.fetch;
+});
+
+beforeEach(() => {
+  requests = [];
+  routes = {
+    [`GET ${JOB_URL}/stories`]: () => Promise.resolve(json(200, { stories: [] })),
+    [`GET ${JOB_URL}/history`]: () => Promise.resolve(json(200, [{ version: 1, blocked: false }, { version: 2, blocked: false }])),
+    [`GET ${JOB_URL}/collaboration`]: () => Promise.resolve(json(200, { variants: [] })),
+  };
+});
+
+async function mount({ sources = [voice()] } = {}) {
+  const root = new FakeElement('div');
+  const view = mountStories(root, { jobUrl: JOB_URL, sources, editor: () => ({ version: 2 }), durationHintMs: () => 2000 });
+  await settle();
+  const find = (predicate) => root.findAll(predicate);
+  const button = (text) => find((node) => node.tag === 'button' && node.textContent === text)[0];
+  const viewSelect = () => find((node) => node.tag === 'select')[1];
+  const rows = () => find((node) => node.className === 'story-cue-row');
+  const cueTexts = () => rows().map((row) => row.findAll((node) => node.tag === 'textarea')[0].value);
+  const confirm = () => find((node) => node.tag === 'input' && node.type === 'checkbox')[0];
+  const note = () => find((node) => node.role === 'status' && node.tag === 'p').map((node) => node.textContent).join(' ');
+  const chooseView = (key) => {
+    viewSelect().value = key;
+    viewSelect().dispatch('change');
+  };
+  const requestDraft = () => {
+    button(ASK).dispatch('click');
+    button(SEND).dispatch('click');
+  };
+  return { root, view, find, button, rows, cueTexts, confirm, note, chooseView, requestDraft };
+}
+
+const draftPosts = () => requests.filter((r) => r.method === 'POST' && r.url === DRAFTS_URL);
+const storyPosts = () => requests.filter((r) => r.method === 'POST' && r.url === `${JOB_URL}/stories`);
+
+describe('caption draft composer', () => {
+  it('is offered only for a whole recording whose provider allowed model processing', async () => {
+    const without = await mount({ sources: [voice(false)] });
+    assert.equal(without.button(ASK).hidden, true);
+    without.view.dispose();
+    const ui = await mount();
+    assert.equal(ui.button(ASK).hidden, false);
+    const [whole, excerpt] = ui.find((node) => node.type === 'radio');
+    whole.checked = false;
+    excerpt.checked = true;
+    excerpt.dispatch('change');
+    assert.equal(ui.button(ASK).hidden, true);
+  });
+
+  it('sends only after an explicit confirmation, applies unconfirmed cues and credits the draft on save', async () => {
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(draftAnswer());
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.button(ASK).dispatch('click');
+    assert.equal(draftPosts().length, 0, 'asking shows what is sent, nothing more');
+    ui.confirm().checked = true;
+    ui.button(SEND).dispatch('click');
+    await settle();
+    const [sent] = draftPosts();
+    assert.deepEqual(sent.body, { requestId: sent.body.requestId, voiceSourceId: VOICE, view: { kind: 'version', version: 1, variantId: null, eraRevision: null } });
+    assert.deepEqual(ui.cueTexts(), ['Synthetic fixture speech.', 'Second part.']);
+    assert.equal(ui.confirm().checked, false, 'a draft is never pre-confirmed');
+    assert.match(ui.note(), /may be wrong/);
+
+    ui.find((node) => node.tag === 'input' && node.type === 'text')[0].value = 'Morning bell';
+    ui.confirm().checked = true;
+    routes[`POST ${JOB_URL}/stories`] = () => Promise.reject(new TypeError('network'));
+    ui.button('Save story').dispatch('click');
+    await settle();
+    const [first] = storyPosts();
+    assert.equal(first.body.captionDraftId, DRAFT_ID);
+    assert.deepEqual(first.body.cues, [{ startMs: 0, endMs: 1200, text: 'Synthetic fixture speech.' }, { startMs: 1400, endMs: 2000, text: 'Second part.' }]);
+    // An unresolved save repeats exactly the original body, draft included.
+    routes[`POST ${JOB_URL}/stories`] = () => Promise.resolve(json(201, {}));
+    ui.button('Retry the earlier save').dispatch('click');
+    await settle();
+    assert.deepEqual(storyPosts()[1].body, first.body);
+  });
+
+  it('asks for confirmation again after any edit to drafted captions', async () => {
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(draftAnswer());
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    ui.confirm().checked = true;
+    const text = ui.rows()[0].findAll((node) => node.tag === 'textarea')[0];
+    text.value = 'Corrected by the owner.';
+    text.dispatch('input');
+    assert.equal(ui.confirm().checked, false);
+    ui.confirm().checked = true;
+    ui.button('Add a caption').dispatch('click');
+    assert.equal(ui.confirm().checked, false);
+  });
+
+  it('never applies a late draft over caption edits made while it was pending', async () => {
+    const answer = deferred();
+    routes[`POST ${DRAFTS_URL}`] = () => answer.promise;
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    assert.equal(ui.button(ASK).disabled, true, 'one request at a time');
+    const text = ui.rows()[0].findAll((node) => node.tag === 'textarea')[0];
+    text.value = 'Written by hand meanwhile.';
+    answer.resolve(draftAnswer());
+    await settle();
+    assert.deepEqual(ui.cueTexts(), ['Written by hand meanwhile.']);
+    assert.match(ui.note(), /was not applied/);
+    ui.find((node) => node.tag === 'input' && node.type === 'text')[0].value = 'Morning bell';
+    ui.rows()[0].findAll((node) => node.tag === 'input').forEach((input, index) => { input.value = ['0:00', '0:01.0'][index]; });
+    ui.confirm().checked = true;
+    routes[`POST ${JOB_URL}/stories`] = () => Promise.resolve(json(201, {}));
+    ui.button('Save story').dispatch('click');
+    await settle();
+    assert.equal(Object.hasOwn(storyPosts()[0].body, 'captionDraftId'), false);
+  });
+
+  it('never applies a late draft after the view or recording part changed', async () => {
+    const answer = deferred();
+    routes[`POST ${DRAFTS_URL}`] = () => answer.promise;
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    ui.chooseView('version:2');
+    answer.resolve(draftAnswer());
+    await settle();
+    assert.deepEqual(ui.cueTexts(), ['']);
+    assert.match(ui.note(), /was not applied/);
+  });
+
+  it('drops draft credit when the view changes after a draft was applied', async () => {
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(draftAnswer());
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    ui.chooseView('version:2');
+    assert.match(ui.note(), /saved as written by you/);
+    ui.find((node) => node.tag === 'input' && node.type === 'text')[0].value = 'Morning bell';
+    ui.confirm().checked = true;
+    routes[`POST ${JOB_URL}/stories`] = () => Promise.resolve(json(201, {}));
+    ui.button('Save story').dispatch('click');
+    await settle();
+    assert.equal(Object.hasOwn(storyPosts()[0].body, 'captionDraftId'), false);
+  });
+
+  it('ignores an answer that arrives after the composer closed', async () => {
+    const answer = deferred();
+    routes[`POST ${DRAFTS_URL}`] = () => answer.promise;
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    ui.view.dispose();
+    answer.resolve(draftAnswer());
+    await settle();
+    assert.equal(ui.root.children.length, 0);
+  });
+
+  it('repeats the same request ID after an unknown outcome, and a fresh one after a known failure', async () => {
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.reject(new TypeError('network'));
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    assert.match(ui.note(), /never sent to the model twice/);
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(json(422, { error: 'No speech was recognized in this recording. Write the captions yourself.' }));
+    ui.requestDraft();
+    await settle();
+    assert.match(ui.note(), /No speech was recognized/);
+    ui.requestDraft();
+    await settle();
+    const [first, second, third] = draftPosts();
+    assert.equal(second.body.requestId, first.body.requestId);
+    assert.notEqual(third.body.requestId, first.body.requestId);
+  });
+
+  it('credits AI drafting and the reviewing owner in saved stories', async () => {
+    assert.equal(captionCredit(null, 'Owner'), 'Captions written by Owner');
+    assert.equal(captionCredit({ model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe' }, 'Owner'), 'Captions AI-drafted (Muse Voice Transcribe), reviewed by Owner');
+  });
+});

@@ -15,7 +15,7 @@ A recording needs current place-use permission to be used privately. It does
 not need a model-processing grant for deterministic local audio conversion.
 Choose the saved version or alternative, review its time assertion if any,
 write captions for the meaningful audible content, and confirm them before
-saving. Version numbers do not establish a date. A changed time assertion
+saving. Captions may instead start from an [AI draft](#draft-captions-with-ai). Version numbers do not establish a date. A changed time assertion
 requires refreshing and explicitly reviewing the context again.
 
 By default the playback copy contains the complete first audio track. To use
@@ -42,12 +42,40 @@ request to reconcile it; a busy response does not prove failure. There are
 no automatic retries. A saved story is immutable: a correction or new context
 requires another explicitly saved story. Withdraw an old story to stop its use.
 
+## Draft captions with AI
+
+For a whole recording of at most 60 seconds, the owner can ask Muse Voice
+Transcribe for a caption draft instead of starting from nothing. It is offered
+only when the recording's provider allowed model processing, and the recording
+is sent only after a second, explicit confirmation. Its spoken turns become
+editable cues with their start and end times. Silent turns are dropped; turns
+that overlap, run out of order or end more than 100 ms past the recording
+reject the whole draft rather than being repaired. Nothing else is chained to
+the draft: it never starts a scene proposal.
+
+A draft is bound to the recording's checksum and the chosen saved view and
+revision. The server checks the story context and the recording's model use
+when the request is admitted, immediately before sending and before returning
+the draft; a withdrawal or restriction during the request discards the answer.
+The draft text is returned once and not kept, so a lost draft must be requested
+again or written by hand.
+
+The draft lands in the caption editor unconfirmed. A draft that arrives after
+the recording, view, part or captions changed is not applied, and editing
+drafted captions clears the confirmation again. Saving sends the draft's ID; the
+server accepts it only for a successful draft of the same whole recording and
+view. The saved story then credits its captions as AI-drafted by Muse Voice
+Transcribe and reviewed by the owner, for the owner and in shared visits. That
+credit is part of the shared story's pinned content, so changing it suspends
+the visit. Stories saved without a draft keep their earlier record and pin.
+
 ## Listen and read
 
 Playback starts only after a Play action. Pause and Stop are separate controls;
 all captions remain readable as a transcript. The currently active cue is
-identified with text rather than color alone. Captions are human supplied and
-not automatically transcribed or independently verified. Confirming captions
+identified with text rather than color alone. Captions are human supplied, or
+an AI draft reviewed by the owner and credited as such; they are not
+independently verified. Confirming captions
 means they convey the selected playback's meaningful audible content; unrelated
 commentary does not substitute for captions.
 
@@ -101,7 +129,7 @@ anonymization: spoken information and the voice itself remain identifying.
 See the official [protocol](https://ffmpeg.org/ffmpeg-protocols.html) and
 [format](https://ffmpeg.org/ffmpeg-formats.html) documentation for the transport
 and raw PCM controls. The selected limits and storage/permission checks are
-application decisions. Hosted transcription, contributor-recording excerpts,
+application decisions. Unreviewed automatic captions, contributor-recording excerpts,
 inferred story matching and arbitrary track selection are not included.
 
 One server process owns this local workspace. Power-loss durability, hosted

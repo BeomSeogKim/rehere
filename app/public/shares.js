@@ -375,7 +375,7 @@ export function mountShares(container, bridge) {
     storyList.replaceChildren(
       ...(storyBoxes.length
         ? storyBoxes.map(({ box, story }) =>
-            el('label', {}, [box, ` “${story.title}” · ${story.view?.label ?? 'saved view'} · recording by ${story.voice?.provider || 'an unnamed provider'}, captions by ${story.captionAuthor?.displayName || 'the owner'}`]),
+            el('label', {}, [box, ` “${story.title}” · ${story.view?.label ?? 'saved view'} · recording by ${story.voice?.provider || 'an unnamed provider'}, captions ${story.captionDraft ? `AI-drafted (${story.captionDraft.label || 'Muse Voice Transcribe'}), reviewed ` : ''}by ${story.captionAuthor?.displayName || 'the owner'}`]),
           )
         : [el('p', { className: 'hint', textContent: 'No recorded story belongs to the chosen views.' })]),
     );
