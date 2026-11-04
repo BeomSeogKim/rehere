@@ -70,8 +70,7 @@ describe('the entry page and its pinned photographs', () => {
       'Three photographs of a place that is gone. One has been rebuilt as a partial scene.',
       'The Grand Canyon Lodge on the North Rim was lost in the Dragon Bravo Fire in July 2025.',
       'National Park Service, July 13, 2025',
-      'Photograph only. No scene has been built from it yet.',
-      'Photograph only. No scene has been built from it.',
+      'Shown here as a photograph only; no reconstructed scene is included for this stop.',
       'The one partial scene in this demo: only what the camera saw is rebuilt, and unseen surfaces stay empty. One owner-approved change turns the chest by 5 degrees; the earlier version is one click away.',
       'Notes, the voice and the contributor in this demo are labelled synthetic test material; all roles are played by the demo operator.',
       'This is a read-only offline copy: withdrawal is enforced only in the running app.',
@@ -80,6 +79,8 @@ describe('the entry page and its pinned photographs', () => {
     ]) assert.ok(html.includes(text), text);
     assert.doesNotMatch(html, /\bhero\b|stitch|validated|participant|Muse Image|live backend|public domain|\b(left|right)\b/i);
     assert.doesNotMatch(html, /Brand|ABC15/, 'the video-only quotation is not on the site');
+    assert.equal(html.split('Shown here as a photograph only; no reconstructed scene is included for this stop.').length - 1, 2, 'both photograph-only stops carry the scoped sentence');
+    assert.doesNotMatch(html, /No scene has been built/, 'no claim that a build has never happened');
   });
 
   it('accepts the real page and refuses scripts, styles, handlers, other links, missing alt text or captions', async () => {
