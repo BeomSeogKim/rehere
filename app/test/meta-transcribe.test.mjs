@@ -112,19 +112,22 @@ describe('the Muse Voice Transcribe client', () => {
     assert.equal(fetched, 2);
   });
 
-  it('settles a provider error at zero, as documented unbilled, but keeps unknown and unusable outcomes reserved', async () => {
+  it('keeps the reservation for every dispatched request, including error responses and unusable answers', async () => {
     const { ledger: budget } = await ledger();
     const answers = [
       () => new Response('{"error":{"type":"invalid_request"}}', { status: 400 }),
-      () => json({ turns: [turn('t1', 0, 5000, 'past the end')] }),
+      () => new Response('bad gateway', { status: 502 }),
+      () => new Response('', { status: 504 }),
       () => new Response('not json', { status: 200 }),
+      () => json({ turns: [turn('t1', 0, 5000, 'past the end')] }),
       () => { throw new TypeError('network'); },
     ];
     const transcribe = createMetaTranscriber({ apiKey: 'k', ledger: budget, fetch: async () => answers.shift()() });
     const results = [];
-    for (let index = 0; index < 4; index++) results.push(await transcribe({ wav: WAV, durationMs: 1000, admit: admitNow }));
-    assert.deepEqual(results.map(({ reason, unknown }) => [reason, unknown === true]), [['provider', false], ['invalid', false], ['invalid', false], ['provider', true]]);
-    assert.deepEqual((await budget.read()).entries.map((entry) => entry.state), ['settled', 'reserved', 'reserved', 'reserved']);
+    for (let index = 0; index < 6; index++) results.push(await transcribe({ wav: WAV, durationMs: 1000, admit: admitNow }));
+    assert.deepEqual(results.map(({ reason, unknown, call }) => [reason, unknown === true, call.dispatched, call.httpStatus]),
+      [['provider', false, true, 400], ['provider', false, true, 502], ['provider', false, true, 504], ['invalid', false, true, 200], ['invalid', false, true, 200], ['provider', true, true, null]]);
+    assert.deepEqual((await budget.read()).entries.map((entry) => entry.state), Array(6).fill('reserved'));
   });
 
   it('times out once with no retry and keeps the reservation', async () => {

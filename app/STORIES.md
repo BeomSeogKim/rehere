@@ -53,8 +53,8 @@ that overlap, run out of order or end more than 100 ms past the recording
 reject the whole draft rather than being repaired. Nothing else is chained to
 the draft: it never starts a scene proposal.
 
-A draft is bound to the recording's checksum and the chosen saved view and
-revision. The server checks the story context and the recording's model use
+A draft is bound to the recording's checksum, the chosen saved view and
+revision, and in a two-object scene the object the story will be about. The server checks the story context and the recording's model use
 when the request is admitted, immediately before sending and before returning
 the draft; a withdrawal or restriction during the request discards the answer.
 The draft text is returned once and not kept, so a lost draft must be requested
@@ -63,8 +63,8 @@ again or written by hand.
 The draft lands in the caption editor unconfirmed. A draft that arrives after
 the recording, view, part or captions changed is not applied, and editing
 drafted captions clears the confirmation again. Saving sends the draft's ID; the
-server accepts it only for a successful draft of the same whole recording and
-view. The saved story then credits its captions as AI-drafted by Muse Voice
+server accepts it only for a successful draft of the same whole recording,
+view and object. The saved story then credits its captions as AI-drafted by Muse Voice
 Transcribe and reviewed by the owner, for the owner and in shared visits. That
 credit is part of the shared story's pinned content, so changing it suspends
 the visit. Stories saved without a draft keep their earlier record and pin.

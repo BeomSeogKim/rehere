@@ -142,10 +142,12 @@ export function parseStoryRequest(body, twoObjects = false) {
   };
 }
 
-export function parseCaptionDraftRequest(body) {
-  const view = exactKeys(body, ['requestId', 'voiceSourceId', 'view']) ? parseView(body.view) : null;
-  if (!view || !isId(body.requestId) || !isId(body.voiceSourceId)) throw fail(400, UNREADABLE);
-  return { requestId: body.requestId, voiceSourceId: body.voiceSourceId, view };
+// A two-object scene's draft also names the object its story will be about.
+export function parseCaptionDraftRequest(body, twoObjects = false) {
+  const keys = ['requestId', 'voiceSourceId', 'view', ...(twoObjects ? ['targetId'] : [])];
+  const view = exactKeys(body, keys) ? parseView(body.view) : null;
+  if (!view || !isId(body.requestId) || !isId(body.voiceSourceId) || (twoObjects && !OBJECT_IDS.includes(body.targetId))) throw fail(400, UNREADABLE);
+  return { requestId: body.requestId, voiceSourceId: body.voiceSourceId, view, ...(twoObjects && { targetId: body.targetId }) };
 }
 
 // The object a story is about: the owner's named object, or the one
@@ -166,7 +168,7 @@ const draftAttribution = (story) => story.captionDraft && { captionDraft: { mode
 const draftView = (record, cues) => ({
   draft: {
     id: record.id, model: record.call.model, modelLabel: record.call.modelLabel, voiceSourceId: record.voiceSourceId, voiceSha256: record.voiceSha256,
-    view: { ...record.view }, durationMs: record.durationMs, cues: cues.map((cue) => ({ ...cue })), confirmed: false,
+    view: { ...record.view }, targetId: record.target, durationMs: record.durationMs, cues: cues.map((cue) => ({ ...cue })), confirmed: false,
   },
 });
 // Visitor snapshots pin a story's content. AI draft provenance joins the pin
@@ -250,13 +252,13 @@ export class StoryStore {
   }
 
   // The completed AI draft a new story's captions started from. It must be a
-  // successful draft of this exact recording and saved view revision; a story
+  // successful draft of this exact recording, saved view revision and object; a story
   // keeps only its ID, model and label.
   #reviewedDraft(manifest, captionDraftId, context) {
     const record = draftsOf(manifest).find((item) => item.id === captionDraftId);
     const matches = record?.status === 'drafted' && record.voiceSourceId === context.voice.sourceId && record.voiceSha256 === context.voice.sha256
-      && JSON.stringify(record.view) === JSON.stringify(context.view) && !context.voice.sourceRange;
-    if (!matches) throw fail(409, 'This AI caption draft does not belong to the chosen recording and saved view. Request a new draft or write the captions yourself.');
+      && JSON.stringify(record.view) === JSON.stringify(context.view) && record.target === context.target && !context.voice.sourceRange;
+    if (!matches) throw fail(409, 'This AI caption draft does not belong to the chosen recording, saved view and object. Request a new draft or write the captions yourself.');
     return { id: record.id, model: record.call.model, label: record.call.modelLabel };
   }
 
@@ -278,11 +280,11 @@ export class StoryStore {
   // call metadata are kept, not its text.
   async draftCaptions(draftId, jobId, principal, body) {
     this.#owner(principal);
-    const request = parseCaptionDraftRequest(body);
-    const { requestId, ...values } = request;
-    const requestDigest = sha256(JSON.stringify(values));
     const r = this.reconstructions;
     await r.recover();
+    const request = parseCaptionDraftRequest(body, isTwoObject(await this.#scene(draftId, jobId)));
+    const { requestId, ...values } = request;
+    const requestDigest = sha256(JSON.stringify(values));
     const admitted = await r.serialize(async () => {
       const manifest = await this.#scene(draftId, jobId);
       const existing = draftsOf(manifest).find((item) => item.requestId === requestId);
@@ -298,7 +300,7 @@ export class StoryStore {
       const { context, recording } = await this.#draftContext(manifest, request);
       const record = {
         id: randomUUID(), requestId, requestDigest, status: 'pending', reason: null, voiceSourceId: context.voice.sourceId, voiceSha256: context.voice.sha256,
-        view: { ...request.view }, durationMs: null, cueCount: null, call: null, createdAt: new Date().toISOString(), completedAt: null,
+        view: { ...request.view }, target: context.target, durationMs: null, cueCount: null, call: null, createdAt: new Date().toISOString(), completedAt: null,
       };
       await r.update(manifest, { captionDrafts: [...draftsOf(manifest), record] });
       // Only the recording is sent, so only its model use aborts the call.

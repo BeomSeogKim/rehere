@@ -5,6 +5,7 @@ import { installViewerShim } from './viewer-shim.mjs';
 
 installViewerShim();
 const { captionCredit, mountStories } = await import('../public/stories.js');
+const { createStoryPlayer } = await import('../public/story-player.js');
 
 const JOB_URL = '/api/drafts/11111111-1111-4111-8111-111111111111/reconstructions/cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const DRAFTS_URL = `${JOB_URL}/stories/caption-drafts`;
@@ -61,9 +62,9 @@ beforeEach(() => {
   };
 });
 
-async function mount({ sources = [voice()] } = {}) {
+async function mount({ sources = [voice()], objects } = {}) {
   const root = new FakeElement('div');
-  const view = mountStories(root, { jobUrl: JOB_URL, sources, editor: () => ({ version: 2 }), durationHintMs: () => 2000 });
+  const view = mountStories(root, { jobUrl: JOB_URL, sources, editor: () => ({ version: 2 }), durationHintMs: () => 2000, objects });
   await settle();
   const find = (predicate) => root.findAll(predicate);
   const button = (text) => find((node) => node.tag === 'button' && node.textContent === text)[0];
@@ -183,20 +184,97 @@ describe('caption draft composer', () => {
     assert.match(ui.note(), /was not applied/);
   });
 
-  it('drops draft credit when the view changes after a draft was applied', async () => {
+  it('never saves drafted captions as the owner’s own after the choices change', async () => {
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(draftAnswer());
+    routes[`POST ${JOB_URL}/stories`] = () => Promise.resolve(json(201, {}));
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    ui.find((node) => node.tag === 'input' && node.type === 'text')[0].value = 'Morning bell';
+    ui.chooseView('version:2');
+    assert.match(ui.note(), /AI draft of a different recording, view, part or object/);
+    ui.confirm().checked = true;
+    ui.button('Save story').dispatch('click');
+    await settle();
+    assert.equal(storyPosts().length, 0);
+    assert.match(ui.find((node) => node.className === 'form-message')[0].textContent, /discard them, before saving/);
+
+    // Returning to the draft's choices restores its credit.
+    ui.chooseView('version:1');
+    ui.confirm().checked = true;
+    ui.button('Save story').dispatch('click');
+    await settle();
+    assert.equal(storyPosts()[0].body.captionDraftId, DRAFT_ID);
+  });
+
+  it('discards drafted captions explicitly, leaving an empty caption to write by hand', async () => {
     routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(draftAnswer());
     const ui = await mount();
     ui.chooseView('version:1');
     ui.requestDraft();
     await settle();
     ui.chooseView('version:2');
-    assert.match(ui.note(), /saved as written by you/);
+    ui.button('Discard the AI-drafted captions').dispatch('click');
+    assert.deepEqual(ui.cueTexts(), ['']);
+    assert.equal(ui.button('Discard the AI-drafted captions').hidden, true);
+    const row = ui.rows()[0];
+    row.findAll((node) => node.tag === 'input').forEach((input, index) => { input.value = ['0:00', '0:01.0'][index]; });
+    row.findAll((node) => node.tag === 'textarea')[0].value = 'Written by hand.';
     ui.find((node) => node.tag === 'input' && node.type === 'text')[0].value = 'Morning bell';
     ui.confirm().checked = true;
     routes[`POST ${JOB_URL}/stories`] = () => Promise.resolve(json(201, {}));
     ui.button('Save story').dispatch('click');
     await settle();
     assert.equal(Object.hasOwn(storyPosts()[0].body, 'captionDraftId'), false);
+  });
+
+  it('never applies a late draft after a change that was later undone', async () => {
+    for (const change of [
+      (ui) => { ui.chooseView('version:2'); ui.chooseView('version:1'); },
+      (ui) => {
+        const text = ui.rows()[0].findAll((node) => node.tag === 'textarea')[0];
+        text.value = 'typed';
+        text.dispatch('input');
+        text.value = '';
+        text.dispatch('input');
+      },
+    ]) {
+      const answer = deferred();
+      routes[`POST ${DRAFTS_URL}`] = () => answer.promise;
+      const ui = await mount();
+      ui.chooseView('version:1');
+      ui.requestDraft();
+      await settle();
+      change(ui);
+      answer.resolve(draftAnswer());
+      await settle();
+      assert.deepEqual(ui.cueTexts(), ['']);
+      assert.match(ui.note(), /was not applied/);
+      ui.view.dispose();
+    }
+  });
+
+  it('admits one draft request even when the send control fires twice', async () => {
+    const answer = deferred();
+    routes[`POST ${DRAFTS_URL}`] = () => answer.promise;
+    const ui = await mount();
+    ui.chooseView('version:1');
+    ui.button(ASK).dispatch('click');
+    const send = ui.button(SEND);
+    send.dispatch('click');
+    send.dispatch('click');
+    answer.resolve(draftAnswer());
+    await settle();
+    assert.equal(draftPosts().length, 1);
+  });
+
+  it('labels a drafted story’s captions as AI-drafted in the player', () => {
+    const story = { id: 's', cues: [{ startMs: 0, endMs: 900, text: 'Synthetic fixture speech.' }], durationMs: 1000 };
+    const text = (item) => createStoryPlayer({ story: item, fetchAudio: () => Promise.reject(new Error('unused')) }).element.textContent;
+    assert.match(text({ ...story, captionDraft: { model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe' } }), /Captions \(AI-drafted, then reviewed by a person; not checked by Rehere\):/);
+    assert.doesNotMatch(text({ ...story, captionDraft: { model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe' } }), /written by a person/);
+    assert.match(text(story), /Captions \(written by a person, not checked by Rehere\):/);
   });
 
   it('ignores an answer that arrives after the composer closed', async () => {
@@ -228,6 +306,25 @@ describe('caption draft composer', () => {
     const [first, second, third] = draftPosts();
     assert.equal(second.body.requestId, first.body.requestId);
     assert.notEqual(third.body.requestId, first.body.requestId);
+  });
+
+  it('binds a two-object draft to the chosen object and drops its credit when the object changes', async () => {
+    routes[`POST ${DRAFTS_URL}`] = () => Promise.resolve(draftAnswer());
+    const ui = await mount({ objects: [{ id: 'object-1', name: 'Counter' }, { id: 'object-2', name: 'Flour stack' }] });
+    ui.chooseView('version:1');
+    ui.requestDraft();
+    await settle();
+    assert.equal(draftPosts().length, 0);
+    assert.match(ui.note(), /saved view and object first/);
+    const target = ui.find((node) => node.tag === 'select')[2];
+    target.value = 'object-1';
+    target.dispatch('change');
+    ui.requestDraft();
+    await settle();
+    assert.equal(draftPosts()[0].body.targetId, 'object-1');
+    target.value = 'object-2';
+    target.dispatch('change');
+    assert.match(ui.note(), /AI draft of a different recording, view, part or object/);
   });
 
   it('credits AI drafting and the reviewing owner in saved stories', async () => {

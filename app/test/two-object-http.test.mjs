@@ -551,4 +551,38 @@ describe('two-object contributions, sharing and stories', () => {
       await app.close();
     }
   });
+
+  it('binds an AI caption draft to the named object and refuses it for the other one', async () => {
+    const decoder = async () => ({ pcm: Buffer.alloc(32_000), sampleRate: 16_000, channels: 1, bitsPerSample: 16, durationMs: 1000 });
+    let sent = 0;
+    // A provider double behind the real admission callback; nothing reaches the network.
+    const captionTranscriber = async ({ admit }) => {
+      await admit(() => { sent += 1; });
+      return {
+        ok: true, cues: [{ startMs: 0, endMs: 900, text: 'Synthetic fixture speech.' }],
+        call: { model: 'muse-voice-transcribe-1.0', modelLabel: 'Muse Voice Transcribe', dispatched: true, httpStatus: 200, providerRequestId: null, providerSessionId: null, latencyMs: 1, admittedDurationMs: 1000, estimatedUsd: 0 },
+      };
+    };
+    const { app, owner } = await workspace({ audioDecoder: decoder, captionTranscriber });
+    try {
+      const place = await twoObjectScene(owner);
+      const drafts = `${place.scene}/stories/caption-drafts`;
+      const request = { voiceSourceId: place.draft.voice.sourceId, view: { kind: 'version', version: 1, variantId: null, eraRevision: null } };
+      assert.equal((await owner.post(drafts, { requestId: randomUUID(), ...request })).status, 400);
+      assert.equal((await owner.post(drafts, { requestId: randomUUID(), ...request, targetId: 'object-3' })).status, 400);
+      assert.equal(sent, 0);
+      const made = await owner.post(drafts, { requestId: randomUUID(), ...request, targetId: 'object-1' });
+      assert.equal(made.status, 201);
+      const { draft } = await made.json();
+      assert.equal(draft.targetId, 'object-1');
+      const story = { ...request, title: 'Synthetic fixture story', cues: draft.cues, captionConfirmed: true, captionDraftId: draft.id };
+      assert.equal((await owner.post(`${place.scene}/stories`, { requestId: randomUUID(), ...story, targetId: 'object-2' })).status, 409);
+      const created = await owner.post(`${place.scene}/stories`, { requestId: randomUUID(), ...story, targetId: 'object-1' });
+      assert.equal(created.status, 201);
+      assert.equal((await created.json()).captionDraft.label, 'Muse Voice Transcribe');
+      assert.equal(sent, 1);
+    } finally {
+      await app.close();
+    }
+  });
 });

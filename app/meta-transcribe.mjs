@@ -73,8 +73,8 @@ async function readLimited(response, maxBytes) {
 // Every outcome carries `call`: whether a request was dispatched, its HTTP
 // status, the provider's request and session IDs when it returned them (null
 // otherwise) and the latency. The API reports no usage, so none is invented:
-// a dispatched request keeps its full estimated reservation unless the
-// provider answered with an error, which it documents as not billed.
+// a dispatched request always keeps its full estimated reservation, because an
+// error response alone does not establish that no audio was processed.
 export function createMetaTranscriber({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, now = Date.now }) {
   if (!apiKey) throw new Error('A model API key is required.');
   let busy = false;
@@ -137,7 +137,6 @@ export function createMetaTranscriber({ apiKey, ledger, fetch = globalThis.fetch
         ...estimate, dispatched: true, httpStatus: answer.status, providerRequestId: id(answer.requestId), providerSessionId: id(answer.json?.sessionId), latencyMs: now() - started,
       });
       if (!answer.ok) {
-        await ledger.settle(reservation, 0);
         console.error(`transcription failed: HTTP ${answer.status}`);
         return { ...failure('provider'), call: record };
       }

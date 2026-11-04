@@ -150,12 +150,17 @@ export function mountStories(container, bridge) {
     el('div', { className: 'actions access-links' }, [draftSend, draftCancel]),
   ]);
   const draftNote = el('p', { className: 'hint', role: 'status' });
-  const draftControls = el('div', {}, [el('div', { className: 'actions access-links' }, [draftAsk]), draftConfirm, draftNote]);
-  // pendingDraft: the request in flight and exactly what the form held when it
-  // was sent. appliedDraft: the draft the current cues started from.
+  const draftDiscard = el('button', { type: 'button', className: 'secondary', textContent: 'Discard the AI-drafted captions', hidden: true });
+  const draftControls = el('div', {}, [el('div', { className: 'actions access-links' }, [draftAsk]), draftConfirm, draftNote, el('div', { className: 'actions' }, [draftDiscard])]);
+  // pendingDraft: the request in flight, with the form's choices, captions and
+  // edit epoch when it was sent. appliedDraft: the draft the current cues
+  // started from and the choices it belongs to. draftEpoch counts every
+  // caption edit and every choice change, so an edit that was later undone
+  // still blocks a late answer.
   let pendingDraft = null;
   let draftRetry = null;
   let appliedDraft = null;
+  let draftEpoch = 0;
   const confirmed = el('input', { type: 'checkbox' });
   const save = el('button', { type: 'button', textContent: 'Save story' });
   const abandon = el('button', { type: 'button', className: 'secondary', textContent: 'Stop waiting for the earlier save', hidden: true });
@@ -231,11 +236,18 @@ export function mountStories(container, bridge) {
 
   // Any edit to captions that started from a draft needs a fresh confirmation.
   function cuesEdited() {
+    draftEpoch += 1;
     if (appliedDraft) confirmed.checked = false;
   }
 
   const voiceOf = (id) => bridge.sources.find((record) => record.id === id && record.kind === 'voice');
-  const draftSelection = () => JSON.stringify({ voiceSourceId: voiceSelect.value, view: viewSelect.value, whole: whole.checked, target: targetSelect?.value ?? null });
+  const draftSelection = () => {
+    const choice = choices.find((entry) => entry.key === viewSelect.value);
+    const view = choice ? { kind: choice.kind, version: choice.version, variantId: choice.variantId, eraRevision: choice.eraRevision } : null;
+    return JSON.stringify({ voiceSourceId: voiceSelect.value, view, whole: whole.checked, target: targetSelect?.value ?? null });
+  };
+  // Drafted captions shown under other choices than their draft's.
+  const draftMismatch = () => Boolean(appliedDraft) && appliedDraft.selection !== draftSelection();
 
   function renderDraft() {
     const record = voiceOf(voiceSelect.value);
@@ -246,28 +258,46 @@ export function mountStories(container, bridge) {
     if (!offered) draftConfirm.hidden = true;
   }
 
-  // A draft applies only to the exact recording, view and part chosen, so a
-  // different choice ends the attribution of captions already drafted.
+  // A draft belongs only to the exact recording, view, part and object chosen.
+  // Its captions are never relabelled as the owner's own: under other choices
+  // they cannot be saved until those choices return or the captions are
+  // discarded or replaced by a new draft.
   function draftContextChanged() {
-    if (appliedDraft && appliedDraft.selection !== draftSelection()) {
-      appliedDraft = null;
-      draftNote.textContent = 'The recording, view or part changed after the AI draft was applied. The captions in the form will be saved as written by you; request a new draft if you want AI drafting credited.';
-    }
+    draftEpoch += 1;
+    renderDraftMismatch();
     renderDraft();
   }
 
+  function renderDraftMismatch() {
+    draftDiscard.hidden = !appliedDraft;
+    if (draftMismatch()) draftNote.textContent = 'The captions in the form are an AI draft of a different recording, view, part or object. Choose that again, or discard them, before saving.';
+    else if (appliedDraft && draftNote.textContent.startsWith('The captions in the form are an AI draft')) draftNote.textContent = '';
+  }
+
+  function discardDraft() {
+    appliedDraft = null;
+    draftEpoch += 1;
+    confirmed.checked = false;
+    cueRows.replaceChildren();
+    addCueRow();
+    draftDiscard.hidden = true;
+    draftNote.textContent = 'The AI-drafted captions were discarded.';
+  }
+
   async function sendDraft() {
+    if (pendingDraft) return;
     const choice = choices.find((entry) => entry.key === viewSelect.value);
-    if (!choice) {
-      draftNote.textContent = 'Choose the saved view first; the draft is bound to it.';
+    if (!choice || (targetSelect && !targetSelect.value)) {
+      draftNote.textContent = `Choose the saved view${targetSelect ? ' and object' : ''} first; the draft is bound to ${targetSelect ? 'them' : 'it'}.`;
       return;
     }
     const body = {
       requestId: draftRetry?.selection === draftSelection() ? draftRetry.requestId : crypto.randomUUID(),
       voiceSourceId: voiceSelect.value,
       view: { kind: choice.kind, version: choice.version, variantId: choice.variantId, eraRevision: choice.eraRevision },
+      ...(targetSelect ? { targetId: targetSelect.value } : {}),
     };
-    const mine = { body, selection: draftSelection(), cues: JSON.stringify(readCues()) };
+    const mine = { body, selection: draftSelection(), cues: JSON.stringify(readCues()), epoch: draftEpoch };
     pendingDraft = mine;
     draftRetry = null;
     draftConfirm.hidden = true;
@@ -290,7 +320,7 @@ export function mountStories(container, bridge) {
       return;
     }
     // A late answer never replaces newer choices or caption edits.
-    if (draftSelection() !== mine.selection || JSON.stringify(readCues()) !== mine.cues) {
+    if (draftEpoch !== mine.epoch || draftSelection() !== mine.selection || JSON.stringify(readCues()) !== mine.cues) {
       draftNote.textContent = 'The AI draft arrived after you changed the recording, view, part or captions, so it was not applied. Your captions are unchanged.';
       return;
     }
@@ -298,6 +328,8 @@ export function mountStories(container, bridge) {
     for (const cue of draft.cues) addCueRow({ start: formatPosition(cue.startMs), end: formatPosition(cue.endMs), text: cue.text });
     confirmed.checked = false;
     appliedDraft = { id: draft.id, selection: mine.selection };
+    draftEpoch += 1;
+    draftDiscard.hidden = false;
     draftNote.textContent = `AI draft from ${draft.modelLabel || DRAFT_MODEL_LABEL} applied. It may be wrong: listen, correct every caption, then confirm.`;
   }
 
@@ -404,6 +436,7 @@ export function mountStories(container, bridge) {
     if (historyResult.ok && Array.isArray(historyResult.body) && collabResult.ok && Array.isArray(collabResult.body?.variants)) {
       choices = viewChoices({ history: historyResult.body, variants: collabResult.body.variants, currentVersion: bridge.editor().version, fullObject: bridge.fullObject ?? null });
       renderViews(keepView ? viewSelect.value : null);
+      renderDraftMismatch();
     }
     renderList();
     return read;
@@ -492,7 +525,7 @@ export function mountStories(container, bridge) {
       ...(excerpt.checked ? { sourceRange: { startMs: rangeStart.value.trim() === '' ? 0 : parseTime(rangeStart.value), endMs: parseTime(rangeEnd.value) } } : {}),
       cues: readCues(),
       captionConfirmed: confirmed.checked === true,
-      ...(appliedDraft && appliedDraft.selection === draftSelection() && whole.checked ? { captionDraftId: appliedDraft.id } : {}),
+      ...(appliedDraft && !draftMismatch() ? { captionDraftId: appliedDraft.id } : {}),
     };
   }
 
@@ -544,6 +577,7 @@ export function mountStories(container, bridge) {
     draftConfirm.hidden = true;
   });
   draftSend.addEventListener('click', sendDraft);
+  draftDiscard.addEventListener('click', discardDraft);
 
   function resetForm() {
     title.value = '';
@@ -557,6 +591,7 @@ export function mountStories(container, bridge) {
     cueRows.replaceChildren();
     addCueRow();
     appliedDraft = null;
+    draftDiscard.hidden = true;
     draftNote.textContent = '';
     renderDraft();
   }
@@ -617,7 +652,9 @@ export function mountStories(container, bridge) {
       return;
     }
     const input = storyInput();
-    const problem = !input.voiceSourceId
+    const problem = draftMismatch()
+      ? 'These captions are an AI draft of a different recording, view, part or object. Choose that again, or discard them, before saving.'
+      : !input.voiceSourceId
       ? 'Choose a recording.'
       : !input.view
         ? 'Choose the saved view this story belongs to.'

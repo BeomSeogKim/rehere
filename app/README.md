@@ -508,8 +508,8 @@ the published $0.18 per audio hour. Default local limits are $0.005 per draft,
 $0.05 total and 10 drafts; `REHERE_TRANSCRIBE_TOTAL_USD` and
 `REHERE_TRANSCRIBE_MAX_REQUESTS` can lower them. Reservations persist in
 `data/transcribe-budget.json`. The API reports no usage, so a sent request
-keeps its full estimate; only a request that was never sent, or an error
-response the provider documents as unbilled, is settled at zero. These are
+keeps its full estimate, even after an error response; only a request that
+was never sent is settled at zero. These are
 local estimates and limits, not provider-enforced caps or billing receipts.
 
 Each attempt is recorded in the scene before anything is decoded or sent, with
@@ -523,7 +523,7 @@ restarts and durable provider settlement are not provided.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/drafts/<id>/reconstructions/<job>/stories/caption-drafts` | Draft captions with `requestId`, `voiceSourceId` and `view` |
+| `POST /api/drafts/<id>/reconstructions/<job>/stories/caption-drafts` | Draft captions with `requestId`, `voiceSourceId`, `view` and, in a two-object scene, `targetId` |
 
 See the official [speech-to-text documentation](https://dev.meta.ai/docs/speech-to-text)
 for the provider contract and price. Retention terms are not stated there, so

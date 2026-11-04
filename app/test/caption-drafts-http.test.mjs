@@ -125,6 +125,7 @@ describe('caption draft route', () => {
       assert.equal((await client(app.base).request(place.drafts, init)).status, 401);
       assert.equal((await contributor.request(place.drafts, init)).status, 403);
       assert.equal((await owner.request(place.drafts)).status, 405);
+      assert.equal((await owner.post(place.drafts, draftBody(place, { targetId: 'object-1' }))).status, 400, 'a one-object scene names no object');
       const response = await owner.post(place.drafts, draftBody(place));
       assert.equal(response.status, 503);
       assert.match((await response.json()).error, /not set up/);
@@ -359,11 +360,14 @@ describe('saving a story from a reviewed draft', () => {
       }
       assert.equal((await owner.post(place.stories, storyBody(place, [{ startMs: 0, endMs: 500, text: 'part' }], { captionDraftId: draft.id, sourceRange: { startMs: 0, endMs: 1000 } }))).status, 400);
 
-      // A draft bound to another view revision does not apply.
+      // A draft bound to another recording, view revision or object does not apply.
       const manifest = await readManifest(dataDir, place);
-      const moved = { ...manifest, captionDrafts: manifest.captionDrafts.map((item) => (item.id === draft.id ? { ...item, voiceSha256: '0'.repeat(64) } : item)) };
-      await writeFile(manifestFile(dataDir, place), JSON.stringify(moved));
-      assert.equal((await owner.post(place.stories, storyBody(place, cues, { captionDraftId: draft.id }))).status, 409);
+      assert.equal(manifest.captionDrafts[0].target, 'selected-foreground');
+      for (const change of [{ voiceSha256: '0'.repeat(64) }, { view: { ...versionView(1), version: 2 } }, { target: 'object-1' }]) {
+        const moved = { ...manifest, captionDrafts: manifest.captionDrafts.map((item) => (item.id === draft.id ? { ...item, ...change } : item)) };
+        await writeFile(manifestFile(dataDir, place), JSON.stringify(moved));
+        assert.equal((await owner.post(place.stories, storyBody(place, cues, { captionDraftId: draft.id }))).status, 409, JSON.stringify(change));
+      }
       await writeFile(manifestFile(dataDir, place), JSON.stringify(manifest));
 
       // A story request ID replays its story; reusing it with another draft is a conflict.

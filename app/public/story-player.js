@@ -126,7 +126,11 @@ export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story'), 
     ...(excerpt
       ? [el('p', { className: 'hint', textContent: `Excerpt from the original recording: ${formatPosition(excerpt.startMs)}–${formatPosition(excerpt.endMs)}. Playback and caption times start at 0:00 of this excerpt.` })]
       : []),
-    el('p', { className: 'hint', textContent: story.cues.length ? 'Captions (written by a person, not checked by Rehere):' : 'No captions supplied.' }),
+    el('p', {
+      className: 'hint',
+      textContent: !story.cues.length ? 'No captions supplied.'
+        : story.captionDraft ? 'Captions (AI-drafted, then reviewed by a person; not checked by Rehere):' : 'Captions (written by a person, not checked by Rehere):',
+    }),
     el('ol', { className: 'story-cues' }, cueItems),
   ]);
 
