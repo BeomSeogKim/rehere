@@ -58,7 +58,7 @@ Imported recordings can be attached to exact saved arrangements with
 human-supplied captions and explicitly included in visitor snapshots.
 Scoped contributors can submit photos and recordings for owner review.
 A saved visitor snapshot can be exported as a frozen, read-only
-[static copy](app/STATIC-DEMO.md) that needs no server; it does not follow
+[static copy](app/STATIC-DEMO.md) that needs no application server, only static file hosting; it does not follow
 later revocation or withdrawal. Multi-view alignment and live hosted
 operation remain absent.
 

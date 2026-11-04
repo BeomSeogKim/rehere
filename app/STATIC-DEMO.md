@@ -3,8 +3,10 @@
 `export-static-visit.mjs` copies one saved visitor snapshot into a folder of
 plain files: the visitor page, its exact modules, the pinned Three.js files and
 the snapshot's own images, scene data and audio. Any static file server can
-show the folder. It needs no Node.js, Python, models, account or network
-service at view time.
+show the folder. It needs no application server, Node.js, Python, models or
+account at view time; only a static HTTP file server is required. Opening
+`index.html` from disk does not work, because browsers block module and data
+requests on `file:` pages.
 
 ## What this copy is not
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Exports one saved visitor snapshot as a frozen static site: the visitor page,
 // its exact modules, pinned Three.js files and the snapshot's own files. The
-// result needs no server, model or account. It is a copy: revoking the link or
-// withdrawing a source later does not change it. See STATIC-DEMO.md.
+// result needs no application server, model or account, only a static file
+// server. It is a copy: revoking the link or withdrawing a source later does
+// not change it. See STATIC-DEMO.md.
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
