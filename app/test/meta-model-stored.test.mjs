@@ -168,6 +168,7 @@ describe('Model evidence shown with a proposal', () => {
     assert.equal(live.heading, 'Live answer from muse-spark-1.3');
     assert.match(live.lines.join(' '), /Meta response ID resp_1 · 1,830 ms/);
     assert.match(live.lines.join(' '), /\$0\.0022/);
+    assert.match(live.lines.at(-1), /reviewing it sends nothing new/);
     const replayed = modelEvidence({ mode: 'recorded', model: 'muse-spark-1.3', responseId: 'resp_1', latencyMs: 1830, recordedAt: '2026-11-04T03:00:00.000Z', usage: null });
     assert.equal(replayed.heading, 'Replayed answer from muse-spark-1.3, recorded 2026-11-04 03:00 UTC');
     assert.match(replayed.lines.join(' '), /sent nothing and cost nothing/);

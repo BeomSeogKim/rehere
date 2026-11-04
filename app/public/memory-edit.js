@@ -71,7 +71,8 @@ export function modelEvidence(proposal) {
       return {
         mode: 'live',
         heading: `Live answer from ${model}`,
-        lines: [`Requested from the Meta Model API · ${response} · ${latencyText(proposal.latencyMs)}`, ...(spent ? [`Estimated cost ${spent}`] : [])],
+        lines: [`Requested from the Meta Model API · ${response} · ${latencyText(proposal.latencyMs)}`, ...(spent ? [`Estimated cost ${spent}`] : []),
+          'This answer was stored when it arrived; reviewing it sends nothing new.'],
       };
     }
     case 'recorded': {
