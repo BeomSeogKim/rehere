@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { MAX_PCM_BYTES, SAMPLE_RATE, pcmWav } from './audio-derivative.mjs';
 import { OBJECT_IDS, assertObjectsConfirmed, isTwoObject, objectMarker } from './arrangements.mjs';
-import { contributionAllows, dependenciesBlocked } from './collaboration.mjs';
+import { contributionAllows, dependenciesBlocked, dependencyIssue } from './collaboration.mjs';
 import { sourceDependencyFields, sourceDependenciesOf } from './memory-links.mjs';
 import { RequestError } from './drafts.mjs';
 import { savedView } from './shares.mjs';
@@ -161,19 +161,23 @@ const storyTarget = (context, showLabel = true) => {
 const storiesOf = (manifest) => manifest.stories ?? { items: [], receipts: [] };
 const draftsOf = (manifest) => manifest.captionDrafts ?? [];
 const viewKey = (view) => (view.kind === 'version' ? `version:${view.version}` : `variant:${view.variantId}`);
-const draftAttribution = (story) => story.captionDraft && { captionDraft: { model: story.captionDraft.model, label: story.captionDraft.label } };
+const draftAttribution = (story) => story.captionDraft && { captionDraft: {
+  model: story.captionDraft.model, label: story.captionDraft.label,
+  ...(story.captionDraft.responseOrigin && { responseOrigin: story.captionDraft.responseOrigin }),
+} };
 
 // The owner's copy of a completed draft. The cues are returned once and not
 // kept; they stay unconfirmed until the owner reviews them and saves a story.
 // `call` is an explicit allowlist of the recorded model-call evidence; it is
 // owner-only and never joins a story or a visitor snapshot.
 const draftView = (record, cues) => {
-  const { model, dispatched, httpStatus, providerRequestId, providerSessionId, latencyMs, admittedDurationMs, estimatedUsd } = record.call;
+  const { model, dispatched, httpStatus, providerRequestId, providerSessionId, latencyMs, admittedDurationMs, estimatedUsd, responseOrigin } = record.call;
   return {
     draft: {
       id: record.id, model: record.call.model, modelLabel: record.call.modelLabel, voiceSourceId: record.voiceSourceId, voiceSha256: record.voiceSha256,
       view: { ...record.view }, targetId: record.target, durationMs: record.durationMs, cues: cues.map((cue) => ({ ...cue })), confirmed: false,
-      call: { model, dispatched, httpStatus, providerRequestId, providerSessionId, latencyMs, admittedDurationMs, estimatedUsd },
+      call: { model, dispatched, httpStatus, providerRequestId, providerSessionId, latencyMs, admittedDurationMs, estimatedUsd,
+        ...(responseOrigin && { responseOrigin }) },
     },
   };
 };
@@ -189,6 +193,36 @@ export class StoryStore {
     this.reconstructions = reconstructions;
     this.audioDecoder = audioDecoder;
     this.transcriber = transcriber;
+  }
+
+  statementReference(story) {
+    return { kind: 'story-captions', storyId: story.id, sourceSha256: sha256(story.cues.map((cue) => cue.text).join('\n')), storySha256: contentPin(story) };
+  }
+
+  async statementContext(manifest, ref, purpose, seenStories) {
+    const story = storiesOf(manifest).items.find((item) => item.id === ref.storyId);
+    if (!story || story.captionConfirmed !== true || !parseCues(story.cues) || seenStories.has(story.id)
+        || contentPin(story) !== ref.storySha256 || this.statementReference(story).sourceSha256 !== ref.sourceSha256) {
+      throw fail(409, 'The reviewed story captions changed or could not be verified.');
+    }
+    const seen = new Set([...seenStories, story.id]);
+    if (await this.#blocked(manifest, story, 'place', seen) || !(await this.#verifiedAudio(manifest, story, story.audio.sha256))) {
+      throw fail(409, 'The reviewed story is not available for this use.');
+    }
+    const r = this.reconstructions, draft = await r.drafts.get(manifest.draftId);
+    const voice = draft.sources.find((item) => item.id === story.context.voice.sourceId);
+    const asset = await r.drafts.asset(manifest.draftId, draft.voice.name);
+    const bytes = asset && await readFile(asset.file).catch(() => null);
+    if (!voice || !bytes || bytes.length !== voice.size || sha256(bytes) !== story.context.voice.sha256) {
+      throw fail(409, 'The original recording changed or could not be verified.');
+    }
+    if (await this.#blocked(manifest, story, purpose, seen) || dependencyIssue(manifest, story.context.dependencies, purpose)) {
+      throw fail(purpose === 'model' ? 403 : 409, 'The reviewed story is not permitted for this use.');
+    }
+    return { text: story.cues.map((cue) => cue.text).join('\n'), sourceSha256: ref.sourceSha256, attribution: {
+      kind: ref.kind, providerLabel: story.context.voice.provider, creator: null, originKind: voice.origin.kind, reference: voice.origin.reference,
+      captionAuthorLabel: story.captionAuthor.displayName, ...draftAttribution(story),
+    } };
   }
 
   #owner(principal) {
@@ -265,7 +299,8 @@ export class StoryStore {
     const matches = record?.status === 'drafted' && record.voiceSourceId === context.voice.sourceId && record.voiceSha256 === context.voice.sha256
       && JSON.stringify(record.view) === JSON.stringify(context.view) && record.target === context.target && !context.voice.sourceRange;
     if (!matches) throw fail(409, 'This AI caption draft does not belong to the chosen recording, saved view and object. Request a new draft or write the captions yourself.');
-    return { id: record.id, model: record.call.model, label: record.call.modelLabel };
+    return { id: record.id, model: record.call.model, label: record.call.modelLabel,
+      responseOrigin: ['live', 'recorded', 'simulated'].includes(record.call.responseOrigin) ? record.call.responseOrigin : 'unverified' };
   }
 
   // The context a caption draft depends on: everything a whole-recording story
@@ -378,7 +413,7 @@ export class StoryStore {
 
   // Null when the story may be used for `purpose` ('place' privately, 'share'
   // for visitors) under current restrictions, grants and arrangements.
-  async #blocked(manifest, story, purpose) {
+  async #blocked(manifest, story, purpose, seenStories = new Set()) {
     if (story.status === 'withdrawn') return 'withdrawn';
     const r = this.reconstructions;
     const { context } = story;
@@ -407,7 +442,7 @@ export class StoryStore {
     for (const photo of context.photos ?? [context.photo]) if (!(await r.sourcePolicies.canUse(draft, photo.sourceId, purpose))) return 'photo';
     if (!voice || voice.sha256 !== context.voice.sha256 || !(await r.sourcePolicies.canUse(draft, voice.id, purpose))) return 'voice';
     if (dependenciesBlocked(manifest, context.dependencies)) return 'contribution';
-    if (await r.sourceDependencyIssue(manifest, context, purpose)) return 'written';
+    if (await r.sourceDependencyIssue(manifest, context, purpose, seenStories)) return 'written';
     if (purpose === 'share') {
       const contributions = manifest.collaboration?.contributions ?? [];
       const shareable = (id) => {

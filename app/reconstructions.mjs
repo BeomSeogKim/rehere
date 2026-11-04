@@ -9,7 +9,7 @@ import { attestPhotos, contributionsDir } from './contribution-photos.mjs';
 import { cleanupContributionFiles, removeManifestTemps, safeJobDirectory } from './contribution-deletion-files.mjs';
 import {
   assertSceneUsable, issueMessage, projectProposal, currentDependencies, dependenciesBlocked, dependencyIssue, modelBlocked, proposalBinding, sameArrangement,
-  usageBlocked, variantFields, versionDependencies, proposalSourceDependencies, variantSourceDependencies,
+  usageBlocked, variantFields, versionDependencies, proposalSourceDependencies, variantSourceDependencies, contributionAllows,
 } from './collaboration.mjs';
 import { LIMITS, RequestError } from './drafts.mjs';
 import {
@@ -761,15 +761,15 @@ export class ReconstructionStore {
     };
   }
 
-  async sourceDependencyIssue(manifest, holder, purpose = 'place') {
+  async sourceDependencyIssue(manifest, holder, purpose = 'place', seenStories = new Set()) {
     const variant = manifest.collaboration?.variants?.find((item) => item.id === holder.id);
     const refs = variant ? variantSourceDependencies(manifest, variant) : sourceDependenciesOf(holder);
     if (refs === null) return 'unavailable';
     if (refs.length === 0) return null;
-    const written = await this.writtenSourceContext(manifest.draftId);
     for (const ref of refs) {
-      if (!written?.available || written.sourceId !== ref.sourceId || written.sourceSha256 !== ref.sourceSha256) return 'unavailable';
-      if (!(await this.sourcePolicies.canUse(await this.drafts.get(manifest.draftId), ref.sourceId, purpose))) return purpose === 'model' ? 'model' : 'unavailable';
+      const statement = ref.kind === 'written-source' ? { sourceId: ref.sourceId, sourceSha256: ref.sourceSha256 } : ref;
+      try { await this.resolveStatementSource(manifest, statement, purpose, seenStories); }
+      catch (error) { return purpose === 'model' && error.status === 403 ? 'model' : 'unavailable'; }
     }
     return null;
   }
@@ -780,12 +780,50 @@ export class ReconstructionStore {
       ? 'Model use is off for this written source.' : 'A written source used by this arrangement is unavailable.');
   }
 
-  async resolveStatementSource(manifest, ref, purpose = 'model') {
-    if (!validStatementSource(ref)) throw new RequestError(400, 'The written source reference could not be read.');
+  async resolveStatementSource(manifest, ref, purpose = 'model', seenStories = new Set()) {
+    if (!validStatementSource(ref)) throw new RequestError(400, 'The statement source reference could not be read.');
+    if (ref.kind === 'contribution-text') {
+      const contribution = manifest.collaboration?.contributions?.find((item) => item.id === ref.contributionId);
+      if (!contribution || !['submitted', 'adopted', 'alternative'].includes(contribution.status)
+          || typeof contribution.text !== 'string' || !contribution.text.trim() || contribution.text.length > 10_000
+          || contribution.textSha256 !== ref.sourceSha256 || sha256(Buffer.from(contribution.text, 'utf8')) !== ref.sourceSha256) {
+        throw new RequestError(409, 'The contributed words changed or could not be verified.');
+      }
+      const issue = dependencyIssue(manifest, [contribution.id], purpose);
+      if (issue || purpose === 'share' && !contributionAllows(contribution, 'share')) {
+        throw new RequestError(issue === 'model' ? 403 : 409, 'The contributed words are not permitted for this use.');
+      }
+      return { text: contribution.text, sourceSha256: ref.sourceSha256, attribution: {
+        kind: ref.kind, providerLabel: contribution.provider.displayName, creator: null, originKind: 'unknown', reference: '',
+      } };
+    }
+    if (ref.kind === 'story-captions') {
+      if (!this.stories) throw new RequestError(409, 'The recorded story could not be verified.');
+      return this.stories.statementContext(manifest, ref, purpose, seenStories);
+    }
     const written = await this.writtenSourceContext(manifest.draftId);
     if (!written?.available || written.sourceId !== ref.sourceId || written.sourceSha256 !== ref.sourceSha256) throw new RequestError(409, 'The written source changed or could not be verified.');
-    await this.assertSourceDependencies(manifest, { sourceDependencies: [{ kind: 'written-source', ...ref }] }, purpose);
+    if (!(await this.sourcePolicies.canUse(await this.drafts.get(manifest.draftId), ref.sourceId, purpose))) {
+      throw new RequestError(403, 'The written source is not permitted for this use.');
+    }
     return written;
+  }
+
+  async statementSources(manifest) {
+    const refs = [
+      ...(manifest.collaboration?.contributions ?? []).filter((item) => item.textSha256).map((item) => ({ kind: 'contribution-text', contributionId: item.id, sourceSha256: item.textSha256 })),
+      ...(manifest.stories?.items ?? []).filter((item) => item.captionConfirmed === true && Array.isArray(item.cues))
+        .map((item) => this.stories?.statementReference(item)).filter(Boolean),
+    ];
+    const sources = [];
+    for (const statementSource of refs) {
+      let resolved;
+      try { resolved = await this.resolveStatementSource(manifest, statementSource, 'place'); } catch { continue; }
+      let modelAllowed = true;
+      try { await this.resolveStatementSource(manifest, statementSource); } catch { modelAllowed = false; }
+      sources.push({ statementSource, text: resolved.text, attribution: resolved.attribution, modelAllowed });
+    }
+    return sources;
   }
 
   async sceneSourceUses(manifest) {
@@ -1738,7 +1776,7 @@ export class ReconstructionStore {
         const projected = projectProposal(manifest, item);
         return written ? { ...projected, statement: { ...projected.statement, attribution: written.attribution } } : projected;
       }
-      return { ...item, statement: { ...item.statement, text: null }, result: null, question: null, status: 'stale', error: sourceIssue || invalidStatement ? WRITTEN_REDACTED_PROPOSAL : SOURCE_REDACTED_PROPOSAL, redacted: true,
+      return { ...item, statement: { ...item.statement, text: null, ...(Object.hasOwn(item.statement ?? {}, 'attribution') && { attribution: null }) }, result: null, question: null, status: 'stale', error: sourceIssue || invalidStatement ? WRITTEN_REDACTED_PROPOSAL : SOURCE_REDACTED_PROPOSAL, redacted: true,
         ...(item.scope && { candidate: null }) };
     }));
   }
@@ -1819,7 +1857,8 @@ export class ReconstructionStore {
     }
     this.activeProposal = {
       id: proposal.id, draftId: manifest.draftId, jobId: manifest.id, ...(dispatch.photos ? { sourceIds: dispatch.context.sourceIds } : { sourceId: dispatch.sourceId }),
-      sourceIds: [...new Set([...(dispatch.photos ? dispatch.context.sourceIds : [dispatch.sourceId]), ...(proposalSourceDependencies(manifest, proposal) ?? []).map((ref) => ref.sourceId)])],
+      sourceIds: [...new Set([...(dispatch.photos ? dispatch.context.sourceIds : [dispatch.sourceId]), ...(proposalSourceDependencies(manifest, proposal) ?? [])
+        .map((ref) => ref.kind === 'story-captions' ? manifest.stories?.items?.find((item) => item.id === ref.storyId)?.context.voice.sourceId : ref.sourceId).filter(Boolean)])],
       controller: new AbortController(), done: null,
     };
     return { proposal, start: true, ...dispatch };

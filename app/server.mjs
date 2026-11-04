@@ -445,6 +445,7 @@ export function createAppServer({
   reconstructions.fullObjects = fullObjects;
   const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder, prepareRecording: recordingPreparer });
   const stories = new StoryStore({ reconstructions, audioDecoder, transcriber: captionTranscriber });
+  reconstructions.stories = stories;
   const evidence = new EvidenceReviews({ reconstructions, model: evidenceModel });
   const intakes = new IntakeStore({ dataDir, drafts: store, verifier: mediaVerifier, placeCommits: placeDeletions });
   const deletions = new PlaceDeletionService({ dataDir, placeDeletions, reconstructions, intakes, accessStore });
@@ -704,7 +705,8 @@ export function createAppServer({
       }
       if (!proposalId) {
         const raw = await readJsonBody(req);
-        const body = strictBody(raw, ['requestId', 'baseEraRevision', 'targetId', 'timeMode', Object.hasOwn(raw ?? {}, 'statementSource') ? 'statementSource' : 'text', 'consent']);
+        const body = strictBody(raw, ['requestId', 'baseEraRevision', 'targetId', 'timeMode', Object.hasOwn(raw ?? {}, 'statementSource') ? 'statementSource' : 'text', 'consent',
+          ...(['contribution-text', 'story-captions'].includes(raw?.statementSource?.kind) ? ['sourceReviewed'] : [])]);
         const { created, proposal } = await collaboration.createVariantProposal(draftId, jobId, current, parentId, body);
         sendJson(res, created ? 202 : 200, proposal);
         return;

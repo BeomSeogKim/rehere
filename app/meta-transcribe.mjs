@@ -106,7 +106,7 @@ export function createMetaTranscriber({ apiKey, ledger, fetch = globalThis.fetch
   };
   const call = (fields = {}) => ({
     model: TRANSCRIBE_MODEL, modelLabel: TRANSCRIBE_LABEL, dispatched: false, httpStatus: null, providerRequestId: null, providerSessionId: null, latencyMs: null,
-    admittedDurationMs: null, estimatedUsd: null, ...fields,
+    admittedDurationMs: null, estimatedUsd: null, responseOrigin: 'live', ...fields,
   });
   const id = (value) => (typeof value === 'string' && value !== '' ? value.slice(0, 200) : null);
 

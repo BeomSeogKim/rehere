@@ -135,8 +135,11 @@ export function canUseSource(draft, sourceId, purpose) {
 }
 
 export function validStatementSource(ref) {
-  return ref !== null && typeof ref === 'object' && !Array.isArray(ref) && Object.keys(ref).length === 2
-    && Object.hasOwn(ref, 'sourceId') && Object.hasOwn(ref, 'sourceSha256')
-    && typeof ref.sourceId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(ref.sourceId)
-    && typeof ref.sourceSha256 === 'string' && /^[0-9a-f]{64}$/.test(ref.sourceSha256);
+  if (ref === null || typeof ref !== 'object' || Array.isArray(ref)
+      || typeof ref.sourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(ref.sourceSha256)) return false;
+  const idField = ref.kind === 'contribution-text' ? 'contributionId' : ref.kind === 'story-captions' ? 'storyId' : 'sourceId';
+  const keys = idField === 'sourceId' ? [idField, 'sourceSha256'] : ['kind', idField, 'sourceSha256', ...(idField === 'storyId' ? ['storySha256'] : [])];
+  return Object.keys(ref).length === keys.length && keys.every((key) => Object.hasOwn(ref, key))
+    && (idField !== 'storyId' || typeof ref.storySha256 === 'string' && /^[0-9a-f]{64}$/.test(ref.storySha256))
+    && typeof ref[idField] === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(ref[idField]);
 }

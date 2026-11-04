@@ -126,6 +126,8 @@ describe('owner revisions of saved alternatives', () => {
       const prepared = await expectStatus(await owner.request(context(place, a.variant.id)), 200, 'context');
       assert.deepEqual(prepared, {
         parentVariantId: a.variant.id, eraRevision: 0, latestEra: a.variant.era, edit: a.variant.edit, contributionIds: a.variant.contributionIds, revisionAllowed: true,
+        statementSources: [{ statementSource: { kind: 'contribution-text', contributionId: a.id, sourceSha256: sha256('The counter stood higher.') },
+          text: 'The counter stood higher.', attribution: { kind: 'contribution-text', providerLabel: 'Synthetic contributor', creator: null, originKind: 'unknown', reference: '' }, modelAllowed: false }],
       });
       // Contributors are refused before any body is read.
       await expectStatus(await session.request(context(place, a.variant.id)), 403, 'contributor context');

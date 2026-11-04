@@ -543,6 +543,14 @@ export class ShareStore {
       const support = dependencies.map((id) => contributions.find((item) => item.id === id))
         .map((item) => ({ kind: 'human_recollection', providerLabel: item.provider.displayName, status: 'owner-selected',
           ...(isComposition(manifest) ? { objectId: reviewTarget(manifest, item) } : {}) }));
+      const selectedView = selected.find((item) => item.view.id === view.id);
+      for (const ref of sourceDependenciesOf(selectedView) ?? []) {
+        if (ref.kind !== 'story-captions') continue;
+        const story = manifest.stories.items.find((item) => item.id === ref.storyId);
+        support.push({ kind: 'reviewed_story', providerLabel: story.context.voice.provider, captionAuthorLabel: story.captionAuthor.displayName,
+          ...(story.captionDraft && { captionDraft: { model: story.captionDraft.model, label: story.captionDraft.label,
+            ...(story.captionDraft.responseOrigin && { responseOrigin: story.captionDraft.responseOrigin }) } }), status: 'owner-selected' });
+      }
       const supporting = quotes.filter((item) => dependencies.includes(item.id));
       const unattached = quotes.filter((item) => !selected.some((other) => other.dependencies.includes(item.id)));
       return {

@@ -86,13 +86,15 @@ const TIME_MODES = ['unknown', 'reconfirm-parent'];
 // mode is the owner's own choice; the model never chooses a time.
 export function parseVariantProposalRequest(body, targetIds) {
   const sourced = body !== null && typeof body === 'object' && Object.hasOwn(body, 'statementSource');
+  const reviewed = sourced && ['contribution-text', 'story-captions'].includes(body.statementSource?.kind);
   const field = sourced ? 'statementSource' : 'text';
-  const request = readable(body, ['requestId', 'baseEraRevision', 'targetId', 'timeMode', field, 'consent'],
+  const request = readable(body, ['requestId', 'baseEraRevision', 'targetId', 'timeMode', field, 'consent', ...(reviewed ? ['sourceReviewed'] : [])],
     ({ requestId, baseEraRevision, targetId, timeMode, text, statementSource, consent }) =>
       isRequestId(requestId) && Number.isInteger(baseEraRevision) && baseEraRevision >= 0 && targetIds.includes(targetId)
       && TIME_MODES.includes(timeMode) && (sourced ? validStatementSource(statementSource)
         : typeof text === 'string' && text.trim() !== '' && Array.from(text).length <= TEXT_LIMIT)
       && typeof consent === 'boolean');
+  if (reviewed && request.sourceReviewed !== true) throw new RequestError(400, 'Review the exact source words before asking for a proposal.');
   if (request.consent !== true) throw new RequestError(403, 'Sending the photo and message to the model needs explicit consent.');
   return request;
 }

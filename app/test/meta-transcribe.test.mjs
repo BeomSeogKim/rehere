@@ -73,7 +73,7 @@ describe('the Muse Voice Transcribe client', () => {
       ok: true, cues: [{ startMs: 0, endMs: 900, text: 'Hello.' }],
       call: {
         model: TRANSCRIBE_MODEL, modelLabel: 'Muse Voice Transcribe', dispatched: true, httpStatus: 200, providerRequestId: 'provider-request-1', providerSessionId: 'session-from-provider',
-        latencyMs: 25, admittedDurationMs: 1000, estimatedUsd: 1000 * USD_PER_AUDIO_MS,
+        latencyMs: 25, admittedDurationMs: 1000, estimatedUsd: 1000 * USD_PER_AUDIO_MS, responseOrigin: 'live',
       },
     });
     assert.equal(Object.hasOwn(result.call, 'usage'), false);

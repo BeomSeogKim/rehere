@@ -94,13 +94,16 @@ export function memoryLinkView(link, written) {
   return view(true, null);
 }
 
-// Written-source dependencies stay separate from contributor identities.
+// Exact text dependencies stay separate from contributor identities.
 // An absent field is legacy; malformed retained lineage is unavailable.
 export function sourceDependenciesOf(holder) {
   if (!Object.hasOwn(holder, 'sourceDependencies')) return [];
   const refs = holder.sourceDependencies;
-  if (!Array.isArray(refs) || refs.length > 1 || !refs.every((ref) => exactKeys(ref, ['kind', 'sourceId', 'sourceSha256'])
-    && ref.kind === 'written-source' && isId(ref.sourceId) && isSha(ref.sourceSha256))) return null;
+  if (!Array.isArray(refs) || refs.length > 201 || !refs.every((ref) => ref?.kind === 'written-source'
+    ? exactKeys(ref, ['kind', 'sourceId', 'sourceSha256']) && isId(ref.sourceId) && isSha(ref.sourceSha256)
+    : validStatementSource(ref) && ['contribution-text', 'story-captions'].includes(ref.kind))) return null;
+  const ids = refs.map((ref) => `${ref.kind}:${ref.sourceId ?? ref.contributionId ?? ref.storyId}`);
+  if (new Set(ids).size !== ids.length || refs.filter((ref) => ref.kind === 'written-source').length > 1) return null;
   return refs.map((ref) => ({ ...ref }));
 }
 
@@ -109,10 +112,12 @@ export function inheritedSourceDependencies(parent, statement = null) {
   if (refs === null) return null;
   if (statement === null) return refs;
   if (!validStatementSource(statement)) return null;
-  const found = refs.find((ref) => ref.sourceId === statement.sourceId);
-  if (found && found.sourceSha256 !== statement.sourceSha256) return null;
-  if (!found) refs.push({ kind: 'written-source', ...statement });
-  return refs.length <= 1 ? refs : null;
+  const dependency = statement.kind ? { ...statement } : { kind: 'written-source', ...statement };
+  const found = refs.find((ref) => ref.kind === dependency.kind
+    && (ref.sourceId ?? ref.contributionId ?? ref.storyId) === (dependency.sourceId ?? dependency.contributionId ?? dependency.storyId));
+  if (found && (found.sourceSha256 !== statement.sourceSha256 || found.storySha256 !== statement.storySha256)) return null;
+  if (!found) refs.push(dependency);
+  return sourceDependenciesOf({ sourceDependencies: refs });
 }
 
 export function sourceDependencyFields(holder) {

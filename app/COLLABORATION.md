@@ -311,6 +311,58 @@ revisions retain the manual origin. Neither the private proposal identifier
 nor its instruction is automatically copied into visitor packets. Existing
 packets are not rewritten.
 
+### Plan from retained source words
+
+The first submitted contribution creates a baseline of the current saved
+scene. This is a stored starting arrangement, not a model generation. A partial
+scene needs no separate full-object baseline request.
+
+`GET /variants/<parent>/revision-context` also offers `statementSources`.
+Each choice contains an opaque `statementSource`, exact retained `text`,
+`attribution` and `modelAllowed`. Choices without model permission remain
+readable but cannot be planned. Unavailable sources are omitted.
+
+Instead of `text`, an alternative proposal can send one of these references:
+
+```json
+{"kind":"contribution-text","contributionId":"00000000-0000-4000-8000-000000000001","sourceSha256":"<exact text SHA-256>"}
+```
+
+```json
+{"kind":"story-captions","storyId":"00000000-0000-4000-8000-000000000002","sourceSha256":"<joined caption text SHA-256>","storySha256":"<story content pin>"}
+```
+
+Send the whole discovered reference unchanged, with `sourceReviewed: true`
+separately from `consent: true`. The owner must review those exact words;
+neither acknowledgment applies a change. The server resolves the original
+text, never a client replacement. Existing whole-place writing references
+`{sourceId, sourceSha256}` and free instructions keep their earlier shapes.
+This does not add source binding to the current-main free-text planner.
+
+A contributed text must be submitted, adopted or an alternative, with intact
+retained wording and current bundle grants. Its authenticated supplier label
+does not establish the speaker or author. A story must have explicitly
+confirmed captions and intact original voice, playback, saved context and
+content pin. Caption text joins cues with a newline in their saved order;
+the additional story pin binds their timing, voice and caption-draft credit.
+The voice supplier, caption reviewer and model credit stay distinct.
+
+The proposal stores its exact reference, text hash, owner acknowledgment and
+attribution. The existing preview and apply contract creates one immutable
+child. Every following child retains all typed source dependencies and actual
+contribution IDs. New dispatch and apply need model grants; private display
+needs place grants and new visitor selections need share grants. Withdrawal,
+deletion, missing bytes or a changed bound story block descendants rather than
+detach their origin. Main and the parent remain unchanged.
+
+Visitor `evidence.arrangement` is `memory` for an applied proposal child.
+`evidence.support` acknowledges contributing suppliers and reviewed stories
+without copying their words. Contribution excerpts and story captions still
+require their existing explicit sharing selections. Excerpts shared alongside
+a view do not by themselves establish which exact words caused its change.
+No private source, contribution, story or proposal identifiers are added to
+public evidence.
+
 ## Grants and withdrawal
 
 Every spatial change inherits its supporting contribution IDs. Place permission
@@ -393,5 +445,6 @@ One contribution-media preparation runs at a time; another request receives a
 busy response. A published exact retry reuses its receipt without decoding
 again. Photo and voice preparation are sequential outside the scene mutation
 queue; their files and contribution publish together.
-Model-assisted contribution review and general multi-view reconstruction remain
+The manual contribution review path does not call a model. Source-bound
+alternative proposals are separate; general multi-view reconstruction remains
 unfinished.

@@ -69,6 +69,23 @@ Transcribe and reviewed by the owner, for the owner and in shared visits. That
 credit is part of the shared story's pinned content, so changing it suspends
 the visit. Stories saved without a draft keep their earlier record and pin.
 
+A new caption draft records `responseOrigin` as `live`, `recorded`, `simulated`
+or `unverified`; the saved caption credit preserves it. A recorded answer is
+not a new provider call, and simulated captions are not provider evidence.
+Older saved stories keep their existing content pin and credit. Provider
+request and session IDs stay in the private draft receipt, separate from
+public model credit; absent IDs are never invented.
+
+After explicitly saving reviewed captions, the owner can separately select
+their exact retained words for a [source-bound alternative proposal](COLLABORATION.md#plan-from-retained-source-words).
+This sends text only, not another audio request, and needs a fresh source-review
+acknowledgment and model consent. It never automatically starts from an
+unconfirmed draft. The child retains the story, original voice and inherited
+sources as dependencies, so withdrawing the story or restricting its voice
+also blocks derived arrangements and their visitor snapshots. A shared view
+can acknowledge this source without disclosing captions; hearing or reading
+them still requires the existing explicit story selection.
+
 ## Listen and read
 
 Playback starts only after a Play action. Pause and Stop are separate controls;

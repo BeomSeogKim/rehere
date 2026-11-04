@@ -154,7 +154,7 @@ describe('drafting captions with a fixture provider', () => {
       assert.deepEqual(draft.cues, SYNTHETIC_TURNS.map(({ startMs, endMs, transcript }) => ({ startMs, endMs, text: transcript })));
       assert.equal(provider.fetches.length, 1);
       // Exactly the allowlisted call evidence, as recorded.
-      assert.deepEqual(Object.keys(draft.call).sort(), ['admittedDurationMs', 'dispatched', 'estimatedUsd', 'httpStatus', 'latencyMs', 'model', 'providerRequestId', 'providerSessionId']);
+      assert.deepEqual(Object.keys(draft.call).sort(), ['admittedDurationMs', 'dispatched', 'estimatedUsd', 'httpStatus', 'latencyMs', 'model', 'providerRequestId', 'providerSessionId', 'responseOrigin']);
       assert.equal(draft.call.model, 'muse-voice-transcribe-1.0');
       assert.equal(draft.call.dispatched, true);
       assert.equal(draft.call.httpStatus, 200);
@@ -344,7 +344,7 @@ describe('saving a story from a reviewed draft', () => {
       const saved = await owner.post(place.stories, storyBody(place, reviewed, { captionDraftId: draft.id }));
       assert.equal(saved.status, 201);
       const story = await saved.json();
-      assert.deepEqual(story.captionDraft, { model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe' });
+      assert.deepEqual(story.captionDraft, { model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe', responseOrigin: 'live' });
       assert.equal(story.captionAuthor.displayName, 'Synthetic owner');
       assert.deepEqual(story.cues, reviewed);
 
