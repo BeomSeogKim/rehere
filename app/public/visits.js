@@ -417,6 +417,7 @@ export function mountVisitor(container, source, { onState = () => {}, limitedPho
       const badge = el('span', { className: 'box-badge', textContent: nameOf(object.id) });
       badge.setAttribute('data-kind', 'seen');
       badge.setAttribute('aria-label', `${nameOf(object.id)} (box around this object in the photograph)`);
+      badge.setAttribute('role', 'img');
       const box = el('div', { className: `box-overlay box-overlay-${objects.indexOf(object) === 0 ? 'a' : 'b'}` }, [badge]);
       Object.assign(box.style, { left: `${(x1 / width) * 100}%`, top: `${(y1 / height) * 100}%`, width: `${((x2 - x1) / width) * 100}%`, height: `${((y2 - y1) / height) * 100}%` });
       evidence.replaceChildren(

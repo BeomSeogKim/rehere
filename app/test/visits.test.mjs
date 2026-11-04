@@ -688,6 +688,7 @@ describe('returning to a hidden visit', () => {
     const badge = v.find((node) => node.tag === 'span' && node.className === 'box-badge')[0];
     assert.ok(badge, 'badge is shown');
     assert.equal(badge.attributes['aria-label'], `${badge.textContent} (box around this object in the photograph)`);
+    assert.equal(badge.attributes.role, 'img');
     v.view.dispose();
   });
 });
