@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 
 // Node has no WebGL. This maps the browser's /vendor modules to Three.js with
@@ -49,6 +50,19 @@ export class OrbitControls {
   update() {}
   dispose() { globalThis.viewerLog?.push('controls.dispose'); }
 }`;
+// The pinned OrbitControls source, served as a data: URL with its bare
+// 'three' import rewritten the way the browser route rewrites it. The
+// subclass only records the camera for currentCamera(); every behaviour the
+// test drives stays the real control's own.
+const realControlsShim = `data:text/javascript,${encodeURIComponent(readFileSync(new URL(import.meta.resolve('three/addons/controls/OrbitControls.js')), 'utf8')
+  .replace(/from 'three'/, "from '/vendor/three.module.js'")
+  .replace('export { OrbitControls };', `class RecordingOrbitControls extends OrbitControls {
+  constructor(camera, domElement) {
+    super(camera, domElement);
+    globalThis.viewerCamera = { camera, controls: this };
+  }
+}
+export { RecordingOrbitControls as OrbitControls };`))}`;
 const SHIMS = {
   '/vendor/three.module.js': `data:text/javascript,${encodeURIComponent(threeShim)}`,
   '/vendor/OrbitControls.js': `data:text/javascript,${encodeURIComponent(controlsShim)}`,
@@ -56,10 +70,11 @@ const SHIMS = {
   '/vendor/three-mesh-bvh.js': import.meta.resolve('three-mesh-bvh'),
 };
 
-export function installViewerShim() {
+export function installViewerShim({ realOrbitControls = false } = {}) {
+  const shims = realOrbitControls ? { ...SHIMS, '/vendor/OrbitControls.js': realControlsShim } : SHIMS;
   registerHooks({
     resolve(specifier, context, nextResolve) {
-      return SHIMS[specifier] ? { url: SHIMS[specifier], shortCircuit: true } : nextResolve(specifier, context);
+      return shims[specifier] ? { url: shims[specifier], shortCircuit: true } : nextResolve(specifier, context);
     },
   });
   globalThis.ResizeObserver ??= class {
