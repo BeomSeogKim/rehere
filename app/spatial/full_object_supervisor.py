@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import secrets
 import select
 import shutil
 import signal
@@ -46,6 +47,40 @@ def save(path, data):
         json.dump(data, stream, allow_nan=False)
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def publish(path, data):
+    """Give a complete JSON file its name in one step, never replacing anything.
+
+    The bytes go to a unique private file in the same directory, written by
+    save() (O_EXCL, O_NOFOLLOW, 0600, fsync). A hard link then publishes it;
+    link fails if the name already exists, even as a dangling symlink, and
+    never follows one, so a reader polling for the name never sees partial JSON
+    and nothing is overwritten. The private name is removed and the directory
+    synced. An existing temporary or final entry stops with sandbox_proof_exists.
+    """
+    path = Path(path)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    try:
+        save(temp, data)
+    except FileExistsError:
+        raise Stop("sandbox_proof_exists") from None
+    except BaseException:
+        # Only save() created this unique name; remove any partial copy.
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp)
+        raise
+    try:
+        os.link(temp, path, follow_symlinks=False)
+    except FileExistsError:
+        raise Stop("sandbox_proof_exists") from None
+    finally:
+        os.unlink(temp)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def private_directory(path):
@@ -210,8 +245,9 @@ def child(config_path, life_fd):
     watchdog_pid = parent_watchdog(life_fd)
     deny_probe()
     attempt = Path(config_path).parent
-    save(attempt / "sandbox.json", {"nonce": config["nonce"], "pid": os.getpid(), "pgid": os.getpgrp(),
-                                    "networkDenied": True, "watchdogPid": watchdog_pid})
+    # Published whole: the parent polls for this name and parses it at once.
+    publish(attempt / "sandbox.json", {"nonce": config["nonce"], "pid": os.getpid(), "pgid": os.getpgrp(),
+                                       "networkDenied": True, "watchdogPid": watchdog_pid})
     # No producer import until the parent persists the independently checked identity.
     if sys.stdin.buffer.readline(128) != (config["nonce"] + "\n").encode():
         raise Stop("launch_gate_closed")

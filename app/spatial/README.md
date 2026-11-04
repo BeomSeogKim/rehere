@@ -120,6 +120,12 @@ Exit codes are 0 success, 2 unsupported input, 3 unavailable runtime,
 have fixed public messages and no success JSON. Run the focused no-model
 tests from `app/spatial` with `python -B -m unittest test_full_object`.
 
+The supervisor's dummy-process tests also need `psutil`, pinned separately in
+`requirements-test.txt` because no model or production photo path uses it.
+Install both files, then run `python -B -m unittest test_full_object_supervisor
+test_proof_publication`. Without `psutil` the supervisor test module cannot be
+imported, so a requirements-only run does not cover it.
+
 ## Reconstruction setup
 
 Run from the repository root. If the photo-checking environment already

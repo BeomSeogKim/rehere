@@ -1,0 +1,4 @@
+# Test-only dependencies, installed in addition to requirements.txt.
+# test_full_object_supervisor.py samples dummy process groups with psutil;
+# no model or production photo path imports it.
+psutil==7.2.2
