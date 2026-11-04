@@ -83,6 +83,15 @@ requested, and the exported page cannot call them.
 The unchanged visitor modules still contain their live-visit code paths; the
 static entry never uses them because it supplies its own read-only source.
 
+## Publishing as a release artifact
+
+The exported folder holds images and audio, which the repository guard rejects,
+so it is never committed. Publish it as a release asset: zip the folder, record
+the zip's SHA-256, and attach the zip to a release. A manually started
+publication workflow downloads that asset, checks its SHA-256 and every file
+hash listed in `EXPORT.json`, refuses any unlisted file, and only then deploys
+the folder to GitHub Pages.
+
 ## Limits
 
 - A snapshot's rights are the owner's to confirm. The export does not decide

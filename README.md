@@ -8,7 +8,7 @@ what the camera saw. Areas no photograph shows stay empty, and the viewer says
 so. People add what they remember as attributed notes. When the optional
 planner is enabled, Muse Spark, Meta's model, reads a note and proposes one
 bounded change to the scene. The app checks the proposal against the scene and
-its sources, and nothing is applied until a person approves it. Each approved
+its sources, and nothing is applied until the owner approves it. Each approved
 change is saved as a new version, and earlier versions are never overwritten.
 A proposal that fails the checks is not applied, and the app shows why.
 
@@ -27,8 +27,13 @@ checksums and every change recorded as a new, attributed version.
 
 **Demo material.** Photographs of the Grand Canyon Lodge from the Historic
 American Buildings Survey (HABS AZ-135-A, Richard Frear, July 1982; Library of
-Congress; public domain). Notes in the demo are labelled as demonstration
-hypotheses, not recollections.
+Congress), a U.S. Government work with no known restrictions on images made by
+the U.S. Government, per the [Library of Congress HABS rights
+advisory](https://www.loc.gov/rr/print/res/114_habs.html). Notes in the demo
+are labelled as demonstration hypotheses, not recollections. The demo's owner
+note is read aloud by a Synthetic demo voice (macOS text-to-speech): a
+demonstration instruction about the archival photo, not a person, memory or
+witness account.
 
 Built during the Meta Global AI Developer Hackathon (October 27 to
 November 4, 2026).
@@ -114,8 +119,8 @@ add its own documented setup and checks when introduced.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and review rules. Keep each
 change focused, explain its technical purpose, and provide relevant validation.
-No remote has been configured. Initial publication and shared base-branch
-setup require a separate instruction.
+The repository is hosted at https://github.com/BeomSeogKim/rehere; open pull
+requests against `main`. The CI Guard workflow runs on them.
 
 ## License
 

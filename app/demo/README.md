@@ -43,6 +43,11 @@ only to a snapshot made from this photograph.
    copy of that snapshot can be exported as in [the static guide](../STATIC-DEMO.md),
    with `--credit-file app/demo/habs-az-135-a-26.credit.txt`.
 
+If the demonstration includes the owner note as audio, it is a **Synthetic demo
+voice (macOS text-to-speech)** reading a demonstration instruction about the
+photograph. Label it that way; it is not a person, a memory or a witness
+account.
+
 There is no real witness in this scenario. A recollection may be added only if
 it is a real, attributed one with permission; never present a synthetic note as
 a memory.

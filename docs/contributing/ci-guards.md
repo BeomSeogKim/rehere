@@ -46,6 +46,11 @@ publication or certify that arbitrary prose is safe.
 - Run checks without path filters so documentation and configuration changes
   cannot skip the required job. Use a timeout and cancel obsolete runs.
 
+The Pages deployment workflow is the one exception to the read-only rule: it
+also needs `pages: write` and `id-token: write`. It runs only by manual dispatch
+on `main`, uses no repository secrets, runs no pull-request code, and verifies a
+release asset's SHA-256 before deploying anything.
+
 The workflow is `CI Guard` and its job is `repository`. After the first remote
 run, require its repository check and PRs on `main`, restrict direct updates,
 and allow squash merging. Confirm the actual check name in that run when
