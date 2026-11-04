@@ -7,9 +7,9 @@ written beforehand for 40 notes about six public photographs?
 **Read this first.** The expected verdicts were written by the development team
 (AI-assisted). They are not independent annotators' labels, and they describe
 what we expect a careful viewer to see in these frames, never historical truth.
-A separate AI-assisted review checked the labels against the pinned frames.
-That is another development-team review, not independent validation. Nothing
-here is a benchmark of the model in general.
+A separate AI model review (another development-team review, not independent
+validation) checked the labels against the pinned frames. Nothing here is a
+benchmark of the model in general.
 
 ## What was run
 
@@ -123,12 +123,13 @@ separate source choice from position. On the 34 claims (s14 is flagged) the
 figure rests on s15 alone: 3/3 per effort. s14's label is flagged for the
 colour word "white", but its source choice was correct in all six runs.
 
-## Label flags (one viewer's check, not independent validation)
+## Label flags: A separate AI model review (another development-team review, not independent validation)
 
-A separate AI-assisted review checked every label against the frames in two
-passes: the first before the full run (it led to the c06 relabel and flagged
-the six claims below), the second while the run was in progress. Neither pass
-changed a label after answers existed.
+A separate AI model review (another development-team review, not independent
+validation) checked every label against the frames in two passes: the first
+before the full run (it led to the c06 relabel and flagged the six claims
+below), the second while the run was in progress. Neither pass changed a
+label after answers existed.
 
 | Claims | Result | Reason |
 |---|---|---|
