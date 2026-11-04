@@ -81,6 +81,22 @@ describe('the Muse Voice Transcribe client', () => {
     assert.deepEqual((await budget.read()).entries.map(({ state, reservedUsd }) => ({ state, reservedUsd })), [{ state: 'reserved', reservedUsd: 1000 * USD_PER_AUDIO_MS }]);
   });
 
+  it('biases recognition toward one documented language only when configured', async () => {
+    const { ledger: budget } = await ledger();
+    const sent = [];
+    const fetch = async (url, init) => {
+      sent.push(JSON.parse(await init.body.get('request').text()));
+      return json({ turns: [turn('t1', 0, 500, 'a')] });
+    };
+    await createMetaTranscriber({ apiKey: 'k', ledger: budget, fetch, language: 'English' })({ wav: WAV, durationMs: 1000, admit: admitNow });
+    await createMetaTranscriber({ apiKey: 'k', ledger: budget, fetch })({ wav: WAV, durationMs: 1000, admit: admitNow });
+    assert.deepEqual(sent, [
+      { model: TRANSCRIBE_MODEL, mode: 'ENDPOINTING', audioEncoding: 'WAV', languageBias: ['English'] },
+      { model: TRANSCRIBE_MODEL, mode: 'ENDPOINTING', audioEncoding: 'WAV' },
+    ]);
+    for (const language of ['english', 'en', 'Klingon', '']) assert.throws(() => createMetaTranscriber({ apiKey: 'k', ledger: budget, language }), undefined, language);
+  });
+
   it('marks provider IDs unavailable when the response has none', async () => {
     const { ledger: budget } = await ledger();
     const transcribe = createMetaTranscriber({ apiKey: 'k', ledger: budget, fetch: async () => json({ turns: [turn('t1', 0, 500, 'a')] }) });
@@ -160,5 +176,7 @@ describe('the Muse Voice Transcribe client', () => {
     assert.equal(metaTranscriberFromEnv({ ledgerFile: file, env: { MODEL_API_KEY: 'k', REHERE_MODEL_LIVE: '1' } }), null);
     assert.equal(typeof metaTranscriberFromEnv({ ledgerFile: file, env: { MODEL_API_KEY: 'k', REHERE_TRANSCRIBE_LIVE: '1', REHERE_TRANSCRIBE_MAX_REQUESTS: '2' } }), 'function');
     assert.throws(() => metaTranscriberFromEnv({ ledgerFile: file, env: { MODEL_API_KEY: 'k', REHERE_TRANSCRIBE_LIVE: '1', REHERE_TRANSCRIBE_TOTAL_USD: '5' } }));
+    assert.equal(typeof metaTranscriberFromEnv({ ledgerFile: file, env: { MODEL_API_KEY: 'k', REHERE_TRANSCRIBE_LIVE: '1', REHERE_TRANSCRIBE_LANGUAGE: 'English' } }), 'function');
+    assert.throws(() => metaTranscriberFromEnv({ ledgerFile: file, env: { MODEL_API_KEY: 'k', REHERE_TRANSCRIBE_LIVE: '1', REHERE_TRANSCRIBE_LANGUAGE: 'en-US' } }));
   });
 });

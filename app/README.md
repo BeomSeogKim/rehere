@@ -506,7 +506,11 @@ recording of at most 60 seconds once, with no automatic retries. Before
 sending, the server reserves the estimated cost from the decoded duration at
 the published $0.18 per audio hour. Default local limits are $0.005 per draft,
 $0.05 total and 10 drafts; `REHERE_TRANSCRIBE_TOTAL_USD` and
-`REHERE_TRANSCRIBE_MAX_REQUESTS` can lower them. Reservations persist in
+`REHERE_TRANSCRIBE_MAX_REQUESTS` can lower them. Optionally set
+`REHERE_TRANSCRIBE_LANGUAGE` to one documented language name, such as
+`English`, to send it as `languageBias`; otherwise the provider detects the
+language. The setting declares the expected spoken language; it is a hint,
+not a guarantee of transcription quality. Reservations persist in
 `data/transcribe-budget.json`. The API reports no usage, so a sent request
 keeps its full estimate, even after an error response; only a request that
 was never sent is settled at zero. These are

@@ -8,6 +8,11 @@ export const MAX_DRAFT_MS = 60_000;
 // The published price is per hour of processed audio, billed per whole second.
 export const USD_PER_AUDIO_MS = 0.18 / 3_600_000;
 export const DEFAULT_TRANSCRIBE_LIMITS = Object.freeze({ totalUsd: 0.05, perRequestUsd: 0.005, maxRequests: 10 });
+// The language names the provider documents for `languageBias`.
+export const BIAS_LANGUAGES = Object.freeze([
+  'Arabic', 'Bengali', 'Dutch', 'English', 'French', 'German', 'Hebrew', 'Hindi', 'Indonesian', 'Italian', 'Japanese', 'Kannada', 'Korean',
+  'Malay', 'Mandarin Chinese', 'Marathi', 'Polish', 'Portuguese', 'Spanish', 'Tagalog', 'Tamil', 'Telugu', 'Thai', 'Turkish', 'Vietnamese',
+]);
 const TIMEOUT_MS = 30_000;
 const RESPONSE_BYTES = 256 * 1024;
 // Turn ends may round past the decoded length; a larger overshoot means the
@@ -68,19 +73,23 @@ async function readLimited(response, maxBytes) {
 // automatic retries. The request starts only through `admit`, which the caller
 // runs under its policy mutex: `admit(start)` resolves to { value: start() }
 // when sending is still allowed, or null. The key is sent only in the
-// Authorization header and never logged.
+// Authorization header and never logged. `language` optionally biases
+// recognition toward one documented language name; without it the provider
+// detects the language.
 //
 // Every outcome carries `call`: whether a request was dispatched, its HTTP
 // status, the provider's request and session IDs when it returned them (null
 // otherwise) and the latency. The API reports no usage, so none is invented:
 // a dispatched request always keeps its full estimated reservation, because an
 // error response alone does not establish that no audio was processed.
-export function createMetaTranscriber({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, now = Date.now }) {
+export function createMetaTranscriber({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, now = Date.now, language = null }) {
   if (!apiKey) throw new Error('A model API key is required.');
+  if (language !== null && !BIAS_LANGUAGES.includes(language)) throw new Error('The transcription language must be one of the documented language names.');
+  const options = { model: TRANSCRIBE_MODEL, mode: 'ENDPOINTING', audioEncoding: 'WAV', ...(language && { languageBias: [language] }) };
   let busy = false;
   const post = async (wav, signal) => {
     const form = new FormData();
-    form.append('request', new Blob([JSON.stringify({ model: TRANSCRIBE_MODEL, mode: 'ENDPOINTING', audioEncoding: 'WAV' })], { type: 'application/json' }));
+    form.append('request', new Blob([JSON.stringify(options)], { type: 'application/json' }));
     form.append('audio', new Blob([wav], { type: 'audio/wav' }), 'audio.wav');
     const response = await fetch(`${META_API}/asr/transcribe`, {
       method: 'POST', headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' }, body: form, signal, redirect: 'error',
@@ -156,7 +165,8 @@ function limit(value, fallback) {
 }
 
 // Live use needs the key and its own enable flag, separate from the planner's.
-// Limit overrides can only lower the defaults.
+// Limit overrides can only lower the defaults. REHERE_TRANSCRIBE_LANGUAGE
+// optionally names one documented language to bias recognition toward.
 export function metaTranscriberFromEnv({ ledgerFile, env = process.env }) {
   if (!env.MODEL_API_KEY || env.REHERE_TRANSCRIBE_LIVE !== '1') return null;
   const limits = {
@@ -164,5 +174,6 @@ export function metaTranscriberFromEnv({ ledgerFile, env = process.env }) {
     perRequestUsd: DEFAULT_TRANSCRIBE_LIMITS.perRequestUsd,
     maxRequests: Math.floor(limit(env.REHERE_TRANSCRIBE_MAX_REQUESTS, DEFAULT_TRANSCRIBE_LIMITS.maxRequests)),
   };
-  return createMetaTranscriber({ apiKey: env.MODEL_API_KEY, ledger: new BudgetLedger({ file: ledgerFile, limits }) });
+  const language = env.REHERE_TRANSCRIBE_LANGUAGE ? env.REHERE_TRANSCRIBE_LANGUAGE : null;
+  return createMetaTranscriber({ apiKey: env.MODEL_API_KEY, ledger: new BudgetLedger({ file: ledgerFile, limits }), language });
 }
