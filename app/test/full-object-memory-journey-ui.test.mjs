@@ -9,6 +9,7 @@ import { FakeElement } from './fake-dom.mjs';
 
 // The visitor screen's 3D viewer is replaced by a recorder; Node has no WebGL.
 const viewerStub = `export function createViewer(...args) { globalThis.visitViewerCalls.push(args); return Promise.resolve({ dispose() { globalThis.visitViewerCalls.disposed = true; }, applyEdit(edit) { globalThis.visitViewerCalls.edits.push(edit); }, setCamera() {}, getCamera() { return null; }, originalView() { return true; }, setInteractive() {}, isInteractive() { return false; }, setPhotoFraming() {}, setPhotoContext(on) { globalThis.visitContext?.push(on); return !on || globalThis.visitContextResult !== false; }, setContextListener(listener) { globalThis.visitContextListener = listener; } }); }
+export function originalPhotoCamera() { throw new Error('Camera-profile checks use the real viewer suites.'); }
 export function createExploreToggle() { const button = document.createElement('button'); const status = document.createElement('p'); return { button, status, attach() {}, detach() {} }; }
 export function createInspectToggle() { const button = document.createElement('button'); const note = document.createElement('p'); return { button, note, attach() {} }; }`;
 registerHooks({
@@ -317,7 +318,7 @@ describe('full-object visitor view', () => {
       const [note] = v.container.findAll((node) => node.tag === 'p' && /approximate edge/.test(node.textContent ?? ''));
       const context = button('Photo with the estimated object'), scene = button('This reconstruction');
       const shown = () => ({ photo: !photo.hidden, context: context.attributes['aria-pressed'], scene: scene.attributes['aria-pressed'], note: !note.hidden, frame: frame.className });
-      const RECONSTRUCTION = { photo: false, context: 'false', scene: 'true', note: false, frame: 'visit-compare-frame' };
+      const RECONSTRUCTION = { photo: false, context: 'false', scene: 'true', note: false, frame: 'visit-compare-frame space-viewport-wrap' };
       assert.equal(context.hidden, false, 'offered for a full object');
       button('Compare with the photograph').dispatch('click');
       context.dispatch('click');
@@ -325,7 +326,7 @@ describe('full-object visitor view', () => {
       assert.equal(photo.hidden, true);
       photo.onload();
       assert.equal(globalThis.visitContext.at(-1), true);
-      assert.deepEqual(shown(), { photo: true, context: 'true', scene: 'false', note: true, frame: 'visit-compare-frame is-context' });
+      assert.deepEqual(shown(), { photo: true, context: 'true', scene: 'false', note: true, frame: 'visit-compare-frame space-viewport-wrap is-context' });
       scene.dispatch('click');
       assert.equal(globalThis.visitContext.at(-1), false);
       assert.deepEqual(shown(), RECONSTRUCTION);

@@ -9,6 +9,7 @@ import { FakeElement } from './fake-dom.mjs';
 
 // The visitor screen's 3D viewer is replaced by a recorder; Node has no WebGL.
 const viewerStub = `export function createViewer(...args) { globalThis.visitViewerCalls.push(args); return Promise.resolve({ dispose() {}, applyEdit(edit) { globalThis.visitViewerCalls.edits.push(edit); }, setCamera() {}, getCamera() { return null; }, originalView() { return true; }, setInteractive() {}, isInteractive() { return false; } }); }
+export function originalPhotoCamera() { throw new Error('Camera-profile checks use the real viewer suites.'); }
 export function createExploreToggle() { const button = document.createElement('button'); const status = document.createElement('p'); return { button, status, attach() {}, detach() {} }; }
 export function createInspectToggle() { const button = document.createElement('button'); const note = document.createElement('p'); return { button, note, attach() {} }; }`;
 registerHooks({
