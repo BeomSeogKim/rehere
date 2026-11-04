@@ -65,3 +65,17 @@ footer { margin-top: 2.5rem; padding: 1.25rem 0 2.5rem; border-top: 1px solid va
   .stop figure { grid-column: 1; grid-row: 2 / span 4; margin: 0; }
   .stop .does, .stop .route, .stop .source { grid-column: 2; }
 }
+.lodge-photo { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); }
+.lodge-grid { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 24rem), 1fr)); margin-top: 1rem; }
+.lodge-card { padding: 0.75rem; border: 1px solid var(--rule); border-radius: 0.4rem; background: var(--band); }
+.lodge-card h4 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+.lodge-stack { position: relative; }
+.lodge-stack img { display: block; width: 100%; height: auto; }
+.lodge-stack .lodge-overlay { position: absolute; top: 0; left: 0; border: 0; background: transparent; }
+.lodge-meta, .lodge-note, .lodge-zero { margin: 0.5rem 0 0; font-size: 0.95rem; color: var(--muted); overflow-wrap: anywhere; }
+.lodge-note { color: var(--fg); }
+.lodge-table { border-collapse: collapse; width: 100%; margin: 0.5rem 0; font-size: 0.95rem; }
+.lodge-table caption { text-align: left; color: var(--muted); padding-bottom: 0.3rem; }
+.lodge-table th, .lodge-table td { border: 1px solid var(--rule); padding: 0.25rem 0.5rem; text-align: left; }
+.lodge-card details { margin-top: 0.5rem; max-height: 18rem; overflow: auto; }
+.lodge-photo code { overflow-wrap: anywhere; font-size: 0.85rem; }

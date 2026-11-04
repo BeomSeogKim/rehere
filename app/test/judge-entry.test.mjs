@@ -199,12 +199,13 @@ describe('building a site from an earlier export with an entry', () => {
     }
   }
 
-  // The real entry files, with the photograph pins replaced by pins of small synthetic files.
+  // The real three-stop entry files (the real lodge index page is tested in lodge-index.test.mjs; withLodge adds a synthetic one
+  // where a test needs a second page), with the photograph pins replaced by pins of small synthetic files.
   async function entryAndPhotos() {
     const base = await tempDir();
     const entryDir = path.join(base, 'entry');
     const photosDir = path.join(base, 'photos');
-    await cp(ENTRY, entryDir, { recursive: true });
+    await cp(ENTRY, entryDir, { recursive: true, filter: (source) => !path.basename(source).startsWith('lodge-index.') });
     const config = JSON.parse(await readFile(path.join(entryDir, 'photos.json'), 'utf8'));
     await mkdir(photosDir);
     for (const [index, photo] of config.photos.entries()) {
