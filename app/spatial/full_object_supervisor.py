@@ -23,6 +23,8 @@ sys.dont_write_bytecode = True
 GIB, MIB = 1024**3, 1024**2
 WALL, BASELINE, INTERVAL, TELEMETRY_TIMEOUT = 600, 20, .5, 5
 PROFILE = "(version 1)(allow default)(deny network*)"
+# Bounded wait for an exiting process to read as a zombie or as absent.
+EXIT_SETTLE_POLLS, EXIT_SETTLE_INTERVAL = 20, .005
 ENV_KEYS = {"FULL_OBJECT_TRIPOSR_SOURCE", "FULL_OBJECT_MODEL_DIR", "FULL_OBJECT_DINO_CONFIG",
             "HF_HOME", "HF_HUB_CACHE", "XDG_CACHE_HOME", "NUMBA_CACHE_DIR", "TMPDIR"}
 MODEL = {"id": "stabilityai/TripoSR", "revision": "5b521936b01fbe1890f6f9baed0254ab6351c04a",
@@ -164,17 +166,47 @@ class Host:
         return members
 
     def identity(self, pid):
-        process = self.psutil.Process(pid)
-        created = process.create_time()
-        zombie = process.status() == self.psutil.STATUS_ZOMBIE
+        """Identity of pid, or gone=True only when the process table has no such pid.
+
+        A zombie is still present (gone=False). Access errors and any other
+        uncertainty raise rather than being read as absence.
+        """
+        gone = {"pgid": None, "created": None, "zombie": False, "gone": True}
+        try:
+            process = self.psutil.Process(pid)
+            created = process.create_time()
+            zombie = process.status() == self.psutil.STATUS_ZOMBIE
+        except self.psutil.ZombieProcess:
+            raise
+        except self.psutil.NoSuchProcess:
+            if self.psutil.pid_exists(pid):
+                raise
+            return gone
         try:
             pgid = os.getpgid(pid)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
+            # An exiting process can refuse getpgid while psutil still reads it as
+            # idle or running. Wait briefly for an authoritative state: absent, or a
+            # zombie. Anything else stays an error.
+            pgid = pid
+            for _ in range(EXIT_SETTLE_POLLS):
+                if not self.psutil.pid_exists(pid):
+                    return gone
+                try:
+                    zombie = process.status() == self.psutil.STATUS_ZOMBIE
+                except self.psutil.NoSuchProcess:
+                    zombie = False
+                if zombie:
+                    break
+                time.sleep(EXIT_SETTLE_INTERVAL)
+            else:
+                raise
+        except PermissionError:
             zombie = process.status() == self.psutil.STATUS_ZOMBIE
             if not zombie:
                 raise
             pgid = pid
-        return {"pgid": pgid, "created": created, "zombie": zombie}
+        return {"pgid": pgid, "created": created, "zombie": zombie, "gone": False}
 
     def launch(self, config_path, log, env, life_fd):
         return subprocess.Popen(["/usr/bin/nice", "-n", "10", "/usr/bin/sandbox-exec", "-p", PROFILE,
@@ -469,6 +501,16 @@ def supervise(config_path, host=None):
                     gate_open = True
                 if gate_open:
                     watched = telemetry(lambda: host.identity(watchdog["pid"]))
+                    if watched.get("gone"):
+                        # The verified watchdog exits when the leader does and is reaped
+                        # elsewhere, so it can vanish just before the leader reads as a
+                        # zombie. Only an exited leader with its recorded identity lets
+                        # the next pass take the existing leader-exit path.
+                        leader = telemetry(lambda: host.identity(proc.pid))
+                        if (leader.get("gone") or not leader["zombie"] or leader["pgid"] != proc.pid
+                                or leader["created"] != handle["created"]):
+                            raise Stop("watchdog_lost")
+                        continue
                     if watched["pgid"] != proc.pid or watched["created"] != watchdog["created"] or watched["zombie"]:
                         raise Stop("watchdog_lost")
                 time.sleep(INTERVAL)

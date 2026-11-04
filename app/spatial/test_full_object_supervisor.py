@@ -338,6 +338,77 @@ class SupervisorTests(unittest.TestCase):
         time.sleep(.06)
         self.assertFalse(target.exists())
 
+    def watchdog_vanishing_host(self, *, after_leader_exit, leader_created_shift=0, created_shift=0):
+        """A DummyHost whose verified watchdog reads as gone (or reused) once the gate is open."""
+        host = DummyHost()
+        original = host.identity
+        handle = self.attempt / "handle.json"
+        host.observed = []
+
+        def leader_exited(pid):
+            try:
+                return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                return False
+
+        def identity(pid):
+            if host.proc is not None and pid != host.proc.pid and handle.exists():
+                if after_leader_exit:
+                    limit = time.monotonic() + 5
+                    while not leader_exited(host.proc.pid) and time.monotonic() < limit:
+                        time.sleep(.005)
+                host.observed.append(("watchdog", leader_exited(host.proc.pid)))
+                if created_shift:
+                    result = original(pid)
+                    if not result.get("gone"):
+                        result["created"] += created_shift
+                    return result
+                return {"pgid": None, "created": None, "zombie": False, "gone": True}
+            result = original(pid)
+            if leader_created_shift and host.observed and not result.get("gone"):
+                result["created"] += leader_created_shift
+            return result
+
+        host.identity = identity
+        return host
+
+    def test_vanished_verified_watchdog_after_leader_exit_completes(self):
+        host = self.watchdog_vanishing_host(after_leader_exit=True)
+        code, receipt = self.run_supervisor(host)
+        self.assertEqual((code, receipt["status"], receipt.get("reason")), (0, "complete", None))
+        self.assertTrue(host.observed and all(exited for _, exited in host.observed))
+        self.assert_stopped(host)
+
+    def test_missing_watchdog_while_leader_lives_is_refused(self):
+        self.worker_code("import time;time.sleep(1)")
+        host = self.watchdog_vanishing_host(after_leader_exit=False)
+        code, receipt = self.run_supervisor(host)
+        self.assertEqual((code, receipt["reason"]), (1, "watchdog_lost"))
+        self.assertEqual(host.observed[0], ("watchdog", False))
+        self.assert_stopped(host)
+
+    def test_reused_watchdog_pid_is_refused(self):
+        self.worker_code("import time;time.sleep(1)")
+        host = self.watchdog_vanishing_host(after_leader_exit=False, created_shift=1)
+        code, receipt = self.run_supervisor(host)
+        self.assertEqual((code, receipt["reason"]), (1, "watchdog_lost"))
+        self.assert_stopped(host)
+
+    def test_gone_watchdog_with_a_reused_leader_identity_is_refused(self):
+        host = self.watchdog_vanishing_host(after_leader_exit=True, leader_created_shift=1)
+        code, receipt = self.run_supervisor(host)
+        self.assertEqual((code, receipt["reason"]), (1, "watchdog_lost"))
+        self.assert_stopped(host)
+
+    def test_surviving_group_child_still_fails_when_the_watchdog_vanished(self):
+        script = "import time;time.sleep(2)"
+        children = self.attempt / "dummy-children.json"
+        self.worker_code("import subprocess,sys,json\nfrom pathlib import Path\np=subprocess.Popen([sys.executable,'-I','-B','-c'," + repr(script) + "])\nPath(" + repr(str(children)) + ").write_text(json.dumps([p.pid]))\n")
+        host = self.watchdog_vanishing_host(after_leader_exit=True)
+        code, receipt = self.run_supervisor(host)
+        self.assertEqual((code, receipt["reason"]), (1, "surviving_group_child"))
+        self.assert_stopped(host)
+
     def test_nonempty_output_refuses_before_launch(self):
         (self.output / "existing").write_text("preserve")
         host = DummyHost()
@@ -544,6 +615,81 @@ class SupervisorDeathTests(unittest.TestCase):
 
     def test_eof_watchdog_is_independent_of_a_model_process_holding_the_gil(self):
         self.check_death("held-gil")
+
+
+
+class HostIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.host = supervisor.Host()
+        self.host.psutil = psutil
+
+    def spawn(self, code="pass"):
+        return subprocess.Popen([sys.executable, "-I", "-B", "-c", code], start_new_session=True)
+
+    def test_a_reaped_process_is_gone_not_zombie(self):
+        proc = self.spawn()
+        proc.wait()
+        self.assertEqual(self.host.identity(proc.pid), {"pgid": None, "created": None, "zombie": False, "gone": True})
+
+    def test_an_unreaped_exit_is_a_present_zombie(self):
+        proc = self.spawn()
+        self.addCleanup(proc.wait)
+        limit = time.monotonic() + 5
+        while psutil.Process(proc.pid).status() != psutil.STATUS_ZOMBIE and time.monotonic() < limit:
+            time.sleep(.005)
+        identity = self.host.identity(proc.pid)
+        self.assertEqual((identity["zombie"], identity["gone"], identity["pgid"]), (True, False, proc.pid))
+
+    def test_a_live_process_keeps_its_identity(self):
+        proc = self.spawn("import time;time.sleep(5)")
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        identity = self.host.identity(proc.pid)
+        self.assertEqual((identity["gone"], identity["zombie"], identity["pgid"]), (False, False, proc.pid))
+        self.assertEqual(identity["created"], psutil.Process(proc.pid).create_time())
+
+    def fake_psutil(self, statuses, exists):
+        """psutil stand-in whose status and pid_exists answers follow the given sequences."""
+        statuses, exists = list(statuses), list(exists)
+
+        class Process:
+            def __init__(self, pid):
+                pass
+
+            def create_time(self):
+                return 123.0
+
+            def status(self):
+                return statuses.pop(0) if len(statuses) > 1 else statuses[0]
+
+        return type("FakePsutil", (), {"Process": Process, "STATUS_ZOMBIE": psutil.STATUS_ZOMBIE, "NoSuchProcess": psutil.NoSuchProcess,
+                                       "ZombieProcess": psutil.ZombieProcess, "AccessDenied": psutil.AccessDenied,
+                                       "pid_exists": staticmethod(lambda pid: exists.pop(0) if len(exists) > 1 else exists[0])})
+
+    def test_an_exiting_process_settles_to_zombie_or_gone_or_stays_an_error(self):
+        cases = {
+            "idle then zombie": (["running", "idle", "idle", psutil.STATUS_ZOMBIE], [True], {"pgid": 4242, "created": 123.0, "zombie": True, "gone": False}),
+            "exits while waiting": (["running", "idle"], [True, True, False], {"pgid": None, "created": None, "zombie": False, "gone": True}),
+        }
+        for name, (statuses, exists, expected) in cases.items():
+            with self.subTest(name), patch.object(supervisor.os, "getpgid", side_effect=ProcessLookupError), patch.object(supervisor, "EXIT_SETTLE_INTERVAL", 0):
+                self.host.psutil = self.fake_psutil(statuses, exists)
+                self.assertEqual(self.host.identity(4242), expected)
+        with self.subTest("never settles"), patch.object(supervisor.os, "getpgid", side_effect=ProcessLookupError), patch.object(supervisor, "EXIT_SETTLE_INTERVAL", 0), self.assertRaises(ProcessLookupError):
+            self.host.psutil = self.fake_psutil(["running", "idle"], [True])
+            self.host.identity(4242)
+
+    def test_uncertainty_is_never_read_as_gone(self):
+        proc = self.spawn("import time;time.sleep(5)")
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        for name, error in (("lookup while present", ProcessLookupError), ("permission", PermissionError)):
+            with self.subTest(name), patch.object(supervisor.os, "getpgid", side_effect=error), self.assertRaises(error):
+                self.host.identity(proc.pid)
+        with self.subTest("access denied"), patch.object(psutil, "Process", side_effect=psutil.AccessDenied(proc.pid)), self.assertRaises(psutil.AccessDenied):
+            self.host.identity(proc.pid)
+        with self.subTest("no such process but the pid still exists"), patch.object(psutil, "Process", side_effect=psutil.NoSuchProcess(proc.pid)), self.assertRaises(psutil.NoSuchProcess):
+            self.host.identity(proc.pid)
+        with self.subTest("zombie access error"), patch.object(psutil, "Process", side_effect=psutil.ZombieProcess(proc.pid)), self.assertRaises(psutil.ZombieProcess):
+            self.host.identity(proc.pid)
 
 
 if __name__ == "__main__":
