@@ -51,6 +51,7 @@ export const PROPOSAL_MESSAGES = {
   facing: 'The objects do not give a supported facing direction. Nothing was changed. Choose another position or direction.',
   unchanged: 'The proposed change would leave the selected arrangement as it is, so nothing is offered to save.',
   scene: 'The saved scene or its photos could not be verified, so no proposal is offered.',
+  unrecorded: 'This app answers only from stored model responses, and none matches this exact memory, photo and saved version. Nothing was sent and nothing is offered to apply.',
 };
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);

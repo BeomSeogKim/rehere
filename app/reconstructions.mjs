@@ -1933,7 +1933,8 @@ export class ReconstructionStore {
       if (!dispatched) return;
       const outcome = await dispatched.call;
       await this.serialize(async () => { const allowed = await modelAllowed(); const whole = await intact(); return this.changeProposal(draftId, jobId, proposal.id, async (current, manifest) => {
-        const record = { model: outcome?.model ?? null, usage: outcome?.usage ?? null, responseId: outcome?.responseId ?? null };
+        const record = { model: outcome?.model ?? null, usage: outcome?.usage ?? null, responseId: outcome?.responseId ?? null, mode: outcome?.mode ?? null, latencyMs: outcome?.latencyMs ?? null,
+          ...(outcome?.recordedAt && { recordedAt: outcome.recordedAt }) };
         // A canceled or stale proposal keeps its status; only what was spent is recorded.
         if (current.status !== 'processing') return record;
         // A restriction saved while the call ran: usage is kept, no result is offered.

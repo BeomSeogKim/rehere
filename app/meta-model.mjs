@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { COMPOSITION_PLAN_KEYS, COMPOSITION_VARIANT_PLAN_KEYS, PLAN_KEYS, TARGET_ID, VARIANT_PLAN_KEYS } from './memory-proposals.mjs';
@@ -211,6 +212,18 @@ function knownUsage(usage) {
   return { inputTokens, outputTokens, estimatedUsd: inputTokens * INPUT_USD + outputTokens * OUTPUT_USD };
 }
 
+async function writeJsonAtomic(file, state) {
+  const temp = `${file}.${randomUUID()}.tmp`;
+  await mkdir(path.dirname(file), { recursive: true });
+  try {
+    await writeFile(temp, JSON.stringify(state, null, 2));
+    await rename(temp, file);
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 // Persistent local spending ledger. A reservation counts at its full amount
 // until a valid usage report settles it; an unknown outcome is never released.
 // It is a local guard, not a provider-enforced cap.
@@ -236,16 +249,8 @@ export class BudgetLedger {
     }
   }
 
-  async write(state) {
-    const temp = `${this.file}.${randomUUID()}.tmp`;
-    await mkdir(path.dirname(this.file), { recursive: true });
-    try {
-      await writeFile(temp, JSON.stringify(state, null, 2));
-      await rename(temp, this.file);
-    } catch (error) {
-      await rm(temp, { force: true }).catch(() => {});
-      throw error;
-    }
+  write(state) {
+    return writeJsonAtomic(this.file, state);
   }
 
   static charged(entry) {
@@ -294,13 +299,44 @@ function finalText(result, messages) {
 
 const failure = (reason, extra = {}) => ({ ok: false, reason, model: null, responseId: null, usage: null, ...extra });
 
+// The exact body of the generation request, also the input a recording is bound to.
+function generationBody(body) {
+  return { ...body, store: false, reasoning: { effort: 'low' }, max_output_tokens: MAX_OUTPUT_TOKENS };
+}
+
+// A recording replays only for a byte-identical generation request: the same
+// memory text, photo bytes, source ID, base version and saved pose.
+export function requestDigest(generation) {
+  return createHash('sha256').update(JSON.stringify(generation), 'utf8').digest('hex');
+}
+
+function responseRecord(result, usage) {
+  return { model: typeof result?.model === 'string' ? result.model.slice(0, 120) : null, responseId: typeof result?.id === 'string' ? result.id.slice(0, 200) : null, usage };
+}
+
+// Reads the plan from a provider response that arrived with a 2xx status.
+function readPlan(result, record) {
+  const messages = Array.isArray(result?.output) ? result.output.filter((item) => item?.type === 'message') : [];
+  const parts = messages.flatMap((item) => (Array.isArray(item.content) ? item.content : []));
+  if (parts.some((part) => part?.type === 'refusal')) return failure('refused', record);
+  const answer = finalText(result, messages);
+  if (answer === null) return failure('incomplete', record);
+  let plan;
+  try {
+    plan = JSON.parse(answer);
+  } catch {
+    return failure('invalid', record);
+  }
+  return { ok: true, plan, ...record };
+}
+
 // The production proposal model. Count, reserve, then generate once; there are
 // no automatic retries. Each outbound request starts only through `admit`,
 // which the caller runs under its policy mutex: `admit(start)` resolves to
 // { value: start() } when the step is still allowed, or null. Without an
 // admission callback nothing is sent. The key is sent only in the Authorization header and
 // never logged; browser messages are chosen from `reason` by the caller.
-export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS }) {
+export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, recorder = null }) {
   if (!apiKey) throw new Error('A model API key is required.');
   let busy = false;
   const post = async (route, body, signal) => {
@@ -348,8 +384,13 @@ export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, time
 
       let generated;
       let sending = null;
+      const generation = generationBody(body);
+      let started = null;
       try {
-        sending = await admit(() => post('responses', { ...body, store: false, reasoning: { effort: 'low' }, max_output_tokens: MAX_OUTPUT_TOKENS }, combined));
+        sending = await admit(() => {
+          started = performance.now();
+          return post('responses', generation, combined);
+        });
       } catch {
         sending = null;
       }
@@ -363,27 +404,24 @@ export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, time
       } catch {
         return combined.aborted ? stopped() : failure('provider');
       }
+      const latencyMs = Math.round(performance.now() - started);
       const result = generated.json;
       const usage = knownUsage(result?.usage);
       if (usage) await ledger.settle(reservation, usage.estimatedUsd);
-      const record = { model: typeof result?.model === 'string' ? result.model.slice(0, 120) : null, responseId: typeof result?.id === 'string' ? result.id.slice(0, 200) : null, usage };
+      const record = { ...responseRecord(result, usage), mode: 'live', latencyMs };
       if (combined.aborted) return { ...stopped(), ...record };
       if (!generated.ok) {
         console.error(`model generation failed: HTTP ${generated.status}`);
         return failure('provider', record);
       }
-      const messages = Array.isArray(result?.output) ? result.output.filter((item) => item?.type === 'message') : [];
-      const parts = messages.flatMap((item) => (Array.isArray(item.content) ? item.content : []));
-      if (parts.some((part) => part?.type === 'refusal')) return failure('refused', record);
-      const answer = finalText(result, messages);
-      if (answer === null) return failure('incomplete', record);
-      let plan;
-      try {
-        plan = JSON.parse(answer);
-      } catch {
-        return failure('invalid', record);
+      if (recorder) {
+        try {
+          await recorder({ kind: 'recorded', requestSha256: requestDigest(generation), recordedAt: new Date().toISOString(), latencyMs, response: result });
+        } catch (error) {
+          console.error(`model response recording failed: ${error.message}`);
+        }
       }
-      return { ok: true, plan, ...record };
+      return readPlan(result, record);
     } finally {
       busy = false;
     }
@@ -397,14 +435,88 @@ function limit(value, fallback) {
   return number;
 }
 
+const DIGEST = /^[0-9a-f]{64}$/;
+const STORED_KINDS = new Set(['recorded', 'simulated']);
+
+// Stored responses: `recorded` ones were returned by Meta to a live request and
+// saved unchanged; `simulated` ones were written by hand and never came from Meta.
+export function parseStoredResponses(json) {
+  const entries = json?.entries;
+  if (!Array.isArray(entries)) throw new Error('The stored model responses need an entries array.');
+  const seen = new Set();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || !STORED_KINDS.has(entry.kind) || !DIGEST.test(entry.requestSha256)
+      || !entry.response || typeof entry.response !== 'object' || seen.has(entry.requestSha256)) {
+      throw new Error('A stored model response is malformed or repeated.');
+    }
+    if (entry.kind === 'recorded' && (typeof entry.recordedAt !== 'string' || typeof entry.response.id !== 'string'
+      || (entry.latencyMs !== undefined && (!Number.isInteger(entry.latencyMs) || entry.latencyMs < 0)))) {
+      throw new Error('A recorded model response needs its recording time and response ID.');
+    }
+    seen.add(entry.requestSha256);
+  }
+  return entries;
+}
+
+// Answers from stored responses only; nothing is sent and nothing is spent. A
+// request without a stored response for its exact input fails instead of
+// falling back to another response or to a live call.
+export function createStoredModel({ entries }) {
+  const stored = new Map(parseStoredResponses({ entries }).map((entry) => [entry.requestSha256, entry]));
+  return async function proposalModel({ signal, admit, ...input }) {
+    if (typeof admit !== 'function') return failure('restricted');
+    const digest = requestDigest(generationBody(requestBody(input)));
+    const entry = stored.get(digest);
+    if (!entry) {
+      console.error(`no stored model response matches request ${digest}`);
+      return failure('unrecorded');
+    }
+    // Admitted like a live request, so restrictions and cancellation still apply.
+    const admitted = await admit(() => entry);
+    if (!admitted) return failure(signal?.aborted ? 'canceled' : 'restricted');
+    const record = entry.kind === 'recorded'
+      ? { ...responseRecord(entry.response, knownUsage(entry.response.usage)), mode: 'recorded', latencyMs: entry.latencyMs ?? null, recordedAt: entry.recordedAt }
+      : { model: null, responseId: null, usage: null, mode: 'simulated', latencyMs: null };
+    return readPlan(entry.response, record);
+  };
+}
+
+// Appends each successful live response to a stored-response file, replacing
+// an earlier recording of the same request.
+export function responseRecorder(file) {
+  let queue = Promise.resolve();
+  return (entry) => {
+    const run = queue.then(async () => {
+      let state = { entries: [] };
+      try {
+        state = JSON.parse(await readFile(file, 'utf8'));
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      const entries = parseStoredResponses(state).filter((item) => item.requestSha256 !== entry.requestSha256);
+      await writeJsonAtomic(file, { entries: [...entries, entry] });
+    });
+    queue = run.catch(() => {});
+    return run;
+  };
+}
+
 // Live use needs both a key and an explicit enable flag in this process's
-// environment. Limit overrides can only lower the defaults.
+// environment. Limit overrides can only lower the defaults. Stored responses
+// are a separate, explicit mode and cannot be combined with live use.
 export function metaModelFromEnv({ ledgerFile, env = process.env }) {
-  if (!env.MODEL_API_KEY || env.REHERE_MODEL_LIVE !== '1') return null;
+  const live = env.REHERE_MODEL_LIVE === '1';
+  if (env.REHERE_MODEL_REPLAY) {
+    if (live || env.REHERE_MODEL_RECORD) throw new Error('Stored model responses cannot be combined with live use or recording.');
+    return createStoredModel({ entries: parseStoredResponses(JSON.parse(readFileSync(env.REHERE_MODEL_REPLAY, 'utf8'))) });
+  }
+  if (env.REHERE_MODEL_RECORD && !live) throw new Error('Recording model responses needs live use.');
+  if (!env.MODEL_API_KEY || !live) return null;
   const limits = {
     totalUsd: limit(env.REHERE_MODEL_TOTAL_USD, DEFAULT_LIMITS.totalUsd),
     perRequestUsd: DEFAULT_LIMITS.perRequestUsd,
     maxRequests: Math.floor(limit(env.REHERE_MODEL_MAX_REQUESTS, DEFAULT_LIMITS.maxRequests)),
   };
-  return createMetaModel({ apiKey: env.MODEL_API_KEY, ledger: new BudgetLedger({ file: ledgerFile, limits }) });
+  const recorder = env.REHERE_MODEL_RECORD ? responseRecorder(env.REHERE_MODEL_RECORD) : null;
+  return createMetaModel({ apiKey: env.MODEL_API_KEY, ledger: new BudgetLedger({ file: ledgerFile, limits }), recorder });
 }

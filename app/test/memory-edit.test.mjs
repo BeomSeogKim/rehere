@@ -657,6 +657,28 @@ describe('saved proposals chooser', () => {
     view.handle.dispose();
   });
 
+  it('shows how the stored answer was obtained, marking a simulated one as not from Meta', async () => {
+    state.proposals = [proposal({ mode: 'live', responseId: 'resp_live_1', latencyMs: 1830 })];
+    let view = mount();
+    await settle();
+    const review = view.find((node) => node.className === 'memory-review')[0];
+    assert.equal(review.attributes['data-kind'], 'guessed');
+    const evidence = () => view.find((node) => node.className === 'model-evidence')[0];
+    assert.equal(evidence().attributes['data-mode'], 'live');
+    assert.match(evidence().textContent, /Live answer from muse-spark-1\.3.*Meta response ID resp_live_1 · 1,830 ms.*\$0\.0016/);
+    assert.match(view.container.textContent, /Proposal \(AI suggestion\): Turn the selected object/);
+    view.handle.dispose();
+
+    state.proposals = [proposal({ mode: 'simulated', model: null, usage: null })];
+    view = mount();
+    await settle();
+    assert.equal(evidence().attributes['data-mode'], 'simulated');
+    assert.match(evidence().textContent, /SIMULATED answer, not from Meta.*No model produced it and nothing was sent\./);
+    assert.match(view.container.textContent, /Proposal \(SIMULATED, not from Meta\): Turn the selected object/);
+    assert.doesNotMatch(view.container.textContent, /AI suggestion|Live answer|response ID/);
+    view.handle.dispose();
+  });
+
   it('ends a preview when another proposal is chosen, so its guide and front check must be done again', async () => {
     state.proposals = [readyB({ id: ID_C, result: faceAnchor(ID_C, 'window'), statement: statement('Facing the window.') }), readyB({ result: faceAnchor(ID_B, 'door') })];
     const view = mount();

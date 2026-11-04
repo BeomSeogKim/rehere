@@ -398,6 +398,15 @@ retain their reservation. Recorded costs are estimates, not billing receipts.
 These limits coordinate one process and are not provider-enforced spending
 caps. Check current account credits and usage before each live batch.
 
+With live use, `REHERE_MODEL_RECORD=<file>` saves each successful response
+unchanged, bound to a hash of its exact request. A separate process started
+with only `REHERE_MODEL_REPLAY=<file>` answers from that file: it sends and
+spends nothing, and a request whose memory, photo, source or base version
+differs from every stored one fails instead of falling back. Entries of kind
+`simulated` are hand-written test answers. Each proposal shows whether its
+answer was live, replayed from a recording or simulated, with the model,
+Meta response ID and latency that were saved with it.
+
 The model can propose translation, rotation, a visible-surface direction toward
 a candidate photo point, or a clarification question. The server validates
 references, version, shape and coordinate bounds and computes the transform.

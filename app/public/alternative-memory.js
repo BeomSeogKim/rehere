@@ -1,6 +1,7 @@
 import { copyArrangement, objectState } from './arrangement.js';
 import { isComposition, poseProblem } from './composition-scene.js';
 import { editProblem } from './photo-scene.js';
+import { modelEvidence, proposalTitle } from './memory-edit.js';
 
 const ACTIVE = new Set(['queued', 'processing']);
 const POLL_MS = 2000;
@@ -69,6 +70,7 @@ export function mountAlternativeMemory(container, bridge) {
   const note = el('p', { className: 'form-message', role: 'status' });
   const list = el('ul', { className: 'memory-proposals' });
   const review = el('div', { className: 'alternative-memory-review' });
+  review.setAttribute('data-kind', 'guessed');
   const locked = () => busy || Boolean(createAttempt || applyAttempt || cancelAttempt) || proposals.some((proposal) => ACTIVE.has(proposal.status));
   const validScope = (proposal) => proposal?.scope?.kind === 'variant' && proposal.scope.parentVariantId === bridge.parentId && Number.isInteger(proposal.scope.baseEraRevision) && ['unknown', 'reconfirm-parent'].includes(proposal.scope.timeMode);
   const current = () => proposals.find((proposal) => proposal.id === selected) ?? null;
@@ -164,6 +166,16 @@ export function mountAlternativeMemory(container, bridge) {
     const nodes = [el('p', { className: 'hint', textContent: `Stored proposal for ${bridge.nameOf(proposal.targetId)}. New alternative time: ${proposal.scope.timeMode === 'unknown' ? 'unknown' : 'explicitly re-confirm the parent assertion'}. The current scene is not its target.` }), proposal.statement.source ? sourceText(proposal.statement.text, 'Proposal instruction from the written source, full text') : el('p', { className: 'memory-text', textContent: proposal.statement.text }),
       ...(proposal.statement.source ? [el('p', { className: 'hint', textContent: 'From this place’s written source.' })] : []),
       el('p', { className: 'hint', textContent: statusText(proposal) })];
+    const evidence = ['ready', 'clarify', 'applied'].includes(proposal.status) ? modelEvidence(proposal) : null;
+    if (evidence) {
+      const block = el('div', { className: 'model-evidence' }, [el('p', {}, [el('strong', { textContent: evidence.heading })]), ...evidence.lines.map((line) => el('p', { className: 'hint', textContent: line }))]);
+      block.setAttribute('data-mode', evidence.mode);
+      nodes.push(block);
+    }
+    if (proposal.result?.transform && ['ready', 'applied'].includes(proposal.status)) {
+      nodes.push(el('p', {}, [el('strong', { textContent: proposal.mode === 'simulated' ? 'Proposal (SIMULATED, not from Meta): ' : 'Proposal (AI suggestion): ' }), `${proposalTitle(proposal.result)} (${bridge.nameOf(proposal.targetId)})`]));
+      if (proposal.result.reason) nodes.push(el('p', { className: 'hint', textContent: `Reason given: ${proposal.result.reason}` }));
+    }
     if (bridge.binding()?.edit?.fullObject && proposal.motion) {
       const held = heldMotion(proposal.motion);
       nodes.push(el('p', { className: 'hint', textContent: held ? `This move could not be confirmed: ${held} ${MOTION_LIMIT}` : `This move does not overlap what is kept from the photo. ${MOTION_LIMIT}` }));

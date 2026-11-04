@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { RequestError } from '../drafts.mjs';
+import { MAX_OUTPUT_TOKENS, createStoredModel, requestBody, requestDigest } from '../meta-model.mjs';
 import { ReconstructionStore } from '../reconstructions.mjs';
 import { client, enrolledContributor, jpeg, png, startOwnerServer, SYNTHETIC_PHOTO } from './auth-helper.mjs';
 
@@ -235,6 +236,40 @@ describe('visible named-surface gate on every geometry writer', () => {
       assert.deepEqual(await readFile(place.manifestFile), before, 'the proposal and the saved version are kept');
       assert.equal((await owner.json(`${place.scene}/proposals/${ready.id}`)).status, 'ready');
       assert.equal(steps.length, 0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps a replayed answer’s recorded identity on the proposal through approval and the saved version', async () => {
+    // The stored model is built for the exact request the store sends, so the
+    // real replay path, not a stand-in outcome, produces the answer.
+    const proposalModel = async (call) => {
+      const plan = JSON.stringify({ action: 'translate', targetId: 'object-1', sourceId: call.sourceId, baseVersion: call.baseVersion, delta: [0, 0.2, 0], yawDelta: null, anchor: null, question: null, reason: 'Recorded plan.' });
+      const response = { id: 'resp_rec_1', model: 'muse-spark-1.3', status: 'completed', usage: { input_tokens: 900, output_tokens: 100 },
+        output: [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: plan }] }] };
+      const requestSha256 = requestDigest({ ...requestBody(call), store: false, reasoning: { effort: 'low' }, max_output_tokens: MAX_OUTPUT_TOKENS });
+      return createStoredModel({ entries: [{ kind: 'recorded', requestSha256, recordedAt: '2026-11-04T03:00:00.000Z', latencyMs: 2345, response }] })(call);
+    };
+    const { app, owner, dataDir } = await workspace({ proposalModel, prepareModelImage: JPEG_IMAGE });
+    try {
+      const place = await twoObjectScene(owner, dataDir);
+      let { id } = await (await owner.post(`${place.scene}/proposals`, { requestId: randomUUID(), baseVersion: 1, text: 'It stood a little higher.', consent: true, targetId: 'object-1' })).json();
+      let ready;
+      for (let attempt = 0; attempt < 200 && !['ready', 'failed', 'clarify'].includes(ready?.status); attempt++) {
+        ready = await owner.json(`${place.scene}/proposals/${id}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.equal(ready.status, 'ready');
+      const evidence = { model: 'muse-spark-1.3', responseId: 'resp_rec_1', mode: 'recorded', latencyMs: 2345, recordedAt: '2026-11-04T03:00:00.000Z' };
+      for (const [key, value] of Object.entries(evidence)) assert.equal(ready[key], value, key);
+      const applied = await owner.post(`${place.scene}/proposals/${id}/apply`, { requestId: randomUUID(), baseVersion: 1, frontConfirmed: false });
+      assert.equal(applied.status, 200);
+      const after = await owner.json(`${place.scene}/proposals/${id}`);
+      assert.equal(after.status, 'applied');
+      for (const [key, value] of Object.entries(evidence)) assert.equal(after[key], value, key);
+      const stored = JSON.parse(await readFile(place.manifestFile, 'utf8'));
+      assert.equal(stored.edits.at(-1).proposalId, id);
     } finally {
       await app.close();
     }

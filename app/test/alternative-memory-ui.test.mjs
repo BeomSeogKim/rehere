@@ -158,6 +158,25 @@ describe('memory proposals for the selected alternative', () => {
     assert.equal(requests.some((entry) => entry.method === 'POST'), false);
   });
 
+  it('shows the stored answer’s model, change, reason and how it was obtained', async () => {
+    let ui = await mount(); await memory(ui);
+    const recorded = { mode: 'recorded', model: 'muse-spark-1.3', responseId: 'resp_rec_1', latencyMs: 2345, recordedAt: '2026-11-04T03:00:00.000Z', usage: null };
+    await plan(ui, 'translate', (value) => ({ ...value, ...recorded, result: { ...value.result, reason: 'The memory says it was higher.' } }));
+    const review = ui.find((node) => node.className === 'alternative-memory-review')[0];
+    assert.equal(review.attributes['data-kind'], 'guessed');
+    const evidence = () => ui.find((node) => node.className === 'model-evidence')[0];
+    assert.equal(evidence().attributes['data-mode'], 'recorded');
+    assert.match(evidence().textContent, /Replayed answer from muse-spark-1\.3, recorded 2026-11-04 03:00 UTC.*Meta response ID resp_rec_1 · 2,345 ms when recorded.*sent nothing and cost nothing/);
+    assert.match(review.textContent, /Proposal \(AI suggestion\): Move the selected object \(A: Counter\)/);
+    assert.match(review.textContent, /Reason given: The memory says it was higher\./);
+
+    ui = await mount(); await memory(ui);
+    await plan(ui, 'translate', (value) => ({ ...value, mode: 'simulated', model: null, responseId: null, usage: null, latencyMs: null }));
+    assert.equal(evidence().attributes['data-mode'], 'simulated');
+    assert.match(evidence().textContent, /SIMULATED answer, not from Meta/);
+    assert.match(ui.find((node) => node.className === 'alternative-memory-review')[0].textContent, /Proposal \(SIMULATED, not from Meta\): Move the selected object/);
+  });
+
   for (const mismatch of ['requestId', 'era', 'time', 'target', 'missing id']) it(`keeps a mismatched create ${mismatch} response unclear and retries exactly`, async () => {
     const ui = await mount(); await memory(ui);
     await plan(ui, 'translate', (value) => { if (mismatch === 'requestId') value.requestId = 'other'; if (mismatch === 'era') value.scope.baseEraRevision = 3; if (mismatch === 'time') value.scope.timeMode = 'reconfirm-parent'; if (mismatch === 'target') value.targetId = 'object-2'; if (mismatch === 'missing id') delete value.id; return value; });

@@ -51,6 +51,53 @@ export function formatTransform(transform) {
   return `left/right ${x}, down/up ${y}, away/toward ${z}, turn ${Math.round((yaw * 180) / Math.PI)}°`;
 }
 
+function recordedTime(iso) {
+  const time = typeof iso === 'string' ? Date.parse(iso) : NaN;
+  return Number.isFinite(time) ? new Date(time).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'an unrecorded time';
+}
+
+const latencyText = (ms) => (Number.isInteger(ms) && ms >= 0 ? `${ms.toLocaleString('en-US')} ms` : 'latency not recorded');
+const costText = (usage) => (Number.isFinite(usage?.estimatedUsd) ? `$${usage.estimatedUsd.toFixed(4)} (an estimate, not the bill)` : null);
+
+// How a stored proposal's model answer was obtained, read only from the
+// evidence saved with it, as { mode, heading, lines }. Proposals saved before
+// the mode was recorded say so instead of passing as live or replayed answers.
+export function modelEvidence(proposal) {
+  const model = proposal?.model ?? 'an unknown model';
+  const response = proposal?.responseId ? `Meta response ID ${proposal.responseId}` : 'no Meta response ID was returned';
+  switch (proposal?.mode) {
+    case 'live': {
+      const spent = costText(proposal.usage);
+      return {
+        mode: 'live',
+        heading: `Live answer from ${model}`,
+        lines: [`Requested from the Meta Model API · ${response} · ${latencyText(proposal.latencyMs)}`, ...(spent ? [`Estimated cost ${spent}`] : [])],
+      };
+    }
+    case 'recorded': {
+      const spent = costText(proposal.usage);
+      return {
+        mode: 'recorded',
+        heading: `Replayed answer from ${model}, recorded ${recordedTime(proposal.recordedAt)}`,
+        lines: [
+          `${response} · ${latencyText(proposal.latencyMs)} when recorded`,
+          `This exact request was answered live once and saved unchanged; replaying it sent nothing and cost nothing.${spent ? ` The recorded request cost ${spent}.` : ''}`,
+        ],
+      };
+    }
+    case 'simulated':
+      return {
+        mode: 'simulated',
+        heading: 'SIMULATED answer, not from Meta',
+        lines: ['This answer was written by hand for testing. No model produced it and nothing was sent.'],
+      };
+    default:
+      return proposal?.model || proposal?.usage
+        ? { mode: 'unrecorded', heading: `Answer from ${model}`, lines: ['How this answer was obtained was not recorded.', ...(costText(proposal.usage) ? [`Estimated cost ${costText(proposal.usage)}`] : [])] }
+        : null;
+  }
+}
+
 export function proposalTitle(result) {
   switch (result?.action) {
     case 'translate':
@@ -244,6 +291,7 @@ export function mountMemoryEdit(container, bridge) {
   status.setAttribute('aria-live', 'polite');
   const message = el('p', { className: 'form-message', role: 'alert' });
   const review = el('div', { className: 'memory-review' });
+  review.setAttribute('data-kind', 'guessed');
   const chooserSummary = el('summary', { textContent: 'Saved proposals' });
   const chooserNote = el('p', { className: 'hint' });
   const chooser = el('ul', { className: 'memory-proposals' });
@@ -517,6 +565,12 @@ export function mountMemoryEdit(container, bridge) {
       const when = validTime(current.createdAt) ? `on ${timeText(current.createdAt)}` : 'at an unknown time';
       nodes.push(el('p', { className: 'hint', textContent: `Saved response from ${current.model ?? 'an unknown model'}, requested ${when}. It was stored then; reviewing it sends nothing new.` }));
     }
+    const evidence = ['ready', 'clarify', 'applied'].includes(current.status) ? modelEvidence(current) : null;
+    if (evidence) {
+      const block = el('div', { className: 'model-evidence' }, [el('p', {}, [el('strong', { textContent: evidence.heading })]), ...evidence.lines.map((line) => el('p', { className: 'hint', textContent: line }))]);
+      block.setAttribute('data-mode', evidence.mode);
+      nodes.push(block);
+    }
     nodes.push(el('p', { className: 'memory-statement' }, [el('strong', { textContent: 'Your memory: ' }), `“${current.statement.text}”`]));
     // A plan stays with the object it was made for, whatever is chosen now.
     if (bridge.targets && targetOf(current)) nodes.push(el('p', { className: 'hint', textContent: `Planned for ${bridge.targets.nameOf(targetOf(current))}.` }));
@@ -534,7 +588,7 @@ export function mountMemoryEdit(container, bridge) {
     if (current.status === 'ready' && current.result?.transform) {
       const { result } = current;
       nodes.push(
-        el('p', {}, [el('strong', { textContent: 'Proposal (AI suggestion): ' }), proposalTitle(result)]),
+        el('p', {}, [el('strong', { textContent: current.mode === 'simulated' ? 'Proposal (SIMULATED, not from Meta): ' : 'Proposal (AI suggestion): ' }), proposalTitle(result)]),
         el('p', { className: 'hint', textContent: `Reason given: ${result.reason}` }),
       );
       if (bridge.targets || composition) nodes.push(el('p', { className: 'hint', textContent: 'Photo, Saved and Proposed comparison is available only for a single-photo scene with one object.' }));
@@ -549,10 +603,6 @@ export function mountMemoryEdit(container, bridge) {
         el('p', { className: 'hint', textContent: `Saved now (version ${editor.version}): ${formatTransform(editor)}` }),
         el('p', { className: 'hint', textContent: `After this change: ${formatTransform(result.transform)}` }),
       );
-      if (current.model || current.usage) {
-        const cost = current.usage ? ` · estimated cost $${current.usage.estimatedUsd.toFixed(4)} (an estimate, not the bill)` : '';
-        nodes.push(el('p', { className: 'hint', textContent: `Model: ${current.model ?? 'unknown'}${cost}` }));
-      }
       let front = null;
       if (result.action === 'face_anchor' && result.anchor) {
         const [u, v] = result.anchor.point;
