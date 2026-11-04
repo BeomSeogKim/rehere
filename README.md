@@ -44,10 +44,10 @@ The [local memory-entry app](app/README.md) saves photographs, written memories
 and optional voice recordings, then reopens them for viewing and playback.
 It preserves original checksums, source attribution, independent use permissions
 and unknown dates. Permitted photos can become partial depth scenes through
-local depth estimation and Meta's SAM 2.1 segmentation (open weights). People can inspect model
-proposals, explore the visible surfaces, preview foreground changes and save
-versioned transforms. A scene can also hold exactly two named objects, each
-moved separately, with one explicit left/right rule from the original
+local depth estimation and Meta's SAM 2.1 segmentation (open weights), which
+remains the default. People can inspect model proposals, explore the visible
+surfaces, preview foreground changes and save versioned transforms. A scene can
+also hold exactly two named objects, each moved separately, with one explicit left/right rule from the original
 viewpoint, with bounded overlap checks between named visible surfaces.
 These do not establish whole-room or movement-path clearance. A separately
 enabled Meta planner connects written
@@ -68,6 +68,29 @@ A saved visitor snapshot can be exported as a frozen, read-only
 [static copy](app/STATIC-DEMO.md) that needs no application server, only static file hosting; it does not follow
 later revocation or withdrawal. Multi-view alignment and live hosted
 operation remain absent.
+
+Two optional features that call Meta models, both off by default, extend this.
+For a two-object build, an operator can have SAM 3.1 propose the outlines
+through the Meta Model API from the owner's object names instead of SAM 2.1. The
+server keeps an outline only when it matches the owner's drawn box and otherwise
+refuses the build; depth stays local. The masks are decoded with Meta's
+`meta-sam-parser`, which is under a custom Meta license (see the [third-party
+notices](THIRD-PARTY-NOTICES.md)) and is not redistributed here. A stored SAM
+3.1 response can be replayed only for a byte-identical request and sends
+nothing, while a live request is a separate, budgeted mode. The published demo
+scene's outline source reads "SAM 3.1 (Meta Model API)", and its outlines were
+built by replaying a stored response, so building it made no new API call.
+Neither path measures geometry or establishes history. See [two
+objects](app/OBJECTS.md#build-and-confirm-two-objects-from-one-photo) and the
+[spatial worker guide](app/spatial/README.md).
+
+An owner can also ask Muse Spark to compare one memory's written note with up to
+four of its photos. For up to three verbatim parts of the note it answers
+`supports`, `conflicts` or `not_visible`, names the photo and a crop where it
+can, and states one thing the photos cannot settle. This is visual agreement in
+those photos for that note only, never historical truth. It is owner-only,
+nothing is applied to a scene, and the owner accepts or dismisses each result.
+See [owner evidence checks](app/README.md#owner-evidence-checks).
 
 Try it: a frozen, read-only demo of one synthetic snapshot is at
 https://beomseogkim.github.io/rehere/
