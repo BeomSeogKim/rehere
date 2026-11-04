@@ -678,6 +678,18 @@ describe('returning to a hidden visit', () => {
     assert.ok(!src.calls.some((call) => call.includes('evidence')), 'not fetched');
     v.view.dispose();
   });
+
+  it('names the photo box in words, not only by colour', async () => {
+    const src = visit([() => Promise.resolve(twoObjects())]);
+    const v = open(src);
+    await flush();
+    v.find((node) => node.tag === 'button' && node.objectId === 'object-2')[0].dispatch('click');
+    await flush();
+    const badge = v.find((node) => node.tag === 'span' && node.className === 'box-badge')[0];
+    assert.ok(badge, 'badge is shown');
+    assert.equal(badge.attributes['aria-label'], `${badge.textContent} (box around this object in the photograph)`);
+    v.view.dispose();
+  });
 });
 
 describe('saved arrangement differences for visitors', () => {

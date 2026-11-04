@@ -148,7 +148,9 @@ describe('visitor-only entry', () => {
 
   it('is a page with only the stylesheet and this entry, importing only the visit modules', () => {
     const html = readFileSync(new URL('../public/visit.html', import.meta.url), 'utf8');
-    assert.deepEqual([...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]), ['/style.css', '/visitor-entry.js']);
+    assert.deepEqual([...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]), ['/style.css', '/visitor-entry.js', '#visit']);
+    assert.match(html, /<body[^>]*>\s*<a class="skip" href="#visit">Skip to the shared view<\/a>/);
+    assert.match(html, /<div id="visit"[^>]*tabindex="-1"/);
     assert.doesNotMatch(html, /<form|<input|<button|app\.js|access|sign in/i);
     const source = readFileSync(new URL('../public/visitor-entry.js', import.meta.url), 'utf8');
     assert.deepEqual([...source.matchAll(/^import .* from '([^']+)';$/gm)].map((match) => match[1]), ['./visits.js', './playback.js']);
