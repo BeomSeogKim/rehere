@@ -585,7 +585,7 @@ describe('recorded stories for visitors', () => {
     assert.doesNotMatch(v.container.textContent, /Recorded stories/, 'not on the start view');
     v.button('Mina’s recollection').dispatch('click');
     assert.match(v.container.textContent, /Recorded stories for this view/);
-    assert.match(v.container.textContent, /Recording by Owner\. Captions written by Owner; they are not checked by Rehere\. Nothing plays until you press Play\./);
+    assert.match(v.container.textContent, /Recording by Owner\. Caption attribution: Owner; they are not checked by Rehere\. Nothing plays until you press Play\./);
     assert.deepEqual(requested, []);
     v.find((node) => node.tag === 'button' && node.textContent === 'Play')[0].dispatch('click');
     await flush();
@@ -605,6 +605,36 @@ describe('recorded stories for visitors', () => {
     assert.ok(audios[1].calls.includes('pause'), 'a failed heartbeat silences the story');
     assert.deepEqual([...revoked].sort(), [...created].sort(), 'every local copy was released');
     v.view.dispose();
+  });
+
+  it('shows supplied-script attribution without inventing a human caption writer', async () => {
+    const data = withStory();
+    const story = data.stories[0];
+    Object.assign(story, {
+      viewId: START,
+      providerLabel: 'Synthetic voice (OpenAI TTS)',
+      captionAuthorLabel: 'Supplied synthesis script (listening/editorial review pending)',
+      cues: [{ startMs: 0, endMs: 9950, text: 'This is a synthetic demonstration, not a personal memory. The photograph shows the clock beneath the glass roof of Pennsylvania Station. The parts beyond this photograph remain unknown.' }],
+      durationMs: 9950,
+      audio: { type: 'audio/wav', size: 318444 },
+    });
+    assert.equal(Buffer.byteLength(story.cues[0].text), 185);
+    const src = source({ manifest: async () => data });
+    src.storyAudio = () => assert.fail('Attribution renders without fetching audio');
+    const v = open(src);
+    await flush();
+    assert.match(v.container.textContent, /Caption attribution: Supplied synthesis script \(listening\/editorial review pending\)/);
+    assert.match(v.container.textContent, /Captions \(supplied text; not checked by Rehere\):/);
+    assert.doesNotMatch(v.container.textContent, /written by a person|Captions written by Demo editor|AI-drafted/);
+    v.view.dispose();
+
+    story.captionDraft = { model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe' };
+    story.captionAuthorLabel = 'Workspace owner';
+    const drafted = open(source({ manifest: async () => data }));
+    await flush();
+    assert.match(drafted.container.textContent, /Captions AI-drafted \(Muse Voice Transcribe\), reviewed by Workspace owner/);
+    assert.match(drafted.container.textContent, /Captions \(AI-drafted, then reviewed by a person; not checked by Rehere\):/);
+    drafted.view.dispose();
   });
 });
 

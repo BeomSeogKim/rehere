@@ -494,7 +494,7 @@ export function mountVisitor(container, source, { onState = () => {}, limitedPho
             ...(objects && story.target ? [el('p', { className: 'hint', textContent: `About ${nameOf(story.target.id)}` })] : []),
             el('p', {
               className: 'hint',
-              textContent: `Recording by ${story.providerLabel || 'an unnamed provider'}. ${story.captionDraft ? `Captions AI-drafted (${story.captionDraft.label || 'Muse Voice Transcribe'}), reviewed by` : 'Captions written by'} ${story.captionAuthorLabel || 'the owner'}; they are not checked by Rehere. Nothing plays until you press Play.`,
+              textContent: `Recording by ${story.providerLabel || 'an unnamed provider'}. ${story.captionDraft ? `Captions AI-drafted (${story.captionDraft.label || 'Muse Voice Transcribe'}), reviewed by` : 'Caption attribution:'} ${story.captionAuthorLabel || 'the owner'}; they are not checked by Rehere. Nothing plays until you press Play.`,
             }),
             ...(player ? [player.element] : []),
           ]);

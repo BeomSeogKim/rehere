@@ -134,7 +134,7 @@ export function createStoryPlayer({ story, fetchAudio, owner = Symbol('story'), 
     el('p', {
       className: 'hint',
       textContent: !story.cues.length ? 'No captions supplied.'
-        : story.captionDraft ? 'Captions (AI-drafted, then reviewed by a person; not checked by Rehere):' : 'Captions (written by a person, not checked by Rehere):',
+        : story.captionDraft ? 'Captions (AI-drafted, then reviewed by a person; not checked by Rehere):' : 'Captions (supplied text; not checked by Rehere):',
     }),
     el('ol', { className: 'story-cues' }, cueItems),
   ]);

@@ -83,7 +83,7 @@
       },
       "title": "Synthetic editorial replacement, not a recollection",
       "providerLabel": "Synthetic voice (OpenAI TTS)",
-      "captionAuthorLabel": "Demo editor (script-copied cue; listening/editorial review pending)",
+      "captionAuthorLabel": "Supplied synthesis script (listening/editorial review pending)",
       "durationMs": 9950,
       "audioBytes": 318444,
       "audioSha256": "c4c053bdaa353284c8c63789ac989e100a66b360bf3b181f59c8c66aab304ae9",

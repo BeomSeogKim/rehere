@@ -283,7 +283,20 @@ describe('caption draft composer', () => {
     const text = (item) => createStoryPlayer({ story: item, fetchAudio: () => Promise.reject(new Error('unused')) }).element.textContent;
     assert.match(text({ ...story, captionDraft: { model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe' } }), /Captions \(AI-drafted, then reviewed by a person; not checked by Rehere\):/);
     assert.doesNotMatch(text({ ...story, captionDraft: { model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe' } }), /written by a person/);
-    assert.match(text(story), /Captions \(written by a person, not checked by Rehere\):/);
+    assert.match(text(story), /Captions \(supplied text; not checked by Rehere\):/);
+  });
+
+  it('does not infer a human caption writer from a supplied-script pending cue', () => {
+    const story = {
+      captionAuthorLabel: 'Supplied synthesis script (listening/editorial review pending)',
+      cues: [{ startMs: 0, endMs: 9950, text: 'This is a synthetic demonstration, not a personal memory. The photograph shows the clock beneath the glass roof of Pennsylvania Station. The parts beyond this photograph remain unknown.' }],
+      durationMs: 9950,
+    };
+    assert.equal(Buffer.byteLength(story.cues[0].text), 185);
+    const player = createStoryPlayer({ story, fetchAudio: () => Promise.reject(new Error('unused')) });
+    assert.match(player.element.textContent, /Captions \(supplied text; not checked by Rehere\):/);
+    assert.doesNotMatch(player.element.textContent, /written by a person|AI-drafted|reviewed by a person/);
+    player.dispose();
   });
 
   it('ignores an answer that arrives after the composer closed', async () => {
