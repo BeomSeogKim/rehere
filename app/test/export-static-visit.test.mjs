@@ -7,7 +7,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { pcmWav } from '../audio-derivative.mjs';
-import { exportStaticVisit, VISITOR_MODULES } from '../export-static-visit.mjs';
+import { exportStaticVisit, STATIC_DEVICE_NOTE, VISITOR_MODULES } from '../export-static-visit.mjs';
 
 const TOKEN = `rhv_${'A'.repeat(43)}`;
 const WAV = pcmWav(Buffer.alloc(3200));
@@ -110,6 +110,9 @@ describe('static visitor export', () => {
         if (file.endsWith('.js') && !file.startsWith('vendor')) assert.doesNotMatch(bytes.toString('utf8'), /(?:from\s*|import\s*\(\s*)['"]\/(?!\/)/, file);
       }
       assert.match(await readFile(path.join(outDir, 'scene-viewer.js'), 'utf8'), /from '\.\/vendor\/three\.module\.js'/);
+      const visits = await readFile(path.join(outDir, 'visits.js'), 'utf8');
+      assert.ok(visits.includes(STATIC_DEVICE_NOTE));
+      assert.ok(!visits.includes('Closing access stops this page'));
       assert.match(await readFile(path.join(outDir, 'vendor/OrbitControls.js'), 'utf8'), /from '\.\/three\.module\.js'/);
       assert.match(await readFile(path.join(outDir, 'vendor/loaders/GLTFLoader.js'), 'utf8'), /from '\.\.\/three\.module\.js'/);
     });

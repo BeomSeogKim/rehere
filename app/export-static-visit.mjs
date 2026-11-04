@@ -42,6 +42,11 @@ const VENDOR = [
   ['THREE-LICENSE', 'LICENSE'],
 ];
 
+// The visitor page ends with a live-visit sentence about closing access. It is
+// false for a copy, so the exported module says what actually removes a copy.
+const LIVE_DEVICE_NOTE = 'Closing access stops this page from showing the scene. Copies already saved on a device cannot be removed from here.';
+export const STATIC_DEVICE_NOTE = 'This frozen copy keeps showing the scene until its files are removed from the file server. Copies already saved on a device cannot be removed from here.';
+
 export const NOTICE = {
   heading: 'Offline snapshot',
   text: 'This is a frozen copy of one saved visitor view, exported on {date}. It is not connected to the Rehere app. '
@@ -68,7 +73,11 @@ function importsOf(source) {
 // so the site works from any folder or sub-path. Anything else that would leave
 // the allowlist stops the export.
 function moduleText(name, source) {
-  const text = source.replaceAll("'/vendor/", "'./vendor/");
+  let text = source.replaceAll("'/vendor/", "'./vendor/");
+  if (name === 'visits.js') {
+    if (!source.includes(LIVE_DEVICE_NOTE)) fail('The visitor page text changed; update the exporter.');
+    text = text.replace(LIVE_DEVICE_NOTE, STATIC_DEVICE_NOTE);
+  }
   for (const specifier of importsOf(text)) {
     if (specifier.startsWith('./vendor/')) {
       if (!VENDOR.some(([target]) => specifier === `./vendor/${target}`)) fail(`${name} imports an unlisted vendor file: ${specifier}`);
