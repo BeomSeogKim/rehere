@@ -37,8 +37,11 @@ Follow GitHub Flow: branch from current `main`, keep changes focused, open a PR,
 review and validate it, merge, then remove the finished branch.
 
 Use `<type>/<short-kebab-description>`, for example `feat/memory-edit` or
-`fix/scene-save`. The slug contains lowercase ASCII letters, digits, and single
-hyphens. Do not include personal names or conversational task descriptions.
+`fix/scene-save`. Sprint 4 also permits exactly `s4/integration` and
+`s4/<team>/<topic>`, for example `s4/release/entry-gates`. Each slug contains
+lowercase ASCII letters or digits separated by single hyphens; extra path
+components are not allowed. Do not include personal names or conversational
+task descriptions.
 Do not commit directly to `main` or `master`, or from a detached HEAD. There is
 no permanent `develop` branch. Do not rewrite someone else's branch or work.
 

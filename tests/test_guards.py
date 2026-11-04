@@ -112,9 +112,25 @@ class RepositoryGuards(unittest.TestCase):
         self.assertNotEqual(self.guard("--staged").returncode, 0)
 
     def test_branch_names_and_invalid_revision_ranges_fail_closed(self):
-        self.assertEqual(self.conventions("branch", "fix/scene-save").returncode, 0)
-        for branch in ["main", "master", "feat/Bad", "fix/has_underscore", "fix/a--b"]:
-            self.assertNotEqual(self.conventions("branch", branch).returncode, 0)
+        for branch in [
+            "fix/scene-save", "feat/memory-edit", "s4/integration",
+            "s4/release/entry-gates", "s4/memory/voice", "s4/scene/edge-cleanup",
+            "s4/video/capture-2",
+        ]:
+            with self.subTest(branch=branch):
+                self.assertEqual(self.conventions("branch", branch).returncode, 0)
+        for branch in [
+            "main", "master", "feat/Bad", "fix/has_underscore", "fix/a--b",
+            "s4", "s4/release", "s4/Integration", "s4/release/Entry-gates",
+            "s4/release/entry_gates", "s4/release/entry--gates",
+            "s4/release//entry-gates", "s4//entry-gates",
+            "s4/-release/entry-gates", "s4/release-/entry-gates",
+            "s4/release/-entry-gates", "s4/release/entry-gates-",
+            "s4/release/entry/gates", "s4/release/entry-gates/",
+            "feat/release/entry-gates", "s5/release/entry-gates",
+        ]:
+            with self.subTest(branch=branch):
+                self.assertNotEqual(self.conventions("branch", branch).returncode, 0)
         self.assertNotEqual(self.conventions("range", "missing..unknown").returncode, 0)
 
     def test_commit_format_and_private_body_are_rejected(self):

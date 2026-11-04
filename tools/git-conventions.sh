@@ -8,7 +8,8 @@ set -uo pipefail
 
 TYPES='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
 HEADER="^($TYPES)(\\([a-z0-9][a-z0-9-]*\\))?!?: \\S.*[^.\\s]\$|^Revert \".+\"\$"
-BRANCH="^($TYPES)/[a-z0-9]+(-[a-z0-9]+)*\$"
+SLUG='[a-z0-9]+(-[a-z0-9]+)*'
+BRANCH="^(($TYPES)/$SLUG|s4/integration|s4/$SLUG/$SLUG)\$"
 
 errors=()
 fail() { errors+=("$1"); }
@@ -56,7 +57,7 @@ case "${1:-}" in
     ;;
   branch)
     printf '%s\n' "$2" | RE="$BRANCH" perl -ne 'exit(/$ENV{RE}/ ? 0 : 1)' \
-      || fail "branch must be '<type>/<short-kebab-description>' with type one of ${TYPES//|/, }"
+      || fail "branch must be '<type>/<short-kebab-description>', 's4/integration', or 's4/<team>/<topic>' with lowercase kebab slugs"
     report "branch name rejected"
     ;;
   pr)
