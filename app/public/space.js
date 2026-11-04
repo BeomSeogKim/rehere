@@ -2068,6 +2068,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const image = el('img', { src: photoAsset(photo), alt: `Photo ${index + 1}. Drag on it to draw box A, then box B.`, draggable: false });
     const entries = ['A', 'B'].map((letter) => {
       const badge = el('span', { className: 'box-badge', textContent: letter });
+      badge.setAttribute('data-kind', 'seen');
       return {
         letter,
         box: null,
@@ -2231,6 +2232,8 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const viewport = el('div', { className: 'space-viewport' });
     const badges = el('div', { className: 'object-badges' });
     badges.setAttribute('aria-hidden', 'true');
+    const unseenLabel = el('span', { className: 'viewport-unseen-label', textContent: 'Unseen surfaces stay empty', hidden: true });
+    unseenLabel.setAttribute('data-kind', 'unseen');
     const viewMessage = el('p', { className: 'form-message', role: 'alert' });
     const original = el('button', { type: 'button', className: 'secondary', textContent: 'Original viewpoint' });
     const photoSide = photographedSideControls();
@@ -2245,6 +2248,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
           .filter((point) => point.visible)
           .map((point) => {
             const badge = el('span', { className: 'object-badge', textContent: nameOf(point.id) });
+            badge.setAttribute('data-kind', 'guessed');
             badge.style.left = `${point.x}px`;
             badge.style.top = `${point.y}px`;
             return badge;
@@ -2255,7 +2259,9 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     const boxOver = (object) => {
       const [width, height] = photoFor(object.id).size;
       const [x1, y1, x2, y2] = object.box;
-      const box = el('div', { className: `box-overlay box-overlay-${letterOf(object.id).toLowerCase()}` }, [el('span', { className: 'box-badge', textContent: nameOf(object.id) })]);
+      const badge = el('span', { className: 'box-badge', textContent: nameOf(object.id) });
+      badge.setAttribute('data-kind', 'seen');
+      const box = el('div', { className: `box-overlay box-overlay-${letterOf(object.id).toLowerCase()}` }, [badge]);
       Object.assign(box.style, { left: `${(x1 / width) * 100}%`, top: `${(y1 / height) * 100}%`, width: `${((x2 - x1) / width) * 100}%`, height: `${((y2 - y1) / height) * 100}%` });
       return box;
     };
@@ -2278,6 +2284,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
         return false;
       }
       viewer = created;
+      unseenLabel.hidden = !viewer;
       explore.attach(viewer);
       original.addEventListener('click', () => {
         viewer?.originalView();
@@ -2292,7 +2299,7 @@ export function mountSpace(container, { draft, sourceFor, durationHintMs = () =>
     }
 
     const explore = createExploreToggle();
-    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges]), viewMessage, ...(composition ? objects.flatMap((object) => photoCredit({ sourceId: sourceIdFor(object.id) })) : photoCredit(job)), ...(job.outline?.kind === 'owner-corrected' ? [el('p', { className: 'hint', textContent: 'Outlines include an owner-made correction; depth remains the existing model estimate.' })] : []), el('p', { className: 'hint', textContent: composition ? `${COMPOSITION_NOTE} ${surface.context ? 'The first photo’s observed background is fixed at its initial placement.' : 'Only the two observed surfaces are shown, with no background.'}` : SCENE_NOTE })];
+    const stage = [el('div', { className: 'actions space-camera' }, [explore.button, original, side, photoSide.button]), explore.status, photoSide.status, el('div', { className: 'space-viewport-wrap' }, [viewport, badges, unseenLabel]), viewMessage, ...(composition ? objects.flatMap((object) => photoCredit({ sourceId: sourceIdFor(object.id) })) : photoCredit(job)), ...(job.outline?.kind === 'owner-corrected' ? [el('p', { className: 'hint', textContent: 'Outlines include an owner-made correction; depth remains the existing model estimate.' })] : []), el('p', { className: 'hint', textContent: composition ? `${COMPOSITION_NOTE} ${surface.context ? 'The first photo’s observed background is fixed at its initial placement.' : 'Only the two observed surfaces are shown, with no background.'}` : SCENE_NOTE })];
 
     if (!job.objectsConfirmed) {
       // No object can be chosen before the outlines are confirmed.

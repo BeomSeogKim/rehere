@@ -188,9 +188,11 @@ function textInput(doc, details, key, onChange) {
 // Builds collapsible controls that read and write `details` in place, so the
 // state stays with the owning photo, text or recording across re-renders.
 // `state.open` remembers whether the panel was expanded.
-export function renderSourceControls(doc, { details, state, label, file = null, onChange = null, describedBy = null, attribution = false }) {
+export function renderSourceControls(doc, { details, state, label, kind = null, file = null, onChange = null, describedBy = null, attribution = false }) {
   const root = doc.createElement('details');
   root.className = 'source-details';
+  if (kind === 'photo') root.setAttribute('data-kind', 'seen');
+  else if (kind === 'text' || kind === 'voice') root.setAttribute('data-kind', 'remembered');
   root.open = Boolean(state.open);
   root.addEventListener('toggle', () => {
     state.open = root.open;
@@ -333,6 +335,8 @@ export function renderSavedSource(doc, record) {
   const { available, rows } = describeSource(record);
   const root = doc.createElement('details');
   root.className = 'source-details';
+  if (record?.kind === 'photo') root.setAttribute('data-kind', 'seen');
+  else if (record?.kind === 'text' || record?.kind === 'voice') root.setAttribute('data-kind', 'remembered');
   const summary = doc.createElement('summary');
   summary.textContent = available ? 'Source details' : 'Source details unavailable';
   const list = doc.createElement('dl');

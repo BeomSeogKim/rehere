@@ -58,7 +58,9 @@ function validProjection(body, objectId) {
 // Where a box in stored pixels sits over its photo, in percent.
 const placement = ([x1, y1, x2, y2], [width, height]) => ({ left: `${(x1 / width) * 100}%`, top: `${(y1 / height) * 100}%`, width: `${((x2 - x1) / width) * 100}%`, height: `${((y2 - y1) / height) * 100}%` });
 function boxOverlay(box, size, label, letter) {
-  const overlay = el('div', { className: `box-overlay box-overlay-${letter}` }, [el('span', { className: 'box-badge', textContent: label })]);
+  const badge = el('span', { className: 'box-badge', textContent: label });
+  badge.setAttribute('data-kind', 'seen');
+  const overlay = el('div', { className: `box-overlay box-overlay-${letter}` }, [badge]);
   Object.assign(overlay.style, placement(box, size));
   return overlay;
 }

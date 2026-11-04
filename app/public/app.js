@@ -227,11 +227,11 @@ function missingSlot(photo, index) {
 }
 
 function renderTextSource() {
-  els.textSource.replaceChildren(renderSourceControls(document, { ...textSource, label: 'the written memory', attribution: true }));
+  els.textSource.replaceChildren(renderSourceControls(document, { ...textSource, kind: 'text', label: 'the written memory', attribution: true }));
 }
 
 function renderVoiceSource() {
-  els.voiceSource.replaceChildren(renderSourceControls(document, { ...voiceSource.current, label: 'the voice recording' }));
+  els.voiceSource.replaceChildren(renderSourceControls(document, { ...voiceSource.current, kind: 'voice', label: 'the voice recording' }));
 }
 
 const voiceSource = createVoiceSource(recorder, renderVoiceSource);

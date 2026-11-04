@@ -384,6 +384,8 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
     const details = el('div', { className: 'visit-details' });
     const memoryWords = el('section', { className: 'memory-edit visit-memory-summary', hidden: true });
     const fullMemoryWords = el('details', { className: 'source-details visit-memory-full', hidden: true });
+    memoryWords.setAttribute('data-kind', 'remembered');
+    fullMemoryWords.setAttribute('data-kind', 'remembered');
     const message = el('p', { className: 'hint', role: 'status' });
     const buttons = el('div', { className: 'actions space-camera' });
     const storyBox = el('div', { className: 'visit-stories' });
@@ -411,7 +413,9 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       }
       const [width, height] = composition ? surface.components.find((component) => component.id === object.id).surface.source.image_size : surface.source?.image_size ?? [1, 1];
       const [x1, y1, x2, y2] = object.box;
-      const box = el('div', { className: `box-overlay box-overlay-${objects.indexOf(object) === 0 ? 'a' : 'b'}` }, [el('span', { className: 'box-badge', textContent: nameOf(object.id) })]);
+      const badge = el('span', { className: 'box-badge', textContent: nameOf(object.id) });
+      badge.setAttribute('data-kind', 'seen');
+      const box = el('div', { className: `box-overlay box-overlay-${objects.indexOf(object) === 0 ? 'a' : 'b'}` }, [badge]);
       Object.assign(box.style, { left: `${(x1 / width) * 100}%`, top: `${(y1 / height) * 100}%`, width: `${((x2 - x1) / width) * 100}%`, height: `${((y2 - y1) / height) * 100}%` });
       evidence.replaceChildren(
         el('p', { className: 'hint', textContent: composition ? `Source photo for ${nameOf(object.id)}: its photographed surface and estimated depth come from this photo. Its composition pose and relative scale were chosen by the owner.` : correctedOutline
@@ -614,7 +618,9 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       contextNote,
     ]);
     const photoImage = el('img', { className: 'visit-compare-photo', alt: `The photograph used for “${manifest.title}”`, hidden: true });
-    const stageFrame = el('div', { className: 'visit-compare-frame' }, [viewport, photoImage]);
+    const unseenLabel = el('span', { className: 'viewport-unseen-label', textContent: fullObject ? 'Unseen background remains unknown' : 'Unseen surfaces stay empty' });
+    unseenLabel.setAttribute('data-kind', 'unseen');
+    const stageFrame = el('div', { className: 'visit-compare-frame space-viewport-wrap' }, [viewport, photoImage, unseenLabel]);
     let saved = null;
     let photoLoad = 0;
     let photoReady = false;
@@ -639,6 +645,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       showScene.setAttribute('aria-pressed', String(!photo));
       photoImage.hidden = !photo;
       contextNote.hidden = !context;
+      unseenLabel.hidden = photo && !context;
       stageFrame.classList?.toggle('is-photo', photo && !context);
       stageFrame.classList?.toggle('is-context', context);
     };
@@ -811,6 +818,7 @@ export function mountVisitor(container, source, { onState = () => {} } = {}) {
       }
       // The derived photo and the text, clearly not presented as the 3D scene.
       viewport.replaceChildren(...(composition ? surface.components.map((component) => el('img', { className: 'space-proposal', src: textureFor(component.id), alt: `Source photo for ${nameOf(component.id)}` })) : [el('img', { className: 'space-proposal', src: textureUrl, alt: `The photo used for “${manifest.title}”` })]));
+      unseenLabel.hidden = true;
       message.textContent = composition ? 'The 3D view is not available. Showing the two source photos separately, not a combined scene. Saved pose and relative-scale differences are described in the text.' : 'The 3D view is not available in this browser. Showing the photo used for the scene instead; the arrangement between views is described in the text.';
       back.hidden = true;
       showView(currentId);
