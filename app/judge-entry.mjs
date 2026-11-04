@@ -243,6 +243,9 @@ export async function verifyExportFolder(dir) {
   const extra = names.filter((name) => name !== 'EXPORT.json' && !listed.some((item) => item.path === name));
   if (extra.length) fail(`The earlier export holds unlisted files: ${extra.join(', ')}`);
   for (const item of listed) {
+    if (!names.includes(item.path)) fail(`The earlier export lists a file that is not in the folder: ${item.path}`);
+  }
+  for (const item of listed) {
     if (sha256(await readFile(path.join(dir, item.path))) !== item.sha256) fail(`The earlier export differs from its record: ${item.path}`);
   }
   return listed.length;

@@ -237,6 +237,26 @@ describe('building a site from an earlier export with an entry', () => {
     await assert.rejects(verifyExportFolder(earlier), /differs from its record: offline\.css/);
   });
 
+  it('rejects an earlier export that lists a file not in the folder', async () => {
+    const earlier = await earlierExport();
+    const recordPath = path.join(earlier, 'EXPORT.json');
+    const record = JSON.parse(await readFile(recordPath, 'utf8'));
+    const original = record.files[0].path;
+    record.files[0] = { ...record.files[0], path: '../outside.txt' };
+    await writeFile(recordPath, JSON.stringify(record));
+    await rm(path.join(earlier, original));
+    await assert.rejects(verifyExportFolder(earlier), /not in the folder/);
+
+    const later = await earlierExport();
+    const laterRecordPath = path.join(later, 'EXPORT.json');
+    const laterRecord = JSON.parse(await readFile(laterRecordPath, 'utf8'));
+    const laterOriginal = laterRecord.files[0].path;
+    laterRecord.files[0] = { ...laterRecord.files[0], path: 'missing-inside.txt' };
+    await writeFile(laterRecordPath, JSON.stringify(laterRecord));
+    await rm(path.join(later, laterOriginal));
+    await assert.rejects(verifyExportFolder(later), /not in the folder/);
+  });
+
   it('rebuilds identical snapshot data from the earlier export, with the entry as the front door', async () => {
     const earlier = await earlierExport();
     const { entry, photos } = await entryAndPhotos();
