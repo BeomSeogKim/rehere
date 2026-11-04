@@ -15,6 +15,41 @@ identifies the source. A [separate detail photograph](https://www.loc.gov/pictur
 shows a wall light in the same room, but the captions do not establish which
 fixture it is in the wider view or how the photographs align.
 
+### Current scenario: wicker chest and rocking chair (photograph 26)
+
+The [HABS caption index](https://tile.loc.gov/storage-services/master/pnp/habshaer/az/az0400/az0459/data/az0459cap.pdf)
+catalogs AZ-135-A-26 as "Wicker chest and rocking chair", by the same
+photographer in July 1982. It shows those two pieces of furniture against trees
+and grass. It is not a view of the lodge rooms, and nothing here reconstructs
+the lodge. The [credit file](habs-az-135-a-26.credit.txt) holds its source and
+rights line: a U.S. Government work with no known restrictions on images made
+by the U.S. Government, per the Library of Congress advisory. That line belongs
+only to a snapshot made from this photograph.
+
+1. **Save the photograph** with its source and deliberately chosen uses.
+2. **Name the two objects** ("Rocking chair", "Wicker chest") and build a
+   two-object scene as described in
+   [two objects from one photo](../OBJECTS.md#build-and-confirm-two-objects-from-one-photo).
+   Inspect the result against the photograph. It is a partial model estimate
+   with gaps; judge it by what the inspection shows, not by this guide.
+3. **Move one object by hand** and save the change as a new version. Label it as
+   the demonstrator's hypothesis, for example "For this demonstration, move the
+   wicker chest a little left". It is not a recollection, a witness account, or
+   evidence of where the furniture stood.
+4. **Optionally compare a model proposal.** The planner is off by default, and a
+   live call needs an operator to enable it; without it, use the manual change.
+5. **Preview and share.** The visitor sees the saved versions with the
+   photograph, the model estimate and the hypothesis kept distinct. A frozen
+   copy of that snapshot can be exported as in [the static guide](../STATIC-DEMO.md),
+   with `--credit-file app/demo/habs-az-135-a-26.credit.txt`.
+
+There is no real witness in this scenario. A recollection may be added only if
+it is a real, attributed one with permission; never present a synthetic note as
+a memory.
+
+### Earlier proposal: recreation-room light (photograph 19)
+
+This proposal predates the scenario above and is kept as an unverified plan.
 The following is a **proposed demonstration**, not a recorded visit or a
 person's recollection. It needs a usable scene and explicit choices at each
 step; do not substitute a successful result if a build or proposal fails.
