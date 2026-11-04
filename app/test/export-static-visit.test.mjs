@@ -76,7 +76,7 @@ describe('static visitor export', () => {
       assert.deepEqual(result.contributorLabels, ['Synthetic contributor']);
       const files = (await walk(result.outDir)).map((file) => file.split(path.sep).join('/')).sort();
       assert.deepEqual(files, [
-        'EXPORT.json', 'index.html', 'style.css',
+        'EXPORT.json', 'index.html', 'style.css', 'LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES.md',
         ...VISITOR_MODULES,
         'data/manifest.json',
         `data/assets/${viewId}/surface.json`, `data/assets/${viewId}/texture.jpg`, 'data/assets/evidence/1.jpg',
@@ -85,6 +85,11 @@ describe('static visitor export', () => {
         'vendor/utils/BufferGeometryUtils.js', 'vendor/utils/SkeletonUtils.js',
       ].sort());
       assert.deepEqual(JSON.parse(await readFile(path.join(result.outDir, 'data/manifest.json'), 'utf8')), manifest);
+      const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+      for (const name of ['LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES.md']) {
+        assert.deepEqual(await readFile(path.join(result.outDir, name)), await readFile(path.join(repoRoot, name)), name);
+      }
+      assert.match(await readFile(path.join(result.outDir, 'LICENSE'), 'utf8'), /Apache License\s+Version 2\.0/);
       const listing = JSON.parse(await readFile(path.join(result.outDir, 'EXPORT.json'), 'utf8'));
       for (const item of listing.files) {
         assert.equal(createHash('sha256').update(await readFile(path.join(result.outDir, item.path))).digest('hex'), item.sha256);

@@ -12,6 +12,7 @@ import { isComposition } from './public/composition-scene.js';
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
+const ROOT_DIR = path.join(APP_DIR, '..');
 const THREE_DIR = path.join(APP_DIR, 'node_modules', 'three');
 
 const TOKEN = /^rhv_[A-Za-z0-9_-]{43}$/;
@@ -31,6 +32,8 @@ export const VISITOR_MODULES = [
   'static-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'composition-scene.js', 'composition-description.js',
   'story-player.js', 'playback.js', 'arrangement.js', 'object-outline-editor.js',
 ];
+// Project notices shipped with every export: the exported JavaScript is distributed under the project license.
+const NOTICE_FILES = ['LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES.md'];
 // Exported name -> [file inside node_modules/three, directory of the export relative to the root].
 const VENDOR = [
   ['three.module.js', 'build/three.module.js'],
@@ -208,7 +211,7 @@ function scan(files, { token, origin }) {
 }
 
 export async function exportStaticVisit({
-  origin, token, outDir, confirmPublicMaterial = false, credit = null, limits = LIMITS, fetchImpl = fetch, now = () => new Date(), publicDir = PUBLIC_DIR, threeDir = THREE_DIR,
+  origin, token, outDir, confirmPublicMaterial = false, credit = null, limits = LIMITS, fetchImpl = fetch, now = () => new Date(), publicDir = PUBLIC_DIR, threeDir = THREE_DIR, rootDir = ROOT_DIR,
 }) {
   if (!confirmPublicMaterial) fail('Confirm that the snapshot holds only public or synthetic material (--confirm-public-material).');
   if (typeof token !== 'string' || !TOKEN.test(token)) fail('The visit capability is missing or malformed.');
@@ -287,6 +290,7 @@ export async function exportStaticVisit({
   const style = await readFile(path.join(publicDir, 'style.css'), 'utf8');
   if (/url\(\s*['"]?\//.test(style)) fail('style.css has a root-absolute url().');
   put('style.css', style);
+  for (const name of NOTICE_FILES) put(name, await readFile(path.join(rootDir, name)));
   for (const name of VISITOR_MODULES) put(name, moduleText(name, await readFile(path.join(publicDir, name), 'utf8')));
   for (const [target, source] of VENDOR) {
     const text = await readFile(path.join(threeDir, source), 'utf8');

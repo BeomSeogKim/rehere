@@ -53,6 +53,9 @@ Only these are written, and the export stops with an error otherwise:
 - `index.html`, `style.css` and the visitor modules the live visitor listener
   serves (checked against `server.mjs` by a test), with root-absolute vendor
   imports made relative.
+- `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.md`: the exported JavaScript is
+  Rehere code distributed under the project's Apache-2.0 license, so the
+  license and notices travel with it.
 - `vendor/`: the pinned Three.js files used for viewing, with their MIT notice.
 - `data/manifest.json` and exactly the files the visitor page reads to draw
   the snapshot: the start view's surface and texture (both textures of a
