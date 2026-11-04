@@ -23,8 +23,24 @@ export function staticSource() {
   };
 }
 
+// A link may ask to open on one saved version: snapshot.html?version=<exact button text>. The text is only compared with the
+// version buttons the page draws; the first match is pressed once, and the page works the same without the parameter.
+function openRequestedVersion(container, label) {
+  const press = () => {
+    const button = [...container.querySelectorAll('button')].find((item) => item.textContent.trim() === label);
+    button?.click();
+    return Boolean(button);
+  };
+  if (press()) return;
+  const watcher = new MutationObserver(() => press() && watcher.disconnect());
+  watcher.observe(container, { childList: true, subtree: true });
+  setTimeout(() => watcher.disconnect(), 15_000);
+}
+
 const container = globalThis.document?.getElementById?.('visit');
 if (container) {
   mountVisitor(container, staticSource(), { limitedPhotoView: true });
+  const requested = new URLSearchParams(globalThis.location?.search ?? '').get('version');
+  if (requested) openRequestedVersion(container, requested);
   globalThis.addEventListener?.('pagehide', () => stopAll());
 }

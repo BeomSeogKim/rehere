@@ -83,6 +83,30 @@ requested, and the exported page cannot call them.
 The unchanged visitor modules still contain their live-visit code paths; the
 static entry never uses them because it supplies its own read-only source.
 
+## Judge entry page
+
+`--entry app/entry --entry-photos <folder>` puts a hand-written entry page in
+front of the snapshot. The page shows three public HABS photographs with their
+verbatim captions, source links and rights line, one sentence on what Rehere has
+and has not done with each, and a "See the change" route into the snapshot. The
+snapshot page moves to `snapshot.html`; `snapshot.html?version=<exact version
+button text>` opens it on that version, and it links back to the entry.
+
+- The entry files are `app/entry/index.html`, `app/entry/entry.css` and
+  `app/entry/photos.json`. The export refuses an entry page that has inline
+  styles, scripts, event handlers, a link outside the listed sources, an image
+  without alt text, or a missing caption or source link.
+- The photographs are never committed. `node app/fetch-entry-photos.mjs <new
+  folder>` downloads each pinned Commons JPEG derivative of the Library of
+  Congress scan, checks its SHA-256, removes the Exif block without touching the
+  image data, checks the result against its pinned hash and writes it. Nothing is
+  written if any check fails.
+- `--from-export <earlier export folder>` rebuilds a site from an earlier export
+  instead of a running visitor listener, for when the live snapshot is gone, for
+  example after a withdrawal. Every file of the earlier export must match its
+  `EXPORT.json` hash and nothing unlisted may be present; the snapshot data is
+  reproduced byte for byte.
+
 ## Publishing as a release artifact
 
 The exported folder holds images and audio, which the repository guard rejects,

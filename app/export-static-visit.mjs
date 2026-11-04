@@ -4,10 +4,11 @@
 // result needs no application server, model or account, only a static file
 // server. It is a copy: revoking the link or withdrawing a source later does
 // not change it. See STATIC-DEMO.md.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fetchFromExport, loadEntry, verifyExportFolder } from './judge-entry.mjs';
 import { isComposition } from './public/composition-scene.js';
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -114,14 +115,16 @@ function vendorText(target, source) {
 // Rules for the offline notice and the credit footer, shipped as a file next to
 // the page instead of an inline <style>.
 export const OFFLINE_CSS = `.offline-notice { margin: 0; padding: .75rem 1rem; border-bottom: 2px solid #8a6d00; background: #fff4c2; color: #2b2200; font: 15px/1.4 system-ui, sans-serif; }
+.offline-notice a { color: inherit; font-weight: 700; }
 .source-credit { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; font: 14px/1.5 system-ui, sans-serif; opacity: .85; }
 .source-credit p { margin: .4rem 0; }
 .source-credit a { color: inherit; overflow-wrap: anywhere; }
 @media (prefers-color-scheme: dark) { .offline-notice { background: #3a2f00; color: #fff1b8; border-color: #d4aa00; } }
 `;
 
-const pageHtml = (template, date, credit) => {
-  const notice = `<aside class="offline-notice" role="note"><strong>${escapeHtml(NOTICE.heading)}.</strong> ${escapeHtml(NOTICE.text.replace('{date}', date))}</aside>`;
+const pageHtml = (template, date, credit, backLink = false) => {
+  const back = backLink ? ' <a href="./">Back to the entry page</a>' : '';
+  const notice = `<aside class="offline-notice" role="note"><strong>${escapeHtml(NOTICE.heading)}.</strong> ${escapeHtml(NOTICE.text.replace('{date}', date))}${back}</aside>`;
   let html = template
     .replace('href="/style.css"', 'href="./style.css">\n  <link rel="stylesheet" href="./offline.css"')
     .replace('src="/visitor-entry.js"', 'src="./static-entry.js"')
@@ -210,7 +213,7 @@ function scan(files, { token, origin }) {
     if (bytes.includes(token)) fail(`${name} contains the visit capability.`);
     if (bytes.includes(origin)) fail(`${name} contains the source origin.`);
     if (LOCAL_PATHS.some((prefix) => bytes.includes(prefix))) fail(`${name} contains a local path.`);
-    if (name === 'index.html' || name.startsWith('data/')) {
+    if (name === 'index.html' || name === 'snapshot.html' || name.startsWith('data/')) {
       if (bytes.includes('/api/')) fail(`${name} references an API route.`);
       if (name.endsWith('.json') && /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(bytes.toString('utf8'))) fail(`${name} contains an email address.`);
     }
@@ -219,7 +222,7 @@ function scan(files, { token, origin }) {
 }
 
 export async function exportStaticVisit({
-  origin, token, outDir, confirmPublicMaterial = false, credit = null, limits = LIMITS, fetchImpl = fetch, now = () => new Date(), publicDir = PUBLIC_DIR, threeDir = THREE_DIR, rootDir = ROOT_DIR,
+  origin, token, outDir, confirmPublicMaterial = false, credit = null, entry = null, limits = LIMITS, fetchImpl = fetch, now = () => new Date(), publicDir = PUBLIC_DIR, threeDir = THREE_DIR, rootDir = ROOT_DIR,
 }) {
   if (!confirmPublicMaterial) fail('Confirm that the snapshot holds only public or synthetic material (--confirm-public-material).');
   if (typeof token !== 'string' || !TOKEN.test(token)) fail('The visit capability is missing or malformed.');
@@ -294,7 +297,12 @@ export async function exportStaticVisit({
   if (!again?.equals(manifestBytes)) fail('The snapshot changed or became unavailable during the export.');
 
   const date = now().toISOString().slice(0, 10);
-  put('index.html', pageHtml(await readFile(path.join(publicDir, 'visit.html'), 'utf8'), date, credit));
+  // With an entry, the snapshot page moves to snapshot.html and the hand-written entry page becomes the site's front door.
+  const page = pageHtml(await readFile(path.join(publicDir, 'visit.html'), 'utf8'), date, credit, entry !== null);
+  if (entry) {
+    put('snapshot.html', page);
+    for (const [name, bytes] of (await loadEntry(entry)).files) put(name, bytes);
+  } else put('index.html', page);
   const style = await readFile(path.join(publicDir, 'style.css'), 'utf8');
   if (/url\(\s*['"]?\//.test(style)) fail('style.css has a root-absolute url().');
   put('style.css', style);
@@ -316,7 +324,7 @@ export async function exportStaticVisit({
   }
   return {
     outDir: root, snapshotId: manifest.id, title: manifest.title, synthetic: manifest.synthetic === true, files: files.size, bytes: total,
-    credited: credit !== null, externalLinks: [...externalLinks], contributorLabels: [...new Set((manifest.contributorPhotos ?? []).concat(manifest.contributorRecordings ?? []).map((item) => item.providerLabel).filter(Boolean))],
+    credited: credit !== null, entry: entry !== null, externalLinks: [...externalLinks], contributorLabels: [...new Set((manifest.contributorPhotos ?? []).concat(manifest.contributorRecordings ?? []).map((item) => item.providerLabel).filter(Boolean))],
   };
 }
 
@@ -328,9 +336,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   };
   try {
     const creditFile = option('--credit-file');
+    const fromExport = option('--from-export');
+    const entryDir = option('--entry');
+    if (fromExport) await verifyExportFolder(fromExport);
     const result = await exportStaticVisit({
-      origin: option('--origin'), outDir: option('--out'), token: process.env.REHERE_VISIT_TOKEN, confirmPublicMaterial: args.includes('--confirm-public-material'),
-      credit: creditFile ? await readFile(creditFile, 'utf8') : null,
+      origin: fromExport ? 'http://snapshot.invalid' : option('--origin'), outDir: option('--out'),
+      token: fromExport ? `rhv_${randomBytes(32).toString('base64url')}` : process.env.REHERE_VISIT_TOKEN, confirmPublicMaterial: args.includes('--confirm-public-material'),
+      credit: creditFile ? await readFile(creditFile, 'utf8') : null, fetchImpl: fromExport ? fetchFromExport(fromExport) : fetch,
+      entry: entryDir ? { dir: entryDir, photosDir: option('--entry-photos') } : null,
     });
     console.log(`Exported "${result.title}" (${result.files} files, ${result.bytes} bytes) to ${result.outDir}`);
     console.log(`Marked synthetic: ${result.synthetic}. Contributor labels shown to visitors: ${result.contributorLabels.join(', ') || 'none'}.`);

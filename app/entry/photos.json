@@ -1,0 +1,50 @@
+{
+  "note": "Pinned public photographs for the judge entry. sourceSha256/sourceBytes pin the Commons JPEG derivative of the Library of Congress HABS scan; sha256/bytes pin the same file after the lossless metadata strip. The files are never committed.",
+  "photos": [
+    {
+      "file": "a16.jpg",
+      "hbs": "AZ-135-A-16",
+      "caption": "INTERIOR VIEW OF DINING ROOM OF MAIN LODGE",
+      "locUrl": "https://www.loc.gov/pictures/item/az0459.photos.321986p/",
+      "commonsUrl": "https://commons.wikimedia.org/wiki/File:INTERIOR_VIEW_OF_DINING_ROOM_OF_MAIN_LODGE_-_Grand_Canyon_Lodge,_Main_Lodge,_North_Rim,_Grand_Canyon,_Coconino_County,_AZ_HABS_ARIZ,3-GRACAN,14A-16.tif",
+      "sourceUrl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/1/10/INTERIOR_VIEW_OF_DINING_ROOM_OF_MAIN_LODGE_-_Grand_Canyon_Lodge%2C_Main_Lodge%2C_North_Rim%2C_Grand_Canyon%2C_Coconino_County%2C_AZ_HABS_ARIZ%2C3-GRACAN%2C14A-16.tif/lossy-page1-1920px-INTERIOR_VIEW_OF_DINING_ROOM_OF_MAIN_LODGE_-_Grand_Canyon_Lodge%2C_Main_Lodge%2C_North_Rim%2C_Grand_Canyon%2C_Coconino_County%2C_AZ_HABS_ARIZ%2C3-GRACAN%2C14A-16.tif.jpg",
+      "sourceBytes": 586991,
+      "sourceSha256": "63ce6c08415c7f7bca521a4da1cc141de18d75a3e1117fe1d70eefeacfddd28c",
+      "bytes": 586923,
+      "sha256": "a70bbba398f648355b3e5948698454b24d00a3e4ed4b4433cdeb84a31ab75998",
+      "width": 1920,
+      "height": 1530,
+      "alt": "Black-and-white photograph of a large dining room with exposed log roof beams, a rough stone wall, hanging lanterns and many tables set for a meal."
+    },
+    {
+      "file": "a19.jpg",
+      "hbs": "AZ-135-A-19",
+      "caption": "INTERIOR VIEW OF RECREATION ROOM OF MAIN LODGE LOOKING EAST",
+      "locUrl": "https://www.loc.gov/pictures/item/az0459.photos.321989p/",
+      "commonsUrl": "https://commons.wikimedia.org/wiki/File:INTERIOR_VIEW_OF_RECREATION_ROOM_OF_MAIN_LODGE_LOOKING_EAST_-_Grand_Canyon_Lodge,_Main_Lodge,_North_Rim,_Grand_Canyon,_Coconino_County,_AZ_HABS_ARIZ,3-GRACAN,14A-19.tif",
+      "sourceUrl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/8/8f/INTERIOR_VIEW_OF_RECREATION_ROOM_OF_MAIN_LODGE_LOOKING_EAST_-_Grand_Canyon_Lodge%2C_Main_Lodge%2C_North_Rim%2C_Grand_Canyon%2C_Coconino_County%2C_AZ_HABS_ARIZ%2C3-GRACAN%2C14A-19.tif/lossy-page1-1920px-thumbnail.tif.jpg",
+      "sourceBytes": 505972,
+      "sourceSha256": "f9b70fb658d04f88d19c1e54926db8d9242abe4f698cd123673e37b20df9acc4",
+      "bytes": 505904,
+      "sha256": "fac553295a16f0655530e2c25d7612133f1256c6e126cdf77c5b451bb19bdf6a",
+      "width": 1920,
+      "height": 1541,
+      "alt": "Black-and-white photograph of a large hall with log roof beams, a stone wall, hanging chandeliers, a polished floor and rows of chairs facing a low stage."
+    },
+    {
+      "file": "a26.jpg",
+      "hbs": "AZ-135-A-26",
+      "caption": "WICKER CHEST AND ROCKING CHAIR",
+      "locUrl": "https://www.loc.gov/pictures/item/az0459.photos.321996p/",
+      "commonsUrl": "https://commons.wikimedia.org/wiki/File:WICKER_CHEST_AND_ROCKING_CHAIR_-_Grand_Canyon_Lodge,_Main_Lodge,_North_Rim,_Grand_Canyon,_Coconino_County,_AZ_HABS_ARIZ,3-GRACAN,14A-26.tif",
+      "sourceUrl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/b/b0/WICKER_CHEST_AND_ROCKING_CHAIR_-_Grand_Canyon_Lodge%2C_Main_Lodge%2C_North_Rim%2C_Grand_Canyon%2C_Coconino_County%2C_AZ_HABS_ARIZ%2C3-GRACAN%2C14A-26.tif/lossy-page1-1920px-WICKER_CHEST_AND_ROCKING_CHAIR_-_Grand_Canyon_Lodge%2C_Main_Lodge%2C_North_Rim%2C_Grand_Canyon%2C_Coconino_County%2C_AZ_HABS_ARIZ%2C3-GRACAN%2C14A-26.tif.jpg",
+      "sourceBytes": 676146,
+      "sourceSha256": "8aef501f51ffcd0afaba6dd7976127cdf1ce201a3bee721db05ec43a8506e94a",
+      "bytes": 676078,
+      "sha256": "48c369a6c9ca947235490457b2d94f4f85f8927e44abc221e91d28aacb4d43ca",
+      "width": 1920,
+      "height": 1546,
+      "alt": "Black-and-white photograph of a wicker chest of drawers and a rocking chair side by side."
+    }
+  ]
+}
