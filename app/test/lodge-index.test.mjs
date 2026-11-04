@@ -140,6 +140,16 @@ describe('lodge index page', () => {
     assert.equal(rebuilt.html, page);
   });
 
+  it('shows the sourced A-16 chair result before the guide and keeps every response once', () => {
+    const chair = flat.find((result) => result.photo === 'AZ-135-A-16' && result.noun === 'chair');
+    const proof = page.indexOf(`Response <code>${chair.responseId}</code>`);
+    assert.ok(page.indexOf(photos[0].locUrl) < proof);
+    assert.ok(page.indexOf('Rights: a U.S. Government work') < proof);
+    assert.ok(proof < page.indexOf('How to read this page'));
+    assert.ok(page.indexOf(LODGE_NOTES['AZ-135-A-16/chair']) < page.indexOf('How to read this page'));
+    for (const result of flat) assert.equal(page.split(`Response <code>${result.responseId}</code>`).length - 1, 1);
+  });
+
   it('passes the entry gate without style, script, unapproved links or unlisted files', async () => {
     const targets = ['lodge-index.html', 'lodge-index.json', 'index.html', ...data.overlays.map((item) => `entry/lodge/${item.file}`)];
     checkEntryHtml(page, photos, { requirePhotos: false, targets });

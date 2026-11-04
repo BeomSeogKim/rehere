@@ -106,14 +106,16 @@ export function renderLodgePage(data, photos) {
   const summaryRows = data.nouns.map((noun) => `<tr><th scope="row">${esc(noun)}</th>${data.photos.map((photo) => `<td>${photo.results.find((r) => r.noun === noun).instances.length}</td>`).join('')}</tr>`).join('');
   const sections = data.photos.map((entry, index) => {
     const photo = photos[index];
-    return `<section class="lodge-photo" aria-labelledby="photo${index + 1}-h">
+    const heading = `<section class="lodge-photo" aria-labelledby="photo${index + 1}-h">
 <h3 id="photo${index + 1}-h">${esc(photo.hbs)}: ${esc(photo.caption)}</h3>
 <p class="source">Source: <a href="${photo.locUrl}">Library of Congress record</a>, <a href="${photo.commonsUrl}">Wikimedia Commons file (the copy shown here)</a>, <a href="${HABS_PDF}">HABS caption index (PDF)</a>. Photograph by Richard Frear, July 1982, Historic American Buildings Survey. Rights: a U.S. Government work with no known restrictions on images made by the U.S. Government (<a href="${HABS_RIGHTS}">Library of Congress HABS rights advisory</a>). Frame ${photo.width} x ${photo.height} pixels, SHA-256 <code>${photo.sha256}</code>.</p>
-<div class="lodge-grid">
-${entry.results.map((result) => renderCard(photo, result)).join('\n')}
-</div>
-</section>`;
-  }).join('\n');
+`;
+    const cards = entry.results.filter((result) => index !== 0 || result.noun !== 'chair').map((result) => renderCard(photo, result)).join('\n');
+    const opening = index === 0 ? `<section class="lodge-photo" aria-labelledby="photo1-rest-h">\n<h3 id="photo1-rest-h">${esc(photo.hbs)}: ${esc(photo.caption)}</h3>\n` : heading;
+    return { heading, section: `${opening}<div class="lodge-grid">\n${cards}\n</div>\n</section>` };
+  });
+  const featured = `${sections[0].heading}<div class="lodge-grid">\n${renderCard(photos[0], data.photos[0].results.find((result) => result.noun === 'chair'))}\n</div>\n</section>`;
+  const remainingSections = sections.map((section) => section.section).join('\n');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -132,6 +134,9 @@ ${entry.results.map((result) => renderCard(photo, result)).join('\n')}
     <p><a href="index.html">Back to the three photographs</a></p>
   </header>
   <main id="main">
+    <div id="photos">
+${featured}
+    </div>
     <section aria-labelledby="read-h">
       <h2 id="read-h">How to read this page</h2>
       <ul>
@@ -146,9 +151,9 @@ ${entry.results.map((result) => renderCard(photo, result)).join('\n')}
       <h2 id="counts-h">Instances returned per request</h2>
       <table class="lodge-table"><caption>Number of instances SAM 3.1 returned for each noun and photograph</caption><thead><tr><th scope="col">Noun</th>${data.photos.map((entry) => `<th scope="col">${esc(entry.hbs)}</th>`).join('')}</tr></thead><tbody>${summaryRows}</tbody></table>
     </section>
-    <section id="photos" aria-labelledby="photos-h">
+    <section aria-labelledby="photos-h">
       <h2 id="photos-h">The photographs and what came back</h2>
-${sections}
+${remainingSections}
     </section>
   </main>
   <footer>
