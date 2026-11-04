@@ -349,6 +349,33 @@ describe('two-object builds with SAM 3.1 outlines', () => {
     } finally { await ctx.app.close(); }
   });
 
+  it('cancels a pending request when the place is deleted and never admits its result', async () => {
+    let entered;
+    const inFlight = new Promise((resolve) => { entered = resolve; });
+    let abortedSignal = false;
+    const runner = syntheticRunner();
+    const segmenter = fakeSegmenter({ hold: (signal) => new Promise((resolve) => {
+      entered();
+      signal.addEventListener('abort', () => { abortedSignal = true; resolve(); }, { once: true });
+    }) });
+    const ctx = await place({ reconstructionRunner: runner, segmenter });
+    try {
+      await build(ctx, { wait: false });
+      await inFlight;
+      const impact = await ctx.owner.json(`/api/drafts/${ctx.draft.id}/deletion`);
+      const request = { requestId: randomUUID(), impactSha256: impact.impactSha256, confirmDeletion: true };
+      let state;
+      for (let i = 0; i < 200 && state !== 'complete'; i++) {
+        state = (await (await ctx.owner.post(`/api/drafts/${ctx.draft.id}/delete`, request)).json()).state;
+        if (state !== 'complete') await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(state, 'complete');
+      assert.ok(abortedSignal, 'the pending SAM 3.1 request saw the abort');
+      assert.equal(segmenter.calls.length, 1);
+      assert.equal(runner.calls.length, 0);
+    } finally { await ctx.app.close(); }
+  });
+
   it('does not dispatch when the grant is already off', async () => {
     const segmenter = fakeSegmenter();
     const runner = syntheticRunner();
