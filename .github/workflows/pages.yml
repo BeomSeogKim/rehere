@@ -1,0 +1,70 @@
+name: Publish demo snapshot
+
+# Manual, main only. Publishes one frozen offline snapshot that is attached to a
+# release, after checking its SHA-256 and every file hash inside it. The site is
+# a release artifact; it is never committed to Git.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: demo-2026-11-04
+  ASSET_NAME: rehere-final-03ff749-site.zip
+  ASSET_SHA256: c5518e0f14e49a473aa35fd9322b7ed1c73f420311cf5a193656b7b31cee37db
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download the release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_NAME" --dir "$RUNNER_TEMP/asset"
+      - name: Verify the asset hash and contents
+        run: |
+          cd "$RUNNER_TEMP/asset"
+          echo "$ASSET_SHA256  $ASSET_NAME" | sha256sum -c -
+          python3 - "$ASSET_NAME" "$RUNNER_TEMP/site" <<'PY'
+          import hashlib, json, pathlib, sys, zipfile
+
+          archive, target = sys.argv[1], pathlib.Path(sys.argv[2])
+          target.mkdir(parents=True)
+          with zipfile.ZipFile(archive) as bundle:
+              for name in bundle.namelist():
+                  path = pathlib.PurePosixPath(name)
+                  if path.is_absolute() or ".." in path.parts or "\\" in name:
+                      sys.exit("unsafe path in the archive: " + name)
+              bundle.extractall(target)
+          files = {str(p.relative_to(target)): p for p in target.rglob("*") if p.is_file()}
+          listed = {item["path"]: item["sha256"] for item in json.loads((target / "EXPORT.json").read_text())["files"]}
+          extra = set(files) - set(listed) - {"EXPORT.json"}
+          if extra:
+              sys.exit("files not listed in EXPORT.json: " + ", ".join(sorted(extra)))
+          for rel, digest in listed.items():
+              if rel not in files or hashlib.sha256(files[rel].read_bytes()).hexdigest() != digest:
+                  sys.exit("hash mismatch or missing file: " + rel)
+          for need in ("index.html", "offline.css", "data/manifest.json", "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"):
+              if need not in files:
+                  sys.exit("required file missing: " + need)
+          (target / ".nojekyll").write_text("")
+          print("verified", len(files), "files")
+          PY
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
