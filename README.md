@@ -118,6 +118,7 @@ For the local app, install Node.js 26 or later, then run:
 cd app
 npm ci --ignore-scripts --no-audit --no-fund
 npm test
+mkdir -m 700 -p data
 node access-cli.mjs init --credentials-file data/owner-card.json \
   --name "Workspace owner"
 npm start
