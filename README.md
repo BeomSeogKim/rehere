@@ -1,24 +1,17 @@
 # Rehere
 
-Revisit places that can no longer be visited, rebuilt from old photographs and
-the memories of people who knew them.
+Show a place you remember to someone you love.
 
-**Meta models in Rehere**
+Rehere helps someone who remembers a place that can no longer be visited show it to the people they love, using old photographs and the memories they share. The viewer can always tell what a photograph shows, what a person remembers, and what a model guesses.
 
-- **Muse Spark** (`muse-spark-1.3`), in the optional planner, turns an owner's note into one bounded proposed edit. The app checks it, and nothing is saved until the owner approves. In an optional, owner-only evidence check, it also says whether chosen photographs support, conflict with, or do not show up to three verbatim parts of a note. Both are off by default.
-- **SAM 3.1** (Meta Model API) is an optional, off-by-default outline provider; Meta's SAM 2.1, run locally, remains the default. The demo scene's outlines were replayed from recorded live SAM 3.1 responses (no new call). The [lodge gallery](https://beomseogkim.github.io/rehere/lodge-index.html) shows 30 live one-noun requests on three photographs, with what they missed. Those are 2D estimates, not measurements, and they are not the demo scene's outlines.
-- **Muse Voice Transcribe**, optional and off by default, drafts captions for a recorded story, and the owner reviews them before visitors see them.
-- **Muse Code**, Meta's coding agent, wrote ten changes that the team reviewed before merging (five entirely, five finished with team edits), including export safety checks, request-limit checks, a visitor accessibility fix, a README setup step and a regression test for the 3D camera controls; it also ran read-only review sweeps.
-- **[EVALUATION.md](app/evaluation/evidence/EVALUATION.md):** 240 live evidence checks. Strict agreement with the team's expected verdicts is 52.5% (low) / 55% (medium), part-aware 78.3% / 87.5%; weakest on not-visible claims. Team-written labels with AI assistance, not a benchmark, never historical truth.
+A photograph becomes a partial 3D scene. Unseen surfaces stay empty. A memory can lead to one bounded model proposal, which the owner previews and approves before it becomes a new saved version. Earlier versions remain available.
 
-Rehere turns an archival photograph into a partial 3D scene that shows only
-what the camera saw. Areas no photograph shows stay empty, and the viewer says
-so. People add what they remember as attributed notes. When the optional
-planner is enabled, Muse Spark, Meta's model, reads a note and proposes one
-bounded change to the scene. The app checks the proposal against the scene and
-its sources, and nothing is applied until the owner approves it. Each approved
-change is saved as a new version, and earlier versions are never overwritten.
-A proposal that fails the checks is not applied, and the app shows why.
+**For judges**
+
+- [Visit the frozen, read-only demo](https://beomseogkim.github.io/rehere/). This copy does not follow later withdrawal.
+- [See the SAM 3.1 lodge outlines](https://beomseogkim.github.io/rehere/lodge-index.html), including misses.
+- [Read the evidence-check evaluation](app/evaluation/evidence/EVALUATION.md): 240 live checks, with limitations.
+- [Read the live run](app/evaluation/evidence/RUN.md): response IDs, outcomes, latency and estimated cost.
 
 Throughout, Rehere keeps three kinds of origin apart: what a photograph shows,
 what a person remembered, and what a model proposed. Anyone with a link can
@@ -29,9 +22,9 @@ is withdrawn, the shared views that depend on it stop being served.
 **Why this matters.** When a place is lost, what remains is a handful of
 photographs and the people who remember it. The Grand Canyon Lodge on the North
 Rim was destroyed by fire in July 2025. Tools that fill gaps with plausible
-imagery make memory and invention indistinguishable. Rehere lets a family, a
-community or a visitor rebuild a place together, with originals that keep their
-checksums and every change recorded as a new, attributed version.
+imagery make memory and invention indistinguishable. Rehere lets people share a partial view of a lost place,
+with originals that keep their checksums and every approved change recorded
+as a new, attributed version.
 
 **Demo material.** Photographs of the Grand Canyon Lodge from the Historic
 American Buildings Survey (HABS AZ-135-A, Richard Frear, July 1982; Library of
@@ -42,6 +35,14 @@ are labelled as demonstration hypotheses, not recollections. The demo's owner
 note is read aloud by a Synthetic demo voice (macOS text-to-speech): a
 demonstration instruction about the archival photo, not a person, memory or
 witness account.
+
+**Meta models in Rehere**
+
+- **Muse Spark** (`muse-spark-1.3`), in the optional planner, turns an owner's note into one bounded proposed edit. The app checks it, and nothing is saved until the owner approves. In an optional, owner-only evidence check, it also says whether chosen photographs support, conflict with, or do not show up to three verbatim parts of a note. Both are off by default.
+- **SAM 3.1** (Meta Model API) is an optional, off-by-default outline provider; Meta's SAM 2.1, run locally, remains the default. The demo scene's outlines were replayed from recorded live SAM 3.1 responses (no new call). The [lodge gallery](https://beomseogkim.github.io/rehere/lodge-index.html) shows 30 live one-noun requests on three photographs, with what they missed. Those are 2D estimates, not measurements, and they are not the demo scene's outlines.
+- **Muse Voice Transcribe**, optional and off by default, drafts captions for a recorded story, and the owner reviews them before visitors see them.
+- **Muse Code**, Meta's coding agent, wrote ten changes that the team reviewed before merging (five entirely, five finished with team edits), including export safety checks, request-limit checks, a visitor accessibility fix, a README setup step and a regression test for the 3D camera controls; it also ran read-only review sweeps.
+- **[EVALUATION.md](app/evaluation/evidence/EVALUATION.md):** 240 live evidence checks. Agreement on conflicting claims is 80% (low) / 87% (medium); strict agreement across all claims is 52.5% / 55%, and part-aware agreement is 78.3% / 87.5%. Agreement on `not_visible` claims is 31% at both efforts. Team-written labels with AI assistance, not a benchmark, never historical truth.
 
 Built during the Meta Global AI Developer Hackathon (October 27 to
 November 4, 2026).
