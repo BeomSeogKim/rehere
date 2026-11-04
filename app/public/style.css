@@ -495,3 +495,5 @@ p.memory-text, .visit-memory-summary p, .visit-memory-full p, .share-memory-word
   font-weight: 600;
 }
 .space-viewport-wrap > .viewport-unseen-label { position: absolute; top: 12px; left: 12px; z-index: 1; pointer-events: none; }
+/* The display rule above would otherwise override the hidden attribute. */
+.viewport-unseen-label[hidden] { display: none; }
