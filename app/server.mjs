@@ -51,6 +51,7 @@ const STATIC_FILES = new Map([
   ['/composition-description.js', ['composition-description.js', 'text/javascript; charset=utf-8']],
   ['/composition-editor.js', ['composition-editor.js', 'text/javascript; charset=utf-8']],
   ['/memory-edit.js', ['memory-edit.js', 'text/javascript; charset=utf-8']],
+  ['/memory-timeline.js', ['memory-timeline.js', 'text/javascript; charset=utf-8']],
   ['/alternative-memory.js', ['alternative-memory.js', 'text/javascript; charset=utf-8']],
   ['/access-ui.js', ['access-ui.js', 'text/javascript; charset=utf-8']],
   ['/collaboration.js', ['collaboration.js', 'text/javascript; charset=utf-8']],

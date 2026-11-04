@@ -7,6 +7,7 @@ import { isComposition } from './composition-scene.js';
 import { compositionDifference, describeComposition } from './composition-description.js';
 import { withObject } from './arrangement.js';
 import { OBJECT_IDS } from './photo-scene.js';
+import { renderMemoryTimeline } from './memory-timeline.js';
 
 export const TEXT_LIMIT = 2000;
 const POLL_MS = 2000;
@@ -217,6 +218,7 @@ export function mountMemoryEdit(container, bridge) {
   let current = null;
   let proposals = [];
   let history = [];
+  let timelineAvailable = false;
   let pollTimer = null;
   let pollingId = null;
   // Bumped whenever polling stops, so a read already in flight is dropped.
@@ -306,7 +308,7 @@ export function mountMemoryEdit(container, bridge) {
   let revealToken = 0;
   let revealNote = '';
   let filterHeading = null;
-  const historyList = el('ol', { className: 'memory-history', reversed: true });
+  const timeline = el('section', { className: 'memory-timeline' });
 
   const label = el('label', { htmlFor: text.id, textContent: 'What do you remember about this object?' });
   container.replaceChildren(
@@ -328,9 +330,9 @@ export function mountMemoryEdit(container, bridge) {
         ]),
     status,
     message,
-    chooserBox,
     review,
-    el('details', { className: 'source-details' }, [el('summary', { textContent: 'Saved versions' }), historyList]),
+    timeline,
+    chooserBox,
   );
 
   const editorReady = () => bridge.editor().clean && !busy;
@@ -720,51 +722,36 @@ export function mountMemoryEdit(container, bridge) {
 
   function renderHistory() {
     const editor = bridge.editor();
-    const byId = new Map(proposals.map((proposal) => [proposal.id, proposal]));
-    historyList.replaceChildren(
-      ...[...history]
-        .sort((a, b) => b.version - a.version)
-        .map((entry) => {
-          const isCurrent = entry.version === editor.version;
-          const item = el('li', {}, [
-            el('span', { className: 'space-choice-label', textContent: `Version ${entry.version}${isCurrent ? ' (current)' : ''}: ${historyLabel(entry)}` }),
-            el('span', { className: 'hint', textContent: entry.objects && bridge.targets ? bridge.targets.describe(entry) : formatTransform(entry) }),
-          ]);
-          const source = entry.proposalId ? byId.get(entry.proposalId) : null;
-          if (source && isRedacted(source)) {
-            item.append(el('span', { className: 'hint', textContent: 'The memory for this change is no longer shown.' }));
-          } else if (source) {
-            item.append(
-              el('span', { className: 'hint', textContent: `Your memory: “${source.statement.text}”` }),
-              el('span', { className: 'hint', textContent: `AI suggestion: ${source.result?.reason ?? 'not available'}` }),
-            );
+    renderMemoryTimeline(timeline, {
+      history, proposals, currentVersion: editor.version, available: timelineAvailable,
+      label: historyLabel,
+      describe: (entry) => entry.objects && bridge.targets ? bridge.targets.describe(entry) : formatTransform(entry),
+      actions(entry, isCurrent) {
+        if (isCurrent) return [];
+        const nodes = [];
+        const undo = el('button', { type: 'button', className: 'secondary', textContent: `Return to version ${entry.version}` });
+        undo.disabled = busy || previewing || !editor.clean;
+        const ruleChanges = Boolean(bridge.targets) && JSON.stringify(entry.relationship ?? null) !== JSON.stringify(editor.relationship ?? null);
+        undo.addEventListener('click', () => {
+          if (!ruleChanges) {
+            undoTo(entry.version, false);
+            return;
           }
-          if (!isCurrent) {
-            const undo = el('button', { type: 'button', className: 'secondary', textContent: `Return to version ${entry.version}` });
-            undo.disabled = busy || previewing || !editor.clean;
-            // On two-object scenes a different rule must be confirmed first.
-            const ruleChanges = Boolean(bridge.targets) && JSON.stringify(entry.relationship ?? null) !== JSON.stringify(editor.relationship ?? null);
-            undo.addEventListener('click', () => {
-              if (!ruleChanges) {
-                undoTo(entry.version, false);
-                return;
-              }
-              ruleUndoVersion = entry.version;
-              sync();
-            });
-            item.append(undo);
-            if (ruleChanges && ruleUndoVersion === entry.version) {
-              const confirm = el('button', { type: 'button', textContent: `Return to version ${entry.version} and change the rule`, disabled: undo.disabled });
-              confirm.addEventListener('click', () => undoTo(entry.version, true));
-              item.append(
-                el('p', { className: 'hint', textContent: `This also changes the rule from “${bridge.targets.ruleText(editor.relationship)}” to “${bridge.targets.ruleText(entry.relationship)}”.` }),
-                confirm,
-              );
-            }
-          }
-          return item;
-        }),
-    );
+          ruleUndoVersion = entry.version;
+          sync();
+        });
+        nodes.push(undo);
+        if (ruleChanges && ruleUndoVersion === entry.version) {
+          const confirm = el('button', { type: 'button', textContent: `Return to version ${entry.version} and change the rule`, disabled: undo.disabled });
+          confirm.addEventListener('click', () => undoTo(entry.version, true));
+          nodes.push(
+            el('p', { className: 'hint', textContent: `This also changes the rule from “${bridge.targets.ruleText(editor.relationship)}” to “${bridge.targets.ruleText(entry.relationship)}”.` }),
+            confirm,
+          );
+        }
+        return nodes;
+      },
+    });
   }
 
   // A read started before a proposal action may describe the state before it,
@@ -775,6 +762,8 @@ export function mountMemoryEdit(container, bridge) {
   let latestRead = null;
   function refresh() {
     summaryReadFinished = false;
+    timelineAvailable = false;
+    renderHistory();
     if (bridge.comparison) {
       comparisonReadCertain = false;
       if (comparing) endComparison();
@@ -813,6 +802,7 @@ export function mountMemoryEdit(container, bridge) {
       if (current && ACTIVE.has(current.status) && pollingId !== current.id) poll(current.id);
     }
     if (versions.ok && Array.isArray(versions.body)) history = versions.body;
+    timelineAvailable = comparisonReadCertain;
     summaryReadFinished = true;
     if (!list.ok || !versions.ok) status.textContent = 'Saved proposals or versions could not be loaded. Reload the page to try again.';
     else if (bridge.comparison && !comparisonReadCertain) status.textContent = 'The current saved version could not be confirmed. Load the saved version or reload the page.';
