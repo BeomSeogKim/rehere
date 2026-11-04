@@ -156,6 +156,8 @@ describe('lodge index page', () => {
     assert.match(page, /Missed objects and merged or loose outlines are left in/);
     assert.match(page, /Nothing here is a 3D model, a stitched room or a reconstruction/);
     assert.match(page, /not the outlines used in the reconstructed scene/);
+    const lede = /<p class="lede">([^<]*)<\/p>/.exec(page)[1];
+    assert.match(lede, /made for this index page and are separate from the outlines used in the reconstructed scene/, 'stated above the fold, in the opening paragraph');
     for (const claim of [/accurate/i, /\bground-truth(?:ed)?\b/i, /full reconstruction/i, /completes? the room/i]) assert.ok(!claim.test(page), String(claim));
   });
 

@@ -127,7 +127,7 @@ ${entry.results.map((result) => renderCard(photo, result)).join('\n')}
   <header class="top">
     <p class="brand">Rehere</p>
     <h1>What SAM 3.1 (Meta Model API) outlines in the lodge photographs: model estimates, not measurements</h1>
-    <p class="lede">Three public photographs of the Grand Canyon Lodge, each asked about ten everyday nouns, one noun per request. ${plural(total, 'outline')} came back in ${data.requests} requests.</p>
+    <p class="lede">Three public photographs of the Grand Canyon Lodge, each asked about ten everyday nouns, one noun per request. ${plural(total, 'outline')} came back in ${data.requests} requests. These ${data.requests} requests were made for this index page and are separate from the outlines used in the reconstructed scene of the third photograph (AZ-135-A-26).</p>
     <p><a href="index.html">Back to the three photographs</a></p>
   </header>
   <main id="main">
