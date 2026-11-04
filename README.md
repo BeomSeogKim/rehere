@@ -3,6 +3,14 @@
 Revisit places that can no longer be visited, rebuilt from old photographs and
 the memories of people who knew them.
 
+**Meta models in Rehere**
+
+- **Muse Spark** (`muse-spark-1.3`), in the optional planner, turns an owner's note into one bounded proposed edit. The app checks it, and nothing is saved until the owner approves. In an optional, owner-only evidence check, it also says whether chosen photographs support, conflict with, or do not show up to three verbatim parts of a note. Both are off by default.
+- **SAM 3.1** (Meta Model API) is an optional, off-by-default outline provider; Meta's SAM 2.1, run locally, remains the default. The demo scene's outlines were replayed from recorded live SAM 3.1 responses (no new call). The [lodge gallery](https://beomseogkim.github.io/rehere/lodge-index.html) shows 30 live one-noun requests on three photographs, with what they missed. Those are 2D estimates, not measurements, and they are not the demo scene's outlines.
+- **Muse Voice Transcribe**, optional and off by default, drafts captions for a recorded story, and the owner reviews them before visitors see them.
+- **Muse Code**, Meta's coding agent, wrote ten changes that the team reviewed before merging (five entirely, five finished with team edits), including export safety checks, request-limit checks, a visitor accessibility fix, a README setup step and a regression test for the 3D camera controls; it also ran read-only review sweeps.
+- **[EVALUATION.md](app/evaluation/evidence/EVALUATION.md):** 240 live evidence checks. Strict agreement with the team's expected verdicts is 52.5% (low) / 55% (medium), part-aware 78.3% / 87.5%; weakest on not-visible claims. Team-written labels with AI assistance, not a benchmark, never historical truth.
+
 Rehere turns an archival photograph into a partial 3D scene that shows only
 what the camera saw. Areas no photograph shows stay empty, and the viewer says
 so. People add what they remember as attributed notes. When the optional
