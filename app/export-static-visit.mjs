@@ -30,7 +30,7 @@ const LIMITS = { file: 64 * 1024 ** 2, total: 256 * 1024 ** 2 };
 // Mirrors VISITOR_FILES in server.mjs, with this export's entry in place of
 // visitor-entry.js. A test keeps the two lists equal.
 export const VISITOR_MODULES = [
-  'static-entry.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'composition-scene.js', 'composition-description.js',
+  'static-entry.js', 'version-link.js', 'visits.js', 'scene-viewer.js', 'photo-scene.js', 'composition-scene.js', 'composition-description.js',
   'story-player.js', 'playback.js', 'arrangement.js', 'object-outline-editor.js',
 ];
 // Project notices shipped with every export: the exported JavaScript is distributed under the project license.

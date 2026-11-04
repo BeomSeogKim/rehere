@@ -162,7 +162,8 @@ describe('static visitor export', () => {
     const server = await readFile(fileURLToPath(new URL('../server.mjs', import.meta.url)), 'utf8');
     const block = /const VISITOR_FILES = new Map\(\[[\s\S]*?\.\.\.\[([^\]]*)\]/.exec(server)[1];
     const served = [...block.matchAll(/'([^']+\.js)'/g)].map((match) => match[1]).map((name) => (name === 'visitor-entry.js' ? 'static-entry.js' : name));
-    assert.deepEqual([...VISITOR_MODULES].sort(), served.sort());
+    // version-link.js is the exported page's own pure helper; the live listener has no use for it.
+    assert.deepEqual([...VISITOR_MODULES].sort(), [...served, 'version-link.js'].sort());
   });
 
   it('refuses without confirmation, with a malformed capability, or into a non-empty folder', async () => {

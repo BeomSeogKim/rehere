@@ -4,6 +4,7 @@
 // access re-check, so revocation and withdrawal are not live in this copy.
 import { mountVisitor } from './visits.js';
 import { stopAll } from './playback.js';
+import { pickViewButton } from './version-link.js';
 
 const read = (path, signal) => fetch(`./data/${path}`, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal });
 
@@ -23,11 +24,12 @@ export function staticSource() {
   };
 }
 
-// A link may ask to open on one saved version: snapshot.html?version=<exact button text>. The text is only compared with the
-// version buttons the page draws; the first match is pressed once, and the page works the same without the parameter.
+// A link may ask to open on one saved version: snapshot.html?version=<exact version button text>. The text is compared only
+// with the saved-view buttons the page draws (see version-link.js); one match is pressed once, anything else is ignored, and
+// the page works the same without the parameter.
 function openRequestedVersion(container, label) {
   const press = () => {
-    const button = [...container.querySelectorAll('button')].find((item) => item.textContent.trim() === label);
+    const button = pickViewButton(container.querySelectorAll('button'), label);
     button?.click();
     return Boolean(button);
   };
