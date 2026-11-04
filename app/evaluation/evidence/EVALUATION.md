@@ -7,9 +7,9 @@ written beforehand for 40 notes about six public photographs?
 **Read this first.** The expected verdicts were written by the development team
 (AI-assisted). They are not independent annotators' labels, and they describe
 what we expect a careful viewer to see in these frames, never historical truth.
-One later viewer checked the labels against the pinned frames; that is one
-person's check, not independent validation. Nothing here is a benchmark of
-the model in general.
+A separate AI-assisted review checked the labels against the pinned frames.
+That is another development-team review, not independent validation. Nothing
+here is a benchmark of the model in general.
 
 ## What was run
 
@@ -47,7 +47,8 @@ not_visible, and `mixed` otherwise. A check that produced no valid answer is a
 miss.
 
 - **Primary, strict (fixed before any live call):** the claim-level verdict equals
-  the expected verdict. Any disagreeing part is a miss.
+  the expected verdict. Conflicts take precedence as defined above; mixed and
+  invalid answers are misses.
 - **Secondary, part-aware (added after an 8-check pilot, before the full run):** a
   sent check agrees when at least one part carries the expected verdict and,
   unless the expected verdict is conflicts, no part conflicts. Supports or
@@ -124,10 +125,10 @@ colour word "white", but its source choice was correct in all six runs.
 
 ## Label flags (one viewer's check, not independent validation)
 
-One viewer checked every label against the frames in two passes: the first
-before the full run (it led to the c06 relabel and flagged the six claims
-below), the second while the run was in progress. Neither pass changed a label
-after answers existed.
+A separate AI-assisted review checked every label against the frames in two
+passes: the first before the full run (it led to the c06 relabel and flagged
+the six claims below), the second while the run was in progress. Neither pass
+changed a label after answers existed.
 
 | Claims | Result | Reason |
 |---|---|---|
