@@ -275,3 +275,32 @@ it('checks contributor model grant again at dispatch and before apply; deletion 
   assert.equal(persisted.proposals.filter((item) => item.statement.text !== null).length, 0);
   assert.equal(JSON.stringify(persisted.proposals).includes('Synthetic writer'), false);
 });
+
+it('keeps attribution redacted when a manual parent dependency is withdrawn but the selected source remains', async (t) => {
+  const f = await fixture(t);
+  const a = await contribute(f, 'Synthetic parent provider', 'Synthetic manually interpreted parent memory.');
+  const b = await contribute(f, 'Synthetic selected provider', 'Synthetic retained source words.');
+  const reviewed = await read(await f.owner.post(`${f.route}/contributions/${a.contribution.id}/review`, {
+    requestId: randomUUID(), baseVersion: 1, baseRevision: 1, decision: 'alternative', reason: 'Synthetic manual placement.', conflict: 'unknown', transform: { offset: [0.1, 0, 0], yaw: 0 },
+  }));
+  const parent = reviewed.variant;
+  assert.deepEqual(parent.contributionIds, [a.contribution.id]);
+  assert.equal(Object.hasOwn((await f.manifest()).collaboration.variants.find((item) => item.id === parent.id), 'sourceDependencies'), false);
+  const planned = await propose(f, parent, b.ref);
+  assert.equal(planned.proposal.statement.attribution.providerLabel, b.contribution.provider.displayName);
+  await read(await a.session.post(`${f.route}/contributions/${a.contribution.id}/withdraw`, { requestId: randomUUID() }));
+  const projected = await read(await f.owner.request(`${planned.route}/${planned.proposal.id}`));
+  assert.equal(projected.redacted, true);
+  assert.equal(projected.statement.text, null);
+  assert.equal(projected.statement.attribution, null);
+  assert.equal(projected.status, 'stale');
+  assert.equal(projected.result, null);
+  assert.equal(projected.question, null);
+  assert.equal(projected.candidate, null);
+  assert.deepEqual(projected.statement.source, b.ref, 'the owner-only audit source binding is retained');
+  assert.equal(projected.statement.sha256, b.ref.sourceSha256);
+  assert.equal(projected.model, 'synthetic-planner');
+  assert.equal(projected.responseId, 'synthetic-response');
+  assert.equal(projected.mode, 'simulated');
+  assert.equal((await context(f, (await f.manifest()).collaboration.variants[0])).statementSources.some((item) => item.statementSource.contributionId === b.contribution.id), true);
+});

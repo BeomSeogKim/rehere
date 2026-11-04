@@ -1774,7 +1774,7 @@ export class ReconstructionStore {
       const invalidStatement = item.statement && Object.hasOwn(item.statement, 'source') && !written;
       if (place && !sourceIssue && !invalidStatement) {
         const projected = projectProposal(manifest, item);
-        return written ? { ...projected, statement: { ...projected.statement, attribution: written.attribution } } : projected;
+        return written && !projected.redacted ? { ...projected, statement: { ...projected.statement, attribution: written.attribution } } : projected;
       }
       return { ...item, statement: { ...item.statement, text: null, ...(Object.hasOwn(item.statement ?? {}, 'attribution') && { attribution: null }) }, result: null, question: null, status: 'stale', error: sourceIssue || invalidStatement ? WRITTEN_REDACTED_PROPOSAL : SOURCE_REDACTED_PROPOSAL, redacted: true,
         ...(item.scope && { candidate: null }) };
