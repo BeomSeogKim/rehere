@@ -8,9 +8,11 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { crc32, deflateSync } from 'node:zlib';
 import { exportStaticVisit } from '../export-static-visit.mjs';
-import { checkEntryCss, checkEntryHtml, checkPng, fetchFromExport, loadEntry, stripJpegMetadata, verifyExportFolder } from '../judge-entry.mjs';
+import { pcmWav } from '../audio-derivative.mjs';
+import { checkEntryAgainstSnapshot, checkEntryCss, checkEntryHtml, checkPng, fetchFromExport, loadEntry, stripJpegMetadata, verifyExportFolder } from '../judge-entry.mjs';
 
 const ENTRY = fileURLToPath(new URL('../entry/', import.meta.url));
+const { route: PENN_ROUTE } = JSON.parse(await readFile(path.join(ENTRY, 'photos.json'), 'utf8'));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const tempDirs = [];
 after(() => Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true }))));
@@ -94,15 +96,20 @@ describe('metadata strip', () => {
 });
 
 describe('the entry page and its pinned photographs', () => {
-  it('lists exactly the three approved photographs with verbatim captions and source links', async () => {
+  it('pins the Penn source and retains all three Lodge appendix photographs', async () => {
     const { photos } = JSON.parse(await readFile(path.join(ENTRY, 'photos.json'), 'utf8'));
     assert.deepEqual(photos.map((photo) => [photo.hbs, photo.caption]), [
       ['AZ-135-A-16', 'INTERIOR VIEW OF DINING ROOM OF MAIN LODGE'],
       ['AZ-135-A-19', 'INTERIOR VIEW OF RECREATION ROOM OF MAIN LODGE LOOKING EAST'],
       ['AZ-135-A-26', 'WICKER CHEST AND ROCKING CHAIR'],
+      ['NY-5471', 'Main concourse of Pennsylvania Station, New York City on April 24, 1962'],
     ]);
+    const penn = photos.find((photo) => photo.file === 'penn8.jpg');
+    assert.equal(penn.sourceSha256, '80a4e27ca08caf3d3ad9e90df603725584e42c3ab8ae2addf39dc4c4b1b5a026');
+    assert.equal(penn.sha256, 'a30e687411342a1c5d9d2854dc8ecec8334b92d99d7c058921b4343a92229bf1');
+    assert.deepEqual([penn.sourceBytes, penn.bytes, penn.width, penn.height], [4175148, 4174944, 4715, 3350]);
     for (const photo of photos) {
-      assert.match(photo.locUrl, /^https:\/\/www\.loc\.gov\/pictures\/item\/az0459\.photos\.\d+p\/$/);
+      if (photo.locUrl) assert.match(photo.locUrl, /^https:\/\/www\.loc\.gov\/pictures\/item\/az0459\.photos\.\d+p\/$/);
       assert.match(photo.commonsUrl, /^https:\/\/commons\.wikimedia\.org\/wiki\/File:/);
       assert.match(photo.sourceUrl, /^https:\/\/upload\.wikimedia\.org\/|^https:\/\/thumb\.wikimedia\.org\//);
       assert.match(photo.sourceSha256, /^[0-9a-f]{64}$/);
@@ -115,21 +122,26 @@ describe('the entry page and its pinned photographs', () => {
   it('carries the approved copy and no claim beyond it', async () => {
     const html = await readFile(path.join(ENTRY, 'index.html'), 'utf8');
     for (const text of [
-      'Three photographs of a place that is gone. One has been rebuilt as a partial scene.',
-      'The Grand Canyon Lodge on the North Rim was lost in the Dragon Bravo Fire in July 2025.',
-      'National Park Service, July 13, 2025',
-      'Shown here as a photograph only; no reconstructed scene is included for this stop.',
-      'The one partial scene in this demo: only what the camera saw is rebuilt, and unseen surfaces stay empty. One owner-approved change turns the chest by 5 degrees; the earlier version is one click away.',
-      'Notes, the voice and the contributor in this demo are labelled synthetic test material; all roles are played by the demo operator.',
-      'This is a read-only offline copy: withdrawal is enforced only in the running app.',
-      '<a href="lodge-index.html">See what SAM 3.1 outlines in these photographs</a>',
-      "Thirty one-noun requests to Meta's SAM 3.1, shown with what they missed. Model estimates, not measurements.",
-      'a U.S. Government work with no known restrictions on images made by the U.S. Government',
-      'snapshot.html?version=Alternative%20arrangement%202',
+      'Show a place you remember to someone you love.',
+      'Visit the saved scene',
+      'Compare the photograph with the saved scene and its labelled sources.',
+      "New York's original Penn Station, demolished in 1963",
+      'empty and torn edges',
+      'Story, voice and notes are synthetic demonstration material',
+      'The voice is synthetic macOS Samantha',
+      'The clock change is a demonstration hypothesis',
+      'previewed and approved by the demo owner',
+      'local SAM 2.1, with local depth estimation',
+      'This scene does not use SAM 3.1',
+      'this copy does not follow later withdrawal',
+      'No known restrictions on images made by the U.S. Government.',
+      'snapshot.html?version=Saved%20version%201',
+      'snapshot.html?version=Saved%20version%202',
+      'href="lodge-index.html"',
     ]) assert.ok(html.includes(text), text);
-    assert.doesNotMatch(html, /\bhero\b|stitch|validated|participant|Muse Image|live backend|public domain|\b(left|right)\b/i);
-    assert.doesNotMatch(html, /Brand|ABC15/, 'the video-only quotation is not on the site');
-    assert.equal(html.split('Shown here as a photograph only; no reconstructed scene is included for this stop.').length - 1, 2, 'both photograph-only stops carry the scoped sentence');
+    assert.doesNotMatch(html, /Dragon Bravo|National Park Service|Alternative%20arrangement|turns the chest|public domain/);
+    assert.ok(html.indexOf('id="scene"') < html.indexOf('id="appendix"'));
+    assert.equal(html.split('Shown here as an archival photograph only; no Lodge scene is included in this export.').length - 1, 3);
     assert.doesNotMatch(html, /No scene has been built/, 'no claim that a build has never happened');
   });
 
@@ -148,7 +160,7 @@ describe('the entry page and its pinned photographs', () => {
     bad((h) => h.replace('https://github.com/BeomSeogKim/rehere"', 'https://example.org/track"'), /approved source/);
     bad((h) => h.replace('href="entry.css"', 'href="/entry.css"'), /only its own entry\.css/);
     bad((h) => h.replace('<p class="brand">', '<p class="brand"><a href="/elsewhere">x</a>'), /root-absolute/);
-    bad((h) => h.replace('href="snapshot.html?version=Alternative%20arrangement%202"', 'href="other.html"'), /unlisted file/);
+    bad((h) => h.replace('href="snapshot.html?version=Saved%20version%201"', 'href="other.html"'), /unlisted file/);
     bad((h) => h.replace(/alt="[^"]*"/, 'alt="x"'), /alt text/);
     bad((h) => h.replace('WICKER CHEST AND ROCKING CHAIR', 'A chest and a chair'), /verbatim caption/);
     bad((h) => h.replace(photos[0].locUrl, 'https://www.loc.gov/'), /source links|approved source/);
@@ -180,16 +192,23 @@ describe('building a site from an earlier export with an entry', () => {
   const TOKEN = `rhv_${'D'.repeat(43)}`;
   const JPEG_PLAIN = jpegWith();
 
-  const edit = (yaw) => ({ objects: [{ id: 'object-1', offset: [0, 0, 0], yaw: 0 }, { id: 'object-2', offset: [0, 0, 0], yaw }] });
+  const edit = (yaw) => ({ offset: [0, 0, 0], yaw });
   const childViews = (overrides = {}) => [
-    { id: randomUUID(), label: 'Alternative arrangement 1', edit: edit(0), evidence: { arrangement: 'alternative' } },
-    { id: randomUUID(), label: 'Alternative arrangement 2', edit: edit((-5 * Math.PI) / 180), evidence: { arrangement: 'memory' }, ...overrides },
+    { id: PENN_ROUTE.original.viewId, label: 'Saved version 1', edit: edit(0), evidence: { arrangement: 'initial' } },
+    { id: PENN_ROUTE.approved.viewId, label: 'Saved version 2', edit: edit((-10 * Math.PI) / 180), evidence: { arrangement: 'memory' }, ...overrides },
   ];
+  const WAV = pcmWav(Buffer.alloc(3200));
+  const snapshot = (views = childViews()) => ({
+    id: PENN_ROUTE.snapshotId, title: 'Synthetic test place', synthetic: true, startViewId: views[0].id, views,
+    stories: [{ id: PENN_ROUTE.storyId, viewId: PENN_ROUTE.original.viewId, title: 'Synthetic demonstration story', captionAuthorLabel: 'Synthetic owner', durationMs: 100,
+      cues: [{ startMs: 0, endMs: 100, text: 'Synthetic story, not a recollection.' }], audio: { type: 'audio/wav', size: WAV.length } }],
+    contributorPhotos: [], contributorRecordings: [],
+  });
 
   async function earlierExport(views = childViews()) {
     const viewId = views[0].id;
-    const manifest = { id: randomUUID(), title: 'Synthetic test place', synthetic: true, startViewId: viewId, views, stories: [], contributorPhotos: [], contributorRecordings: [] };
-    const routes = new Map([['/api/visit', Buffer.from(JSON.stringify(manifest))], [`/api/visit/assets/${viewId}/surface.json`, Buffer.from('{"synthetic":true}')], [`/api/visit/assets/${viewId}/texture.jpg`, JPEG_PLAIN]]);
+    const manifest = snapshot(views);
+    const routes = new Map([['/api/visit', Buffer.from(JSON.stringify(manifest))], [`/api/visit/assets/${viewId}/surface.json`, Buffer.from('{"synthetic":true}')], [`/api/visit/assets/${viewId}/texture.jpg`, JPEG_PLAIN], [`/api/visit/stories/${PENN_ROUTE.storyId}/audio.wav`, WAV]]);
     const server = http.createServer((req, res) => {
       const body = req.headers.authorization === `Bearer ${TOKEN}` ? routes.get(req.url) : undefined;
       res.writeHead(body ? 200 : 404).end(body);
@@ -204,7 +223,7 @@ describe('building a site from an earlier export with an entry', () => {
     }
   }
 
-  // The real three-stop entry files (the real lodge index page is tested in lodge-index.test.mjs; withLodge adds a synthetic one
+  // The real entry and appendix files (the real lodge index page is tested in lodge-index.test.mjs; withLodge adds a synthetic one
   // where a test needs a second page), with the photograph pins replaced by pins of small synthetic files.
   async function entryAndPhotos() {
     const base = await tempDir();
@@ -213,7 +232,7 @@ describe('building a site from an earlier export with an entry', () => {
     await cp(ENTRY, entryDir, { recursive: true, filter: (source) => !path.basename(source).startsWith('lodge-index.') });
     // Without the second page the link to it must go too, or the gate (rightly) refuses the folder.
     const page = await readFile(path.join(entryDir, 'index.html'), 'utf8');
-    const withoutLink = page.replace(/\n    <p class="route"><a href="lodge-index\.html">[^\n]*<\/p>/, '');
+    const withoutLink = page.replace(/\n +<p class="route"><a href="lodge-index\.html">[^\n]*<\/p>/, '');
     assert.notEqual(withoutLink, page, 'the real entry page links to the second page');
     await writeFile(path.join(entryDir, 'index.html'), withoutLink);
     const config = JSON.parse(await readFile(path.join(entryDir, 'photos.json'), 'utf8'));
@@ -268,11 +287,11 @@ describe('building a site from an earlier export with an entry', () => {
     const files = await walk(outDir);
     for (const name of ['index.html', 'snapshot.html', 'entry.css', ...photos.map((photo) => `entry/${photo.file}`), 'EXPORT.json', 'LICENSE', 'static-entry.js']) assert.ok(files.includes(name), name);
     for (const name of files.filter((file) => file.startsWith('data/'))) assert.deepEqual(await readFile(path.join(outDir, name)), await readFile(path.join(earlier, name)), name);
-    assert.match(await readFile(path.join(outDir, 'index.html'), 'utf8'), /Three photographs of a place that is gone/);
+    assert.match(await readFile(path.join(outDir, 'index.html'), 'utf8'), /Show a place you remember/);
     const snapshot = await readFile(path.join(outDir, 'snapshot.html'), 'utf8');
     assert.match(snapshot, /Offline snapshot\./);
     assert.match(snapshot, /<a href="\.\/">Back to the entry page<\/a>/);
-    assert.doesNotMatch(snapshot, /Three photographs/);
+    assert.doesNotMatch(snapshot, /Show a place you remember/);
     const listing = JSON.parse(await readFile(path.join(outDir, 'EXPORT.json'), 'utf8')).files;
     assert.deepEqual(listing.map((item) => item.path).sort(), files.filter((file) => file !== 'EXPORT.json').sort());
     for (const item of listing) assert.equal(sha256(await readFile(path.join(outDir, item.path))), item.sha256, item.path);
@@ -312,12 +331,68 @@ describe('building a site from an earlier export with an entry', () => {
       const { entry } = await entryAndPhotos();
       return exportStaticVisit({ origin: 'http://snapshot.invalid', token: `rhv_${'H'.repeat(43)}`, outDir: path.join(await tempDir(), 'x'), confirmPublicMaterial: true, fetchImpl: fetchFromExport(earlier), entry });
     };
-    await assert.rejects(build(childViews().map((view, index) => (index === 1 ? { ...view, label: 'Alternative arrangement 2 \u00b7 Owner revision' } : view))), /no single saved view labelled/);
-    await assert.rejects(build([...childViews(), { id: randomUUID(), label: 'Alternative arrangement 2', edit: edit(0), evidence: { arrangement: 'memory' } }]), /no single saved view labelled/);
-    await assert.rejects(build(childViews({ edit: edit((-10 * Math.PI) / 180) })), /does not record a 5 degree turn/);
-    await assert.rejects(build(childViews({ edit: edit(0) })), /does not record a 5 degree turn/);
+    await assert.rejects(build(childViews().map((view, index) => (index === 1 ? { ...view, label: 'Saved version 2 owner revision' } : view))), /no single pinned saved view/);
+    await assert.rejects(build([...childViews(), { id: randomUUID(), label: 'Saved version 2', edit: edit(0), evidence: { arrangement: 'memory' } }]), /exactly two saved versions/);
+    await assert.rejects(build(childViews({ edit: edit((10 * Math.PI) / 180) })), /does not record a -10 degree/);
+    await assert.rejects(build(childViews({ edit: edit(0) })), /does not record a -10 degree/);
+    await assert.rejects(build(childViews({ edit: { offset: [1, 0, 0], yaw: (-10 * Math.PI) / 180 } })), /zero translation/);
     await assert.rejects(build(childViews({ evidence: { arrangement: 'alternative' } })), /not recorded as memory/);
     await assert.doesNotReject(build(childViews()));
+  });
+
+  it('binds the primary original, approved version and story to their exact snapshot identities', async () => {
+    const html = await readFile(path.join(ENTRY, 'index.html'), 'utf8');
+    const check = (manifest, page = html) => checkEntryAgainstSnapshot({ html: page, route: PENN_ROUTE }, manifest);
+    assert.doesNotThrow(() => check(snapshot()));
+    const bad = (mutate, message) => {
+      const manifest = snapshot();
+      mutate(manifest);
+      assert.throws(() => check(manifest), message);
+    };
+    bad((m) => { m.id = randomUUID(); }, /pinned synthetic snapshot/);
+    bad((m) => { m.synthetic = false; }, /pinned synthetic snapshot/);
+    bad((m) => { m.startViewId = PENN_ROUTE.approved.viewId; }, /start at its pinned original/);
+    bad((m) => { m.views[0].id = randomUUID(); }, /single pinned saved view/);
+    bad((m) => { m.views[1].label = m.views[0].label; }, /single pinned saved view/);
+    bad((m) => { m.views[0].edit.yaw = 0.1; }, /0 degree/);
+    bad((m) => { m.views[1].edit = { objects: [{ id: 'clock', yaw: -Math.PI / 18, offset: [0, 0, 0] }] }; }, /single-object/);
+    bad((m) => { m.stories[0].viewId = PENN_ROUTE.approved.viewId; }, /story must belong only/);
+    bad((m) => { m.stories[0].id = randomUUID(); }, /story must belong only/);
+    bad((m) => { m.stories = []; }, /story must belong only/);
+    bad((m) => { m.stories.push({ ...m.stories[0], viewId: PENN_ROUTE.approved.viewId }); }, /story must belong only/);
+    bad((m) => { delete m.stories[0].captionAuthorLabel; }, /reviewed story/);
+    bad((m) => { m.stories[0].audio.size = 0; }, /reviewed story/);
+    bad((m) => { m.stories[0].cues = []; }, /reviewed story/);
+    bad((m) => { m.stories[0].audio.type = 'audio/mpeg'; }, /reviewed story/);
+    bad((m) => { m.stories = [null]; }, /reviewed story/);
+    assert.throws(() => check(snapshot(), html.replace('href="snapshot.html?version=Saved%20version%201"', 'href="snapshot.html?version=Saved%20version%202"')), /primary scene link/);
+    for (const href of ['snapshot.html', 'snapshot.html?version=Saved%20version%201&version=Saved%20version%202', 'snapshot.html?version=Saved%20version%201#other', 'snapshot.html?version=Saved%20version%201&extra=1', 'snapshot.html?version=Alternative%20arrangement%202', ' snapshot.html?version=Saved%20version%203 ']) {
+      assert.throws(() => check(snapshot(), html.replace('snapshot.html?version=Saved%20version%201', href)), /unapproved snapshot version route/, href);
+    }
+    assert.throws(() => check(snapshot(), html.replace('href="snapshot.html?version=Saved%20version%202"', 'href="#scene"')), /no link to/);
+    assert.doesNotThrow(() => check(snapshot(), html.replace('href="snapshot.html?version=Saved%20version%202"', "HREF='snapshot.html?version=Saved%20version%202'")));
+  });
+
+  it('refuses duplicate attributes before a browser can choose a different primary route', async () => {
+    const html = await readFile(path.join(ENTRY, 'index.html'), 'utf8');
+    const { photos } = JSON.parse(await readFile(path.join(ENTRY, 'photos.json'), 'utf8'));
+    const original = 'href="snapshot.html?version=Saved%20version%201"';
+    for (const attributes of [
+      'href="snapshot.html?version=Saved%20version%202" href="snapshot.html?version=Saved%20version%201"',
+      'href="snapshot.html?version=Saved%20version%202" HREF="snapshot.html?version=Saved%20version%201"',
+      "Href='snapshot.html?version=Saved%20version%201' href='snapshot.html?version=Saved%20version%202'",
+      'href="https://evil.example/" HREF="snapshot.html?version=Saved%20version%201"',
+    ]) {
+      const page = html.replace(original, attributes);
+      assert.throws(() => checkEntryHtml(page, photos, { targets: ['lodge-index.html'] }), /duplicate attribute: href/, attributes);
+      assert.throws(() => checkEntryAgainstSnapshot({ html: page, route: PENN_ROUTE }, snapshot()), /duplicate attribute: href/, attributes);
+    }
+    for (const page of [
+      html.replace('src="entry/penn8.jpg"', 'src="entry/penn8.jpg" SRC="entry/a16.jpg"'),
+      html.replace('class="button"', 'class="button" CLASS="secondary"'),
+      html.replace('lang="en"', 'lang="en" LANG="fr"'),
+      html.replace('alt="Black-and-white archival', 'alt="Another descriptive photograph" ALT="Black-and-white archival'),
+    ]) assert.throws(() => checkEntryHtml(page, photos, { targets: ['lodge-index.html'] }), /duplicate attribute/);
   });
 
   // A second entry page with overlay images, written beside the real entry files; the overlays folder holds exactly what the JSON lists.
@@ -355,10 +430,10 @@ describe('building a site from an earlier export with an entry', () => {
     const listing = JSON.parse(await readFile(path.join(outDir, 'EXPORT.json'), 'utf8')).files;
     assert.ok(listing.some((item) => item.path === 'entry/lodge/a16-all.png'));
     assert.equal(await verifyExportFolder(outDir), listing.length);
-    assert.match(await readFile(path.join(outDir, 'index.html'), 'utf8'), /Three photographs of a place that is gone/);
+    assert.match(await readFile(path.join(outDir, 'index.html'), 'utf8'), /Show a place you remember/);
   });
 
-  it('lets the three-stop page link to the second page only when that page exists', async () => {
+  it('lets the entry link to the second page only when that page exists', async () => {
     const { entry } = await entryAndPhotos();
     const link = (html) => html.replace('<p class="brand">Rehere</p>', '<p class="brand">Rehere</p><a href="lodge-index.html">Lodge index</a>');
     const original = await readFile(path.join(entry.dir, 'index.html'), 'utf8');

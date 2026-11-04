@@ -45,7 +45,11 @@ function startTags(html) {
   const tags = [];
   for (const [, tag, body] of html.matchAll(/<([a-zA-Z][^\s/>]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g)) {
     const attrs = new Map();
-    for (const [, name, dq, sq, bare] of body.matchAll(/([^\s"'=<>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) attrs.set(name.toLowerCase(), dq ?? sq ?? bare ?? '');
+    for (const [, name, dq, sq, bare] of body.matchAll(/([^\s"'=<>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) {
+      const key = name.toLowerCase();
+      if (attrs.has(key)) fail(`The entry page has a duplicate attribute: ${key}.`);
+      attrs.set(key, dq ?? sq ?? bare ?? '');
+    }
     tags.push({ tag: tag.toLowerCase(), attrs });
   }
   return tags;
@@ -54,7 +58,7 @@ function startTags(html) {
 const BLOCKED_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed', 'form', 'base', 'svg', 'math', 'frame', 'frameset', 'applet']);
 const BLOCKED_ATTRS = new Set(['style', 'srcset', 'action', 'formaction', 'data', 'ping', 'poster', 'background', 'xlink:href']);
 
-// options.requirePhotos (default true): the three-stop page must show every pinned photograph with its caption and sources; a second
+// options.requirePhotos (default true): the entry and appendix must show every pinned photograph with its caption and sources; a second
 // page need not. options.targets: further local files this page may point to (other entry pages, listed overlay images).
 export function checkEntryHtml(html, photos, { requirePhotos = true, targets = [] } = {}) {
   const tags = startTags(html);
@@ -83,7 +87,7 @@ export function checkEntryHtml(html, photos, { requirePhotos = true, targets = [
   for (const photo of requirePhotos ? photos : []) {
     if (!html.includes(`src="entry/${photo.file}"`)) fail(`The entry page does not show ${photo.file}.`);
     if (!html.includes(photo.caption)) fail(`The entry page lacks the verbatim caption of ${photo.hbs}.`);
-    if (!html.includes(photo.locUrl) || !html.includes(photo.commonsUrl)) fail(`The entry page lacks the source links of ${photo.hbs}.`);
+    if ((photo.locUrl && !html.includes(photo.locUrl)) || !html.includes(photo.commonsUrl)) fail(`The entry page lacks the source links of ${photo.hbs}.`);
   }
   if (tags.filter(({ tag }) => tag === 'img').some(({ attrs }) => (attrs.get('alt') ?? '').length < 12)) fail('Every entry image needs descriptive alt text.');
   if (!/<html lang="en"/.test(html) || !/<title>[^<]{8,}<\/title>/.test(html) || !/name="viewport"/.test(html)) fail('The entry page needs lang, title and viewport.');
@@ -99,17 +103,34 @@ export function checkEntryCss(css) {
 // The page's claims about the snapshot are checked against the snapshot it is built with: every version link must name exactly one
 // saved view, and the change the copy describes must be recorded in that view.
 export function checkEntryAgainstSnapshot({ html, route }, manifest) {
-  const labels = (manifest.views ?? []).map((view) => view.label);
-  const linked = [...html.matchAll(/snapshot\.html\?version=([^"&#]+)/g)].map((match) => decodeURIComponent(match[1]));
-  if (!linked.length) fail('The entry page has no version link into the snapshot.');
-  for (const label of linked) {
-    if (label !== route.label) fail(`The entry links to "${label}", but the entry route names "${route.label}".`);
-    if (labels.filter((item) => item === label).length !== 1) fail(`The snapshot has no single saved view labelled "${label}", so the version link would not open it.`);
+  if (manifest.id !== route.snapshotId || manifest.synthetic !== true) fail('The entry needs its pinned synthetic snapshot.');
+  const expected = [route.original, route.approved];
+  const links = startTags(html).filter(({ tag, attrs }) => tag === 'a' && attrs.get('href')?.trim().split(/[?#]/)[0] === 'snapshot.html');
+  const linked = links.map(({ attrs }) => {
+    const href = attrs.get('href').replace(/&amp;/g, '&').trim();
+    const url = new URL(href, 'https://entry.invalid/');
+    const labels = url.searchParams.getAll('version');
+    if (url.hash || labels.length !== 1 || [...url.searchParams.keys()].length !== 1 || !expected.some((item) => item.label === labels[0])) fail('The entry has an unapproved snapshot version route.');
+    return labels[0];
+  });
+  const primary = links.filter(({ attrs }) => attrs.get('class')?.split(/\s+/).includes('button'));
+  if (primary.length !== 1 || primary[0].attrs.get('href') !== `snapshot.html?version=${encodeURIComponent(route.original.label)}`) fail('The primary scene link must open the original saved version.');
+  if (manifest.views?.length !== 2 || manifest.startViewId !== route.original.viewId) fail('The snapshot must start at its pinned original and keep exactly two saved versions.');
+  for (const item of expected) {
+    if (!linked.includes(item.label)) fail(`The entry has no link to "${item.label}".`);
+    const matching = manifest.views.filter((view) => view.label === item.label);
+    if (matching.length !== 1 || matching[0].id !== item.viewId) fail(`The snapshot has no single pinned saved view labelled "${item.label}".`);
+    const view = matching[0];
+    const turn = view.edit?.yaw;
+    if (!Number.isFinite(turn) || view.edit.objects || Math.abs((turn * 180) / Math.PI - item.turnDegrees) > 0.01) fail(`The view "${item.label}" does not record a ${item.turnDegrees} degree single-object turn.`);
+    if (!Array.isArray(view.edit.offset) || view.edit.offset.length !== 3 || view.edit.offset.some((value) => value !== 0)) fail(`The view "${item.label}" must have zero translation.`);
+    if (view.evidence?.arrangement !== item.arrangement) fail(`The view "${item.label}" is not recorded as ${item.arrangement}.`);
   }
-  const view = manifest.views.find((item) => item.label === route.label);
-  const turn = view.edit?.objects?.find((object) => object.id === route.objectId)?.yaw;
-  if (typeof turn !== 'number' || Math.abs(Math.abs((turn * 180) / Math.PI) - route.turnDegrees) > 0.01) fail(`The view "${route.label}" does not record a ${route.turnDegrees} degree turn of ${route.objectId}.`);
-  if (view.evidence?.arrangement !== route.arrangement) fail(`The view "${route.label}" is not recorded as ${route.arrangement}.`);
+  const story = manifest.stories?.[0];
+  if (manifest.stories?.length !== 1 || story?.id !== route.storyId || story.viewId !== route.original.viewId
+      || story.audio?.type !== 'audio/wav' || !Number.isInteger(story.audio.size) || story.audio.size <= 0
+      || !Number.isInteger(story.durationMs) || story.durationMs <= 0 || !Array.isArray(story.cues) || !story.cues.length
+      || typeof story.captionAuthorLabel !== 'string' || !story.captionAuthorLabel.trim()) fail('The reviewed story must belong only to the pinned original saved version.');
 }
 
 // Overlay images ship in the release asset, never in Git. Each is checked chunk by chunk: a valid signature and CRCs, IHDR first and

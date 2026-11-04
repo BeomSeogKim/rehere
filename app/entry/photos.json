@@ -1,5 +1,5 @@
 {
-  "note": "Pinned public photographs for the judge entry. sourceSha256/sourceBytes pin the Commons JPEG derivative of the Library of Congress HABS scan; sha256/bytes pin the same file after the lossless metadata strip. The files are never committed.",
+  "note": "Pinned public photographs for the entry and Lodge appendix. sourceSha256/sourceBytes pin the source JPEG; sha256/bytes pin its losslessly metadata-stripped copy. Penn uses the Commons file title; Lodge captions are verbatim HABS captions. Photographs are never committed.",
   "photos": [
     {
       "file": "a16.jpg",
@@ -45,12 +45,36 @@
       "width": 1920,
       "height": 1546,
       "alt": "Black-and-white photograph of a wicker chest of drawers and a rocking chair side by side."
+    },
+    {
+      "file": "penn8.jpg",
+      "hbs": "NY-5471",
+      "caption": "Main concourse of Pennsylvania Station, New York City on April 24, 1962",
+      "commonsUrl": "https://commons.wikimedia.org/wiki/File:Main_concourse_of_Pennsylvania_Station,_New_York_City_on_April_24,_1962.jpg",
+      "sourceUrl": "https://upload.wikimedia.org/wikipedia/commons/3/35/Main_concourse_of_Pennsylvania_Station%2C_New_York_City_on_April_24%2C_1962.jpg",
+      "sourceBytes": 4175148,
+      "sourceSha256": "80a4e27ca08caf3d3ad9e90df603725584e42c3ab8ae2addf39dc4c4b1b5a026",
+      "bytes": 4174944,
+      "sha256": "a30e687411342a1c5d9d2854dc8ecec8334b92d99d7c058921b4343a92229bf1",
+      "width": 4715,
+      "height": 3350,
+      "alt": "Black-and-white archival photograph of the main concourse of New York's original Penn Station, with a clock beneath the glass and steel roof."
     }
   ],
   "route": {
-    "label": "Alternative arrangement 2",
-    "objectId": "object-2",
-    "turnDegrees": 5,
-    "arrangement": "memory"
+    "snapshotId": "99787631-6b65-4e9d-a24d-02ac00d2b154",
+    "original": {
+      "label": "Saved version 1",
+      "viewId": "ed8fa175-109b-4a16-aabf-b0bca84c47c5",
+      "turnDegrees": 0,
+      "arrangement": "initial"
+    },
+    "approved": {
+      "label": "Saved version 2",
+      "viewId": "dacbf03a-71cf-4bb3-ba1f-0f1a7c804404",
+      "turnDegrees": -10,
+      "arrangement": "memory"
+    },
+    "storyId": "171999ee-e976-41e2-b11a-b4613363c4fa"
   }
 }

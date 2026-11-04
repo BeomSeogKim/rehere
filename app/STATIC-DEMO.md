@@ -87,11 +87,20 @@ static entry never uses them because it supplies its own read-only source.
 ## Judge entry page
 
 `--entry app/entry --entry-photos <folder>` puts a hand-written entry page in
-front of the snapshot. The page shows three public HABS photographs with their
-verbatim captions, source links and rights line, one sentence on what Rehere has
-and has not done with each, and a "See the change" route into the snapshot. The
-snapshot page moves to `snapshot.html`; `snapshot.html?version=<exact version
-button text>` opens it on that version, and it links back to the entry.
+front of the snapshot. The current entry opens New York's original Penn Station,
+demolished in 1963. Its primary link opens **Saved version 1**, the original
+saved arrangement and the only version with the reviewed synthetic story.
+A separate link opens **Saved version 2**, an owner-approved demonstration
+hypothesis: the clock turns -10 degrees with zero translation. The earlier
+version remains available. The scene uses local SAM 2.1 and local depth;
+the SAM 3.1 Lodge gallery is a separate appendix.
+
+The entry preserves each photograph's source title or HABS caption, source
+links and exact rights statement. Three Lodge photographs remain in a labelled
+archival appendix with their existing pins; none is presented as a Lodge saved
+scene in this export. The snapshot page moves to `snapshot.html`;
+`snapshot.html?version=<exact version button text>` opens that saved version
+and links back to the entry.
 
 - The entry files are `app/entry/index.html`, `app/entry/entry.css` and
   `app/entry/photos.json`. The export refuses an entry page that has inline
@@ -100,15 +109,22 @@ button text>` opens it on that version, and it links back to the entry.
 - The gate reads every tag's attributes whatever the quoting or letter case,
   refuses a meta refresh, a form, a frame, an SVG, `mailto:` and protocol-relative
   links, and refuses an `entry.css` that imports or loads anything.
-- The export checks the entry against the snapshot it is built with: every
-  `snapshot.html?version=` link must name exactly one saved view, and the change
-  the copy describes (the turn of one object, recorded as an owner-approved
-  arrangement) must be recorded in that view. Otherwise the export fails instead
-  of shipping a link that opens the wrong view or a claim the data does not back.
+- `photos.json` binds the entry to one synthetic snapshot, its exact original
+  and approved view IDs and labels, and one reviewed story ID. The gate requires
+  the primary link to open the original, a separate link to the approved view,
+  signed single-object turns of 0 and -10 degrees, zero translation in both,
+  and `initial` / `memory` arrangement evidence respectively. The story must
+  belong only to the original, with reviewed captions and nonempty WAV metadata.
+  Missing or duplicate saved views, unsupported version routes and a story
+  attached to the approved version stop the export.
+- These route checks establish that the entry describes the selected saved
+  snapshot; they do not authenticate history, measure geometry or independently
+  establish model quality. Caption review and the proposal/approval chain are
+  reviewed separately before the snapshot is accepted. The exporter still
+  requires every listed audio and scene asset and checks the frozen inventory.
 - The photographs are never committed. `node app/fetch-entry-photos.mjs <new
-  folder>` downloads each pinned Commons JPEG derivative of the Library of
-  Congress scan, checks its SHA-256, removes the Exif block without touching the
-  image data, checks the result against its pinned hash and writes it. Nothing is
+  folder>` downloads each pinned Commons source JPEG, checks its SHA-256,
+  removes metadata without touching the image data, checks the result against its pinned hash and writes it. Nothing is
   written if any check fails.
 - `--from-export <earlier export folder>` rebuilds a site from an earlier export
   instead of a running visitor listener, for when the live snapshot is gone, for
