@@ -17,10 +17,18 @@ No SAM 3.1 outline is used in this scene. The photograph viewpoint remains
 recognizable, but even a small camera move exposes torn edges and empty areas.
 These are limits of the reconstruction, not recovered parts of a complete room.
 
-Saved version 1 is the original orientation and has the synthetic story.
-Muse Voice Transcribe drafted its captions; the demonstration owner corrected
-a duplicated phrase before saving them. The voice is synthetic macOS
-text-to-speech, not a witness. Saved version 2 has the demonstration hypothesis
+Saved version 1 retains the original orientation. In the current frozen copy,
+its story slot contains a synthetic editorial replacement, labelled
+Synthetic voice (OpenAI TTS). The supplied synthesis script is the locked
+185-byte text. One 0-9950 ms whole-track cue is copied manually from that script,
+not from ASR or sentence alignment, and does not verify the heard words.
+Listening and editorial review are pending. The audio duration is 9,950
+milliseconds. This static edit does not establish a newly saved story, a new
+model call or a new visitor snapshot
+in the running app. The earlier demonstration used Muse Voice Transcribe to
+draft captions for its earlier audio, and the owner corrected a duplicated
+phrase before saving. That historical processing is not attributed to the
+replacement audio. Saved version 2 has the demonstration hypothesis
 about the clock: Muse Spark (`muse-spark-1.3`), response
 `resp_6aeb2351b74e8530803c4fc0`, proposed the change, the owner previewed it and
 approved the save. The saved turn is -0.1745 radians (about -10 degrees) with

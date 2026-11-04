@@ -128,7 +128,10 @@ describe('the entry page and its pinned photographs', () => {
       "New York's original Penn Station, demolished in 1963",
       'empty and torn edges',
       'Story, voice and notes are synthetic demonstration material',
-      'The voice is synthetic macOS Samantha',
+      'Synthetic voice (OpenAI TTS)',
+      'whole-track cue is copied manually from that script',
+      'Listening and editorial review are pending.',
+      'not a newly saved story in the running app',
       'The clock change is a demonstration hypothesis',
       'previewed and approved by the demo owner',
       'local SAM 2.1, with local depth estimation',
@@ -197,11 +200,11 @@ describe('building a site from an earlier export with an entry', () => {
     { id: PENN_ROUTE.original.viewId, label: 'Saved version 1', edit: edit(0), evidence: { arrangement: 'initial' } },
     { id: PENN_ROUTE.approved.viewId, label: 'Saved version 2', edit: edit((-10 * Math.PI) / 180), evidence: { arrangement: 'memory' }, ...overrides },
   ];
-  const WAV = pcmWav(Buffer.alloc(3200));
+  const WAV = pcmWav(Buffer.alloc(PENN_ROUTE.story.audioBytes - 44));
   const snapshot = (views = childViews()) => ({
     id: PENN_ROUTE.snapshotId, title: 'Synthetic test place', synthetic: true, startViewId: views[0].id, views,
-    stories: [{ id: PENN_ROUTE.storyId, viewId: PENN_ROUTE.original.viewId, title: 'Synthetic demonstration story', captionAuthorLabel: 'Synthetic owner', durationMs: 100,
-      cues: [{ startMs: 0, endMs: 100, text: 'Synthetic story, not a recollection.' }], audio: { type: 'audio/wav', size: WAV.length } }],
+    stories: [{ id: PENN_ROUTE.storyId, viewId: PENN_ROUTE.original.viewId, title: PENN_ROUTE.story.title, providerLabel: PENN_ROUTE.story.providerLabel, captionAuthorLabel: PENN_ROUTE.story.captionAuthorLabel, durationMs: PENN_ROUTE.story.durationMs,
+      cues: structuredClone(PENN_ROUTE.story.cues), audio: { type: 'audio/wav', size: WAV.length } }],
     contributorPhotos: [], contributorRecordings: [],
   });
 
@@ -242,6 +245,7 @@ describe('building a site from an earlier export with an entry', () => {
       await writeFile(path.join(photosDir, photo.file), bytes);
       Object.assign(photo, { bytes: bytes.length, sha256: sha256(bytes) });
     }
+    config.route.story.audioSha256 = sha256(WAV);
     await writeFile(path.join(entryDir, 'photos.json'), `${JSON.stringify(config, null, 2)}\n`);
     return { entry: { dir: entryDir, photosDir }, photos: config.photos };
   }
@@ -296,6 +300,15 @@ describe('building a site from an earlier export with an entry', () => {
     assert.deepEqual(listing.map((item) => item.path).sort(), files.filter((file) => file !== 'EXPORT.json').sort());
     for (const item of listing) assert.equal(sha256(await readFile(path.join(outDir, item.path))), item.sha256, item.path);
     assert.equal(await verifyExportFolder(outDir), listing.length, 'the new site passes the same closed-inventory check the publish workflow applies');
+  });
+
+  it('refuses replacement audio whose bytes differ from the entry pin', async () => {
+    const earlier = await earlierExport();
+    const { entry } = await entryAndPhotos();
+    const config = JSON.parse(await readFile(path.join(entry.dir, 'photos.json'), 'utf8'));
+    config.route.story.audioSha256 = 'a'.repeat(64);
+    await writeFile(path.join(entry.dir, 'photos.json'), JSON.stringify(config));
+    await assert.rejects(exportStaticVisit({ origin: 'http://snapshot.invalid', token: `rhv_${'M'.repeat(43)}`, outDir: path.join(await tempDir(), 'site'), confirmPublicMaterial: true, fetchImpl: fetchFromExport(earlier), entry }), /pinned SHA-256/);
   });
 
   it('without an entry the site is unchanged: index.html is the snapshot page', async () => {
@@ -356,15 +369,31 @@ describe('building a site from an earlier export with an entry', () => {
     bad((m) => { m.views[1].label = m.views[0].label; }, /single pinned saved view/);
     bad((m) => { m.views[0].edit.yaw = 0.1; }, /0 degree/);
     bad((m) => { m.views[1].edit = { objects: [{ id: 'clock', yaw: -Math.PI / 18, offset: [0, 0, 0] }] }; }, /single-object/);
-    bad((m) => { m.stories[0].viewId = PENN_ROUTE.approved.viewId; }, /story must belong only/);
-    bad((m) => { m.stories[0].id = randomUUID(); }, /story must belong only/);
-    bad((m) => { m.stories = []; }, /story must belong only/);
-    bad((m) => { m.stories.push({ ...m.stories[0], viewId: PENN_ROUTE.approved.viewId }); }, /story must belong only/);
-    bad((m) => { delete m.stories[0].captionAuthorLabel; }, /reviewed story/);
-    bad((m) => { m.stories[0].audio.size = 0; }, /reviewed story/);
-    bad((m) => { m.stories[0].cues = []; }, /reviewed story/);
-    bad((m) => { m.stories[0].audio.type = 'audio/mpeg'; }, /reviewed story/);
-    bad((m) => { m.stories = [null]; }, /reviewed story/);
+    bad((m) => { m.stories[0].viewId = PENN_ROUTE.approved.viewId; }, /story slot must belong only/);
+    bad((m) => { m.stories[0].id = randomUUID(); }, /story slot must belong only/);
+    bad((m) => { m.stories = []; }, /story slot must belong only/);
+    bad((m) => { m.stories.push({ ...m.stories[0], viewId: PENN_ROUTE.approved.viewId }); }, /story slot must belong only/);
+    bad((m) => { delete m.stories[0].captionAuthorLabel; }, /story slot/);
+    bad((m) => { m.stories[0].audio.size = 0; }, /story slot/);
+    bad((m) => { m.stories[0].cues = []; }, /story slot/);
+    bad((m) => { m.stories[0].audio.type = 'audio/mpeg'; }, /story slot/);
+    bad((m) => { m.stories = [null]; }, /story slot/);
+    for (const mutate of [
+      (s) => { s.providerLabel = 'Synthetic demonstration voice'; },
+      (s) => { s.title = 'Historical native story'; },
+      (s) => { s.captionDraft = { label: 'Muse Voice Transcribe' }; },
+      (s) => { s.durationMs = 10574; },
+      (s) => { s.cues[0].endMs = 10140; },
+      (s) => { s.cues[0].text += ' Extra words.'; },
+      (s) => { s.audio.size += 2; },
+      (s) => { s.sourceRange = { startMs: 0, endMs: 9950 }; },
+      (s) => { s.sourceId = randomUUID(); },
+      (s) => { s.audio.model = 'unapproved provenance'; },
+    ]) bad((m) => mutate(m.stories[0]), /static editorial replacement/);
+    bad((m) => { m.contributorRecordings = [{ id: randomUUID() }]; }, /static editorial replacement/);
+    for (const text of ['Synthetic voice (OpenAI TTS)', 'One 0-9950 ms whole-track cue is copied manually from that script', 'Listening and editorial review are pending.', 'not a newly saved story in the running app']) {
+      assert.throws(() => check(snapshot(), html.replace(text, 'Unapproved claim')), /editorial replacement disclosure/);
+    }
     assert.throws(() => check(snapshot(), html.replace('href="snapshot.html?version=Saved%20version%201"', 'href="snapshot.html?version=Saved%20version%202"')), /primary scene link/);
     for (const href of ['snapshot.html', 'snapshot.html?version=Saved%20version%201&version=Saved%20version%202', 'snapshot.html?version=Saved%20version%201#other', 'snapshot.html?version=Saved%20version%201&extra=1', 'snapshot.html?version=Alternative%20arrangement%202', ' snapshot.html?version=Saved%20version%203 ']) {
       assert.throws(() => check(snapshot(), html.replace('snapshot.html?version=Saved%20version%201', href)), /unapproved snapshot version route/, href);

@@ -303,6 +303,8 @@ export async function exportStaticVisit({
     put('snapshot.html', page);
     const loaded = await loadEntry(entry);
     checkEntryAgainstSnapshot(loaded, manifest);
+    const storyAudio = files.get(`data/stories/${loaded.route.storyId}/audio.wav`);
+    if (!storyAudio || sha256(storyAudio) !== loaded.route.story.audioSha256) fail('The static editorial story audio differs from its pinned SHA-256.');
     for (const [name, bytes] of loaded.files) put(name, bytes);
   } else put('index.html', page);
   const style = await readFile(path.join(publicDir, 'style.css'), 'utf8');

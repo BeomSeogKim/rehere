@@ -75,6 +75,21 @@
       "turnDegrees": -10,
       "arrangement": "memory"
     },
-    "storyId": "171999ee-e976-41e2-b11a-b4613363c4fa"
+    "storyId": "171999ee-e976-41e2-b11a-b4613363c4fa",
+    "story": {
+      "title": "Synthetic editorial replacement, not a recollection",
+      "providerLabel": "Synthetic voice (OpenAI TTS)",
+      "captionAuthorLabel": "Demo editor (script-copied cue; listening/editorial review pending)",
+      "durationMs": 9950,
+      "audioBytes": 318444,
+      "audioSha256": "c4c053bdaa353284c8c63789ac989e100a66b360bf3b181f59c8c66aab304ae9",
+      "cues": [
+        {
+          "startMs": 0,
+          "endMs": 9950,
+          "text": "This is a synthetic demonstration, not a personal memory. The photograph shows the clock beneath the glass roof of Pennsylvania Station. The parts beyond this photograph remain unknown."
+        }
+      ]
+    }
   }
 }

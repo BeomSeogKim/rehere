@@ -89,7 +89,7 @@ static entry never uses them because it supplies its own read-only source.
 `--entry app/entry --entry-photos <folder>` puts a hand-written entry page in
 front of the snapshot. The current entry opens New York's original Penn Station,
 demolished in 1963. Its primary link opens **Saved version 1**, the original
-saved arrangement and the only version with the reviewed synthetic story.
+saved arrangement and the only version with the static editorial story slot.
 A separate link opens **Saved version 2**, an owner-approved demonstration
 hypothesis: the clock turns -10 degrees with zero translation. The earlier
 version remains available. The scene uses local SAM 2.1 and local depth;
@@ -110,17 +110,26 @@ and links back to the entry.
   refuses a meta refresh, a form, a frame, an SVG, `mailto:` and protocol-relative
   links, and refuses an `entry.css` that imports or loads anything.
 - `photos.json` binds the entry to one synthetic snapshot, its exact original
-  and approved view IDs and labels, and one reviewed story ID. The gate requires
+  and approved view IDs and labels, and one existing public story slot ID. The
+  gate requires
   the primary link to open the original, a separate link to the approved view,
   signed single-object turns of 0 and -10 degrees, zero translation in both,
   and `initial` / `memory` arrangement evidence respectively. The story must
-  belong only to the original, with reviewed captions and nonempty WAV metadata.
+  belong only to the original, with nonempty cue and WAV metadata.
+  The current Penn entry additionally pins the static editorial replacement
+  audio SHA-256, exact script-copied whole-track cue, 9,950 ms duration, synthetic
+  provider and pending-review caption label, and refuses an inherited AI-caption
+  draft. The single 0-9950 ms cue is copied manually from the locked 185-byte
+  supplied synthesis script, not ASR or sentence alignment; it does not verify
+  the heard words. Listening and editorial review are pending. This is an
+  editorial derivative of an earlier export, not a new native saved story.
   Missing or duplicate saved views, unsupported version routes and a story
   attached to the approved version stop the export.
 - These route checks establish that the entry describes the selected saved
   snapshot; they do not authenticate history, measure geometry or independently
-  establish model quality. Caption review and the proposal/approval chain are
-  reviewed separately before the snapshot is accepted. The exporter still
+  establish model quality. Listening/editorial acceptance for the replacement
+  cue is pending and separate from the historical proposal/approval chain. The
+  exporter still
   requires every listed audio and scene asset and checks the frozen inventory.
 - The photographs are never committed. `node app/fetch-entry-photos.mjs <new
   folder>` downloads each pinned Commons source JPEG, checks its SHA-256,

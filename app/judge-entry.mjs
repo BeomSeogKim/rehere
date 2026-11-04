@@ -130,7 +130,20 @@ export function checkEntryAgainstSnapshot({ html, route }, manifest) {
   if (manifest.stories?.length !== 1 || story?.id !== route.storyId || story.viewId !== route.original.viewId
       || story.audio?.type !== 'audio/wav' || !Number.isInteger(story.audio.size) || story.audio.size <= 0
       || !Number.isInteger(story.durationMs) || story.durationMs <= 0 || !Array.isArray(story.cues) || !story.cues.length
-      || typeof story.captionAuthorLabel !== 'string' || !story.captionAuthorLabel.trim()) fail('The reviewed story must belong only to the pinned original saved version.');
+      || typeof story.captionAuthorLabel !== 'string' || !story.captionAuthorLabel.trim()) fail('The story slot must belong only to the pinned original saved version.');
+  const pinnedStory = route.story;
+  const storyFields = new Set(['id', 'viewId', 'target', 'title', 'providerLabel', 'captionAuthorLabel', 'durationMs', 'cues', 'audio']);
+  if (!pinnedStory || story.title !== pinnedStory.title || story.providerLabel !== pinnedStory.providerLabel
+      || story.captionAuthorLabel !== pinnedStory.captionAuthorLabel || Object.hasOwn(story, 'captionDraft')
+      || story.durationMs !== pinnedStory.durationMs || story.audio.size !== pinnedStory.audioBytes
+      || JSON.stringify(story.cues) !== JSON.stringify(pinnedStory.cues)
+      || Object.keys(story).some((key) => !storyFields.has(key))
+      || Object.keys(story.audio).some((key) => !['type', 'size'].includes(key))
+      || (story.target && Object.keys(story.target).some((key) => !['id', 'label'].includes(key)))
+      || (manifest.contributorRecordings?.length ?? 0) !== 0) fail('The static editorial replacement story differs from its pinned words, labels, timing or provenance.');
+  for (const text of ['Replacement audio is labelled Synthetic voice (OpenAI TTS)', 'One 0-9950 ms whole-track cue is copied manually from that script', 'Listening and editorial review are pending.', 'not a newly saved story in the running app']) {
+    if (!html.includes(text)) fail('The entry lacks the pinned static editorial replacement disclosure.');
+  }
 }
 
 // Overlay images ship in the release asset, never in Git. Each is checked chunk by chunk: a valid signature and CRCs, IHDR first and

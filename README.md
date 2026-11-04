@@ -31,8 +31,14 @@ photograph 8 of HABS NY-5471, by Cervin Robinson, April 24, 1962. Credit:
 Cervin Robinson, 1962. HABS NY-5471. U.S. Government work. No known restrictions
 on images made by the U.S. Government. The story and notes are synthetic,
 labelled demonstrations, not a real person's memory. The story belongs only to
-Saved version 1. Saved version 2 holds an owner-approved, hypothetical
-10-degree clock turn with no translation; its note is not historical evidence.
+Saved version 1. Replacement audio is labelled Synthetic voice (OpenAI TTS).
+Its supplied synthesis script is the locked 185-byte text. One 0-9950 ms
+whole-track cue is copied manually from that script; listening and editorial
+review are pending. This static edit is not a newly saved story in the running
+app. Historical Muse Voice Transcribe caption evidence
+belongs to the earlier audio, not this replacement. Saved version 2 holds an
+owner-approved, hypothetical -10-degree clock turn with no translation; its
+note is not historical evidence.
 The scene uses local SAM 2.1 and local depth, not SAM 3.1, and a small change
 of viewpoint exposes empty and torn edges. It is not a complete room.
 
