@@ -1,0 +1,1684 @@
+{
+  "entries": [
+    {
+      "id": "304acb90-ab28-494b-bbf8-46d896dbbaa6",
+      "state": "settled",
+      "reservedUsd": 0.019793,
+      "estimatedUsd": 0.00661175,
+      "at": "2026-11-04T09:00:23.314Z"
+    },
+    {
+      "id": "1d319282-3763-47e1-90d1-ee7903808383",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.00601475,
+      "at": "2026-11-04T09:00:24.243Z"
+    },
+    {
+      "id": "214b9fcf-e4c9-4e0f-8f39-101ecc1331e1",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.006144500000000001,
+      "at": "2026-11-04T09:00:24.261Z"
+    },
+    {
+      "id": "ed5237aa-4c24-401d-b66b-5c45c4a29c86",
+      "state": "settled",
+      "reservedUsd": 0.019793,
+      "estimatedUsd": 0.006225,
+      "at": "2026-11-04T09:00:51.805Z"
+    },
+    {
+      "id": "8dcbb196-8487-4c6d-a4e0-7de95c55e7eb",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.00562375,
+      "at": "2026-11-04T09:00:53.622Z"
+    },
+    {
+      "id": "38f4612d-87da-465a-830f-dddb6c1de566",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.0062805000000000005,
+      "at": "2026-11-04T09:00:56.063Z"
+    },
+    {
+      "id": "9b0b2cff-9897-42c4-8d1f-bf829354018f",
+      "state": "settled",
+      "reservedUsd": 0.019793,
+      "estimatedUsd": 0.007440500000000001,
+      "at": "2026-11-04T09:01:22.594Z"
+    },
+    {
+      "id": "5903eb76-0caa-4c7f-8d98-519fc08d486d",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.004841750000000001,
+      "at": "2026-11-04T09:01:24.781Z"
+    },
+    {
+      "id": "d39efce3-cf4d-4658-8498-c2312314fa57",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.00531575,
+      "at": "2026-11-04T09:01:26.750Z"
+    },
+    {
+      "id": "7fddaeab-efb5-4709-9686-ede4431ceb0d",
+      "state": "settled",
+      "reservedUsd": 0.019793,
+      "estimatedUsd": 0.01194975,
+      "at": "2026-11-04T09:01:50.156Z"
+    },
+    {
+      "id": "0cc905b7-369b-4dee-8983-0abb45a219df",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.0074725,
+      "at": "2026-11-04T09:01:51.972Z"
+    },
+    {
+      "id": "a90f41ab-a114-4e0b-8e42-5420767656b1",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.0073897500000000005,
+      "at": "2026-11-04T09:01:54.407Z"
+    },
+    {
+      "id": "98262026-b5cf-4c46-b720-2eaef78481f8",
+      "state": "settled",
+      "reservedUsd": 0.019793,
+      "estimatedUsd": 0.0101945,
+      "at": "2026-11-04T09:02:33.868Z"
+    },
+    {
+      "id": "d8a2a20a-6b37-4119-9d1c-c280d36b14fd",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.008552,
+      "at": "2026-11-04T09:02:37.127Z"
+    },
+    {
+      "id": "5299a979-25e1-422d-bea7-1aeb9997d1ed",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.009132250000000001,
+      "at": "2026-11-04T09:02:39.446Z"
+    },
+    {
+      "id": "382db7af-e181-4226-bb67-f95c292fb6eb",
+      "state": "settled",
+      "reservedUsd": 0.019793,
+      "estimatedUsd": 0.01315675,
+      "at": "2026-11-04T09:03:21.951Z"
+    },
+    {
+      "id": "d7b127a9-60de-44e6-ae7c-05e1d21ed5e9",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.007821,
+      "at": "2026-11-04T09:03:24.193Z"
+    },
+    {
+      "id": "c38b3152-822d-461c-891a-13b4ae62c052",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.00779775,
+      "at": "2026-11-04T09:03:27.230Z"
+    },
+    {
+      "id": "6a5502b6-24f9-412d-b325-d4402d458e58",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.005817,
+      "at": "2026-11-04T09:04:08.756Z"
+    },
+    {
+      "id": "576a114f-e387-4748-bc79-0885ec114cbb",
+      "state": "settled",
+      "reservedUsd": 0.01979175,
+      "estimatedUsd": 0.00596025,
+      "at": "2026-11-04T09:04:11.517Z"
+    },
+    {
+      "id": "6eefc233-5cc9-4783-aa98-f7e094f716c8",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.006517,
+      "at": "2026-11-04T09:04:13.478Z"
+    },
+    {
+      "id": "0d8cb67c-ea8a-4b7f-b3fc-3ea617377332",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.00538775,
+      "at": "2026-11-04T09:04:40.215Z"
+    },
+    {
+      "id": "16c53bb1-ea38-4a23-825a-885eb4db293a",
+      "state": "settled",
+      "reservedUsd": 0.01979175,
+      "estimatedUsd": 0.00703125,
+      "at": "2026-11-04T09:04:42.315Z"
+    },
+    {
+      "id": "fec32f6e-afc3-4668-8b0c-723fa072fd82",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.0080385,
+      "at": "2026-11-04T09:04:43.781Z"
+    },
+    {
+      "id": "f02c7a82-7464-47ee-a004-afcae11aee60",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.00575325,
+      "at": "2026-11-04T09:05:13.997Z"
+    },
+    {
+      "id": "21661099-c58f-46ae-a17a-37210f2b8794",
+      "state": "settled",
+      "reservedUsd": 0.01979175,
+      "estimatedUsd": 0.0059900000000000005,
+      "at": "2026-11-04T09:05:15.869Z"
+    },
+    {
+      "id": "73057ec1-444b-4ba0-bc79-b70e76f2f892",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.007316,
+      "at": "2026-11-04T09:05:17.774Z"
+    },
+    {
+      "id": "d8defe39-9b6d-46dd-a3ab-11690168988a",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.0109255,
+      "at": "2026-11-04T09:05:46.369Z"
+    },
+    {
+      "id": "96cbe47c-d5c4-467a-a04c-2cc6d67a4781",
+      "state": "settled",
+      "reservedUsd": 0.01979175,
+      "estimatedUsd": 0.00992125,
+      "at": "2026-11-04T09:05:49.756Z"
+    },
+    {
+      "id": "f030082c-33a5-43c4-a557-93ed7272647c",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.012790000000000001,
+      "at": "2026-11-04T09:05:51.329Z"
+    },
+    {
+      "id": "558ad2db-736b-4fad-9b45-1db38e863a5b",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.008673,
+      "at": "2026-11-04T09:06:45.490Z"
+    },
+    {
+      "id": "e8406064-5486-460b-bd20-83f491010029",
+      "state": "settled",
+      "reservedUsd": 0.01979175,
+      "estimatedUsd": 0.00981925,
+      "at": "2026-11-04T09:06:47.241Z"
+    },
+    {
+      "id": "7887d095-6096-4e0e-9fec-64da49f9cc3a",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.010019,
+      "at": "2026-11-04T09:06:49.001Z"
+    },
+    {
+      "id": "cb379ef4-3dc1-4e9d-8064-80604ad40048",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.007415000000000001,
+      "at": "2026-11-04T09:07:30.135Z"
+    },
+    {
+      "id": "2d95e5fb-a213-46f6-9846-ade353346f52",
+      "state": "settled",
+      "reservedUsd": 0.01979175,
+      "estimatedUsd": 0.010180499999999999,
+      "at": "2026-11-04T09:07:32.280Z"
+    },
+    {
+      "id": "42e33667-3508-4917-a5b6-3e3a978d2683",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.01216525,
+      "at": "2026-11-04T09:07:34.204Z"
+    },
+    {
+      "id": "a9fc9c84-6174-4c55-b1bb-4c317d710007",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.005264,
+      "at": "2026-11-04T09:08:19.710Z"
+    },
+    {
+      "id": "b4a87620-b06b-4f3e-a042-7ba75664e28a",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.006998000000000001,
+      "at": "2026-11-04T09:08:21.593Z"
+    },
+    {
+      "id": "5e139848-807d-4bfb-95c9-236a720f12ab",
+      "state": "settled",
+      "reservedUsd": 0.01978175,
+      "estimatedUsd": 0.0051215,
+      "at": "2026-11-04T09:08:24.419Z"
+    },
+    {
+      "id": "df31176d-b9ba-4bc9-8a88-63e94cf4fbfc",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.006403000000000001,
+      "at": "2026-11-04T09:08:52.732Z"
+    },
+    {
+      "id": "4e7d57b8-f85a-43a4-ac34-00d1aafa977e",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.007431500000000001,
+      "at": "2026-11-04T09:08:54.885Z"
+    },
+    {
+      "id": "ef331d29-1132-4066-8d33-bda97b9e6fc5",
+      "state": "settled",
+      "reservedUsd": 0.01978175,
+      "estimatedUsd": 0.006660000000000001,
+      "at": "2026-11-04T09:08:56.961Z"
+    },
+    {
+      "id": "f2168ce1-0d73-44ea-800c-d0f39959e36b",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.005536,
+      "at": "2026-11-04T09:09:27.544Z"
+    },
+    {
+      "id": "50be9075-caad-4d67-8861-5b4e0ef8f8f8",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.00807325,
+      "at": "2026-11-04T09:09:29.669Z"
+    },
+    {
+      "id": "4e68f4dc-9742-4031-a088-cefcb563f76e",
+      "state": "settled",
+      "reservedUsd": 0.01978175,
+      "estimatedUsd": 0.007170000000000001,
+      "at": "2026-11-04T09:09:31.893Z"
+    },
+    {
+      "id": "4c081436-9536-408e-860f-92fddb20a1cc",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.0082135,
+      "at": "2026-11-04T09:10:02.461Z"
+    },
+    {
+      "id": "7b171c1c-ac8b-488c-bdcf-13fcfe86cdd2",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.010262,
+      "at": "2026-11-04T09:10:04.291Z"
+    },
+    {
+      "id": "ffa061a4-6c00-4144-a41f-14072bfdbcd6",
+      "state": "settled",
+      "reservedUsd": 0.01978175,
+      "estimatedUsd": 0.007565250000000001,
+      "at": "2026-11-04T09:10:06.345Z"
+    },
+    {
+      "id": "3a0d3c7f-165b-475c-b886-75e8af627fc7",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.012642,
+      "at": "2026-11-04T09:10:46.086Z"
+    },
+    {
+      "id": "5e94a40b-5658-4299-bd07-17a5a3ce2ce0",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.01254425,
+      "at": "2026-11-04T09:10:47.260Z"
+    },
+    {
+      "id": "d35b1801-91b1-4c53-9414-0e5e6cd201d7",
+      "state": "settled",
+      "reservedUsd": 0.01978175,
+      "estimatedUsd": 0.007233750000000001,
+      "at": "2026-11-04T09:10:50.357Z"
+    },
+    {
+      "id": "3be602c7-0098-426c-9604-bd45ba6c1e96",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.0080435,
+      "at": "2026-11-04T09:11:43.650Z"
+    },
+    {
+      "id": "272ad5d4-97d9-4503-8633-be19753d140f",
+      "state": "settled",
+      "reservedUsd": 0.019608,
+      "estimatedUsd": 0.009208,
+      "at": "2026-11-04T09:11:44.982Z"
+    },
+    {
+      "id": "dc88b31a-273d-4a22-94f7-c3eb7b9e6ded",
+      "state": "settled",
+      "reservedUsd": 0.01978175,
+      "estimatedUsd": 0.009924,
+      "at": "2026-11-04T09:11:47.999Z"
+    },
+    {
+      "id": "61a2b2de-d315-45c6-8478-ff93fbe53a06",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.006986,
+      "at": "2026-11-04T09:12:30.437Z"
+    },
+    {
+      "id": "e8608b23-dee5-4c46-b5f3-17bbfc1b4c05",
+      "state": "settled",
+      "reservedUsd": 0.019716749999999998,
+      "estimatedUsd": 0.00475225,
+      "at": "2026-11-04T09:12:31.884Z"
+    },
+    {
+      "id": "74ab5f62-ddc8-4010-bb89-f5b3b392d51f",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.004664,
+      "at": "2026-11-04T09:12:33.685Z"
+    },
+    {
+      "id": "837ce21d-4d07-4604-862c-3d0dcee72725",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.0062125,
+      "at": "2026-11-04T09:12:56.719Z"
+    },
+    {
+      "id": "9f5c1758-d35b-4fe1-8fda-e277d8360386",
+      "state": "settled",
+      "reservedUsd": 0.019716749999999998,
+      "estimatedUsd": 0.0054025,
+      "at": "2026-11-04T09:12:58.962Z"
+    },
+    {
+      "id": "dbad3ff9-3029-42ed-bda8-4c14146725da",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.0053355,
+      "at": "2026-11-04T09:13:00.393Z"
+    },
+    {
+      "id": "251ad8c7-ac1c-4af8-b9cd-cf75c269e6cd",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.008295,
+      "at": "2026-11-04T09:13:25.085Z"
+    },
+    {
+      "id": "ed1d19e9-2741-425d-9fad-449fbee0adb1",
+      "state": "settled",
+      "reservedUsd": 0.019716749999999998,
+      "estimatedUsd": 0.00524525,
+      "at": "2026-11-04T09:13:26.416Z"
+    },
+    {
+      "id": "50ed4b1b-cb62-40eb-9a7e-91227a1637b4",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.0053695,
+      "at": "2026-11-04T09:13:28.178Z"
+    },
+    {
+      "id": "bf9525ab-5bb5-48f8-856b-2a19034e8f05",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.01058575,
+      "at": "2026-11-04T09:13:58.174Z"
+    },
+    {
+      "id": "321216e0-7c6d-48ed-8fce-1ec314a0b1e6",
+      "state": "settled",
+      "reservedUsd": 0.019716749999999998,
+      "estimatedUsd": 0.0090235,
+      "at": "2026-11-04T09:13:59.764Z"
+    },
+    {
+      "id": "16b52ae4-39e9-4cea-a22d-b65ae4795d13",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.0061259999999999995,
+      "at": "2026-11-04T09:14:01.796Z"
+    },
+    {
+      "id": "4c6caebd-b3fc-4d07-af75-5316f5e796d4",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.01118075,
+      "at": "2026-11-04T09:14:46.509Z"
+    },
+    {
+      "id": "76ec8cf3-2e77-4fe7-aab7-db6e067d0060",
+      "state": "settled",
+      "reservedUsd": 0.019716749999999998,
+      "estimatedUsd": 0.0085135,
+      "at": "2026-11-04T09:14:49.336Z"
+    },
+    {
+      "id": "7b0f8e8e-f91d-400f-b5a4-364662a4b244",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.00794075,
+      "at": "2026-11-04T09:14:50.842Z"
+    },
+    {
+      "id": "e3ae051b-b7d3-4767-88d9-07c1255f56b9",
+      "state": "settled",
+      "reservedUsd": 0.0197805,
+      "estimatedUsd": 0.01059,
+      "at": "2026-11-04T09:15:37.145Z"
+    },
+    {
+      "id": "b7d746ff-e0b2-42ef-a69e-ad5350832edc",
+      "state": "settled",
+      "reservedUsd": 0.019716749999999998,
+      "estimatedUsd": 0.00789725,
+      "at": "2026-11-04T09:15:39.053Z"
+    },
+    {
+      "id": "47e86639-2289-4fda-ad03-da30defcd4b3",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.008484750000000001,
+      "at": "2026-11-04T09:15:40.628Z"
+    },
+    {
+      "id": "1ccac3ab-f19e-4da9-8ff5-073d32861c96",
+      "state": "settled",
+      "reservedUsd": 0.0196055,
+      "estimatedUsd": 0.0057374999999999995,
+      "at": "2026-11-04T09:16:23.143Z"
+    },
+    {
+      "id": "941da8a1-e8df-4752-a2e4-e22350347095",
+      "state": "settled",
+      "reservedUsd": 0.021108000000000002,
+      "estimatedUsd": 0.005942,
+      "at": "2026-11-04T09:16:26.668Z"
+    },
+    {
+      "id": "c5ee4d06-dcab-4ff5-9d3a-34564975cfa2",
+      "state": "settled",
+      "reservedUsd": 0.02122675,
+      "estimatedUsd": 0.0062775,
+      "at": "2026-11-04T09:16:28.886Z"
+    },
+    {
+      "id": "7a31ed08-f5db-4fad-b19a-176c140d7b6d",
+      "state": "settled",
+      "reservedUsd": 0.0196055,
+      "estimatedUsd": 0.00628575,
+      "at": "2026-11-04T09:16:50.079Z"
+    },
+    {
+      "id": "5ae62a5b-b66e-4b68-8866-91a6c369f80a",
+      "state": "settled",
+      "reservedUsd": 0.021108000000000002,
+      "estimatedUsd": 0.007119250000000001,
+      "at": "2026-11-04T09:16:52.733Z"
+    },
+    {
+      "id": "5a4fac68-4895-4a4b-a900-e16287c6a052",
+      "state": "settled",
+      "reservedUsd": 0.02122675,
+      "estimatedUsd": 0.00677475,
+      "at": "2026-11-04T09:16:54.433Z"
+    },
+    {
+      "id": "3922d76c-ffc8-492c-b11f-19678b74b6c2",
+      "state": "settled",
+      "reservedUsd": 0.0196055,
+      "estimatedUsd": 0.0064132500000000005,
+      "at": "2026-11-04T09:17:20.077Z"
+    },
+    {
+      "id": "866e7b8c-e9d7-497f-a67d-cecd19dd40bd",
+      "state": "settled",
+      "reservedUsd": 0.021108000000000002,
+      "estimatedUsd": 0.006265,
+      "at": "2026-11-04T09:17:22.061Z"
+    },
+    {
+      "id": "b4543975-8a1b-4026-a726-f46da4d9fef6",
+      "state": "settled",
+      "reservedUsd": 0.02122675,
+      "estimatedUsd": 0.007093500000000001,
+      "at": "2026-11-04T09:17:24.438Z"
+    },
+    {
+      "id": "253a9d05-3be4-40df-a58e-543d98ff0ca3",
+      "state": "settled",
+      "reservedUsd": 0.0196055,
+      "estimatedUsd": 0.00874225,
+      "at": "2026-11-04T09:17:47.260Z"
+    },
+    {
+      "id": "45345fff-c8dc-4d0a-bca4-ca77708cb84d",
+      "state": "settled",
+      "reservedUsd": 0.021108000000000002,
+      "estimatedUsd": 0.00885325,
+      "at": "2026-11-04T09:17:49.203Z"
+    },
+    {
+      "id": "4df79308-5999-4f21-a16d-cb2f0da04574",
+      "state": "settled",
+      "reservedUsd": 0.02122675,
+      "estimatedUsd": 0.008734,
+      "at": "2026-11-04T09:17:50.971Z"
+    },
+    {
+      "id": "fed9dd99-7111-404a-8a41-2736095a384d",
+      "state": "settled",
+      "reservedUsd": 0.0196055,
+      "estimatedUsd": 0.00817275,
+      "at": "2026-11-04T09:18:30.151Z"
+    },
+    {
+      "id": "730ce046-6af4-41fb-949c-f19e3e4e5e68",
+      "state": "settled",
+      "reservedUsd": 0.021108000000000002,
+      "estimatedUsd": 0.009142250000000001,
+      "at": "2026-11-04T09:18:32.273Z"
+    },
+    {
+      "id": "abea7f8d-bf9c-4b0a-8f41-7d0a05fb891a",
+      "state": "settled",
+      "reservedUsd": 0.02122675,
+      "estimatedUsd": 0.00827925,
+      "at": "2026-11-04T09:18:33.644Z"
+    },
+    {
+      "id": "45af123e-ae7b-470b-851e-e4336b4231fb",
+      "state": "settled",
+      "reservedUsd": 0.0196055,
+      "estimatedUsd": 0.009953499999999999,
+      "at": "2026-11-04T09:19:07.721Z"
+    },
+    {
+      "id": "889fbd55-7439-4cff-b9a8-5ea5a7619ff8",
+      "state": "settled",
+      "reservedUsd": 0.021108000000000002,
+      "estimatedUsd": 0.00851325,
+      "at": "2026-11-04T09:19:10.470Z"
+    },
+    {
+      "id": "bae749fd-b09b-4ca9-94e7-8438a5f75dd1",
+      "state": "settled",
+      "reservedUsd": 0.02122675,
+      "estimatedUsd": 0.00999625,
+      "at": "2026-11-04T09:19:12.699Z"
+    },
+    {
+      "id": "069f3d75-e906-4826-8b2d-e9750cd97d97",
+      "state": "settled",
+      "reservedUsd": 0.021113,
+      "estimatedUsd": 0.00585775,
+      "at": "2026-11-04T09:19:57.191Z"
+    },
+    {
+      "id": "8e05593c-fc1d-4323-8031-8a5e81500e66",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.0055302500000000004,
+      "at": "2026-11-04T09:20:01.427Z"
+    },
+    {
+      "id": "5dcaa9da-79d5-4d70-8efa-a811f52d0c4f",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.00492875,
+      "at": "2026-11-04T09:20:02.770Z"
+    },
+    {
+      "id": "1aaf4bf3-1cc7-45d9-aa82-5bf8064fd1de",
+      "state": "settled",
+      "reservedUsd": 0.021113,
+      "estimatedUsd": 0.00684375,
+      "at": "2026-11-04T09:20:22.018Z"
+    },
+    {
+      "id": "d9f8876f-aa57-4320-a009-0121c9c91ea1",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.005101,
+      "at": "2026-11-04T09:20:23.392Z"
+    },
+    {
+      "id": "1d713f35-c897-4f7b-9b04-78f34abcc97b",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.00671375,
+      "at": "2026-11-04T09:20:24.626Z"
+    },
+    {
+      "id": "5d776633-7a85-4abd-91d5-3ade9703c705",
+      "state": "settled",
+      "reservedUsd": 0.021113,
+      "estimatedUsd": 0.00794025,
+      "at": "2026-11-04T09:20:48.265Z"
+    },
+    {
+      "id": "95fc26ba-10d7-4f17-8be8-b57baefb16d3",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.00601475,
+      "at": "2026-11-04T09:20:49.670Z"
+    },
+    {
+      "id": "ea4f59f2-a87e-4c01-90a4-546d8e7bca91",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.005511,
+      "at": "2026-11-04T09:20:50.873Z"
+    },
+    {
+      "id": "894ac513-d223-4546-b029-ac5ecfa209ca",
+      "state": "settled",
+      "reservedUsd": 0.021113,
+      "estimatedUsd": 0.01043925,
+      "at": "2026-11-04T09:21:20.587Z"
+    },
+    {
+      "id": "fb3ce5cc-9151-45e2-bcb3-60556650d80e",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.0073365,
+      "at": "2026-11-04T09:21:22.733Z"
+    },
+    {
+      "id": "8189e9ae-3d24-49b5-9146-d8f671ab90ce",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.00797175,
+      "at": "2026-11-04T09:21:24.805Z"
+    },
+    {
+      "id": "cd67421f-7eba-4b08-8233-b8ffc175e635",
+      "state": "settled",
+      "reservedUsd": 0.021113,
+      "estimatedUsd": 0.02042675,
+      "at": "2026-11-04T09:22:03.882Z"
+    },
+    {
+      "id": "ac856c17-22cd-47d7-bcca-88523e0a5aaa",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.011862749999999998,
+      "at": "2026-11-04T09:22:06.185Z"
+    },
+    {
+      "id": "ca950a2e-570c-4568-85c1-5e3a1c38f927",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.010407,
+      "at": "2026-11-04T09:22:08.207Z"
+    },
+    {
+      "id": "a743ee77-82f5-4ab7-8676-fffbfbe5e9e1",
+      "state": "settled",
+      "reservedUsd": 0.021113,
+      "estimatedUsd": 0.01266625,
+      "at": "2026-11-04T09:23:28.446Z"
+    },
+    {
+      "id": "4ba3e848-b50f-4af4-8c86-498c853d7a87",
+      "state": "settled",
+      "reservedUsd": 0.0197655,
+      "estimatedUsd": 0.00838625,
+      "at": "2026-11-04T09:23:30.391Z"
+    },
+    {
+      "id": "8c03eca3-08a2-463a-84e8-e212affb3d9e",
+      "state": "settled",
+      "reservedUsd": 0.01977175,
+      "estimatedUsd": 0.00925525,
+      "at": "2026-11-04T09:23:32.122Z"
+    },
+    {
+      "id": "40c7e5f5-13f3-42ae-97a9-9cf3eb1fe444",
+      "state": "settled",
+      "reservedUsd": 0.019758,
+      "estimatedUsd": 0.0056205000000000005,
+      "at": "2026-11-04T09:24:21.769Z"
+    },
+    {
+      "id": "8890c7f7-1954-4c52-bbf5-ec7bfc2d8af0",
+      "state": "settled",
+      "reservedUsd": 0.0197855,
+      "estimatedUsd": 0.00449625,
+      "at": "2026-11-04T09:24:23.624Z"
+    },
+    {
+      "id": "9b2ab84a-f081-432c-910c-1045f09621d0",
+      "state": "settled",
+      "reservedUsd": 0.01959925,
+      "estimatedUsd": 0.007325,
+      "at": "2026-11-04T09:24:25.785Z"
+    },
+    {
+      "id": "da310fdf-90e3-4207-b824-b58fc5780d4a",
+      "state": "settled",
+      "reservedUsd": 0.019758,
+      "estimatedUsd": 0.005969,
+      "at": "2026-11-04T09:24:51.911Z"
+    },
+    {
+      "id": "6e2bf15a-a62f-4fc1-8bb0-d6317f18859e",
+      "state": "settled",
+      "reservedUsd": 0.0197855,
+      "estimatedUsd": 0.005954,
+      "at": "2026-11-04T09:24:54.466Z"
+    },
+    {
+      "id": "a298f5a1-d5c6-49d3-9caf-16eedaf5a093",
+      "state": "settled",
+      "reservedUsd": 0.01959925,
+      "estimatedUsd": 0.00522975,
+      "at": "2026-11-04T09:24:56.145Z"
+    },
+    {
+      "id": "3dc43218-3858-4e15-9a8a-dc84c9011e15",
+      "state": "settled",
+      "reservedUsd": 0.019758,
+      "estimatedUsd": 0.00559075,
+      "at": "2026-11-04T09:25:26.970Z"
+    },
+    {
+      "id": "e21eae84-ceb7-4f02-b80e-500f6051a856",
+      "state": "settled",
+      "reservedUsd": 0.0197855,
+      "estimatedUsd": 0.0058987499999999995,
+      "at": "2026-11-04T09:25:28.767Z"
+    },
+    {
+      "id": "19737a53-97fa-4f82-8c2d-b2d8105c7111",
+      "state": "settled",
+      "reservedUsd": 0.01959925,
+      "estimatedUsd": 0.00668325,
+      "at": "2026-11-04T09:25:31.165Z"
+    },
+    {
+      "id": "50291cd7-fca3-4520-a0b4-14a324fa3960",
+      "state": "settled",
+      "reservedUsd": 0.019758,
+      "estimatedUsd": 0.0072185,
+      "at": "2026-11-04T09:25:59.811Z"
+    },
+    {
+      "id": "fd4cef83-cfed-4151-b759-6898e0facb74",
+      "state": "settled",
+      "reservedUsd": 0.0197855,
+      "estimatedUsd": 0.00836375,
+      "at": "2026-11-04T09:26:01.651Z"
+    },
+    {
+      "id": "39ac5205-1748-4c4c-b856-eb4202adc6c6",
+      "state": "settled",
+      "reservedUsd": 0.01959925,
+      "estimatedUsd": 0.010975750000000001,
+      "at": "2026-11-04T09:26:04.103Z"
+    },
+    {
+      "id": "59ee44c8-1578-4d3b-a3a6-c698e46e8851",
+      "state": "settled",
+      "reservedUsd": 0.019758,
+      "estimatedUsd": 0.0067425,
+      "at": "2026-11-04T09:26:45.832Z"
+    },
+    {
+      "id": "2cbfbb96-8fd8-48ad-a4bc-d6167492c79c",
+      "state": "settled",
+      "reservedUsd": 0.0197855,
+      "estimatedUsd": 0.008351,
+      "at": "2026-11-04T09:26:48.164Z"
+    },
+    {
+      "id": "6d185e41-2c12-43bb-9175-cd568302d636",
+      "state": "settled",
+      "reservedUsd": 0.01959925,
+      "estimatedUsd": 0.007188999999999999,
+      "at": "2026-11-04T09:26:49.653Z"
+    },
+    {
+      "id": "97a98c79-dfe6-4d27-8f77-603406da89e5",
+      "state": "settled",
+      "reservedUsd": 0.019758,
+      "estimatedUsd": 0.0084085,
+      "at": "2026-11-04T09:27:23.831Z"
+    },
+    {
+      "id": "da468031-5152-49c6-96f8-d13434a2f5cf",
+      "state": "settled",
+      "reservedUsd": 0.0197855,
+      "estimatedUsd": 0.0065575,
+      "at": "2026-11-04T09:27:25.271Z"
+    },
+    {
+      "id": "cac08469-4081-4df1-be29-2bce307bb0a9",
+      "state": "settled",
+      "reservedUsd": 0.01959925,
+      "estimatedUsd": 0.007835,
+      "at": "2026-11-04T09:27:27.174Z"
+    },
+    {
+      "id": "160f138e-4fe9-42dd-9def-9e799b829a25",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.00818725,
+      "at": "2026-11-04T09:28:00.760Z"
+    },
+    {
+      "id": "e8be5056-34fd-4976-b335-d7401ed55fb1",
+      "state": "settled",
+      "reservedUsd": 0.01976925,
+      "estimatedUsd": 0.005109000000000001,
+      "at": "2026-11-04T09:28:03.240Z"
+    },
+    {
+      "id": "43672f74-8254-482e-87ef-a4df182d591c",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.00542575,
+      "at": "2026-11-04T09:28:05.642Z"
+    },
+    {
+      "id": "5cfc98c1-3090-43d5-b1f0-5b95fa294150",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.008489,
+      "at": "2026-11-04T09:28:36.809Z"
+    },
+    {
+      "id": "4ec156a4-831b-4d18-b22d-4979adcb5e6c",
+      "state": "settled",
+      "reservedUsd": 0.01976925,
+      "estimatedUsd": 0.0053895,
+      "at": "2026-11-04T09:28:39.909Z"
+    },
+    {
+      "id": "2efa7722-675e-4523-836d-d567deee6218",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.00563825,
+      "at": "2026-11-04T09:28:41.882Z"
+    },
+    {
+      "id": "37464db3-f72d-4f72-a5ea-73ccec2cf16a",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.008149,
+      "at": "2026-11-04T09:29:12.923Z"
+    },
+    {
+      "id": "baa66307-1dff-4293-b93e-0f59d145f5fe",
+      "state": "settled",
+      "reservedUsd": 0.01976925,
+      "estimatedUsd": 0.0052025000000000005,
+      "at": "2026-11-04T09:29:14.321Z"
+    },
+    {
+      "id": "cae6f127-b7d9-4e63-b8f3-b19d53ff6397",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.0044355,
+      "at": "2026-11-04T09:29:16.807Z"
+    },
+    {
+      "id": "601fa5b6-e828-45bd-917f-d5c38eb7fb23",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.013776,
+      "at": "2026-11-04T09:29:44.856Z"
+    },
+    {
+      "id": "43f2a3a2-3a81-4c29-ad7a-a6897d1e5fb5",
+      "state": "settled",
+      "reservedUsd": 0.01976925,
+      "estimatedUsd": 0.00704275,
+      "at": "2026-11-04T09:29:46.646Z"
+    },
+    {
+      "id": "45348099-5d42-4812-a515-1a9fefafe834",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.008591999999999999,
+      "at": "2026-11-04T09:29:49.081Z"
+    },
+    {
+      "id": "a9d3fdeb-1dac-4bda-9f2a-6bea04e97d2c",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.0119995,
+      "at": "2026-11-04T09:30:39.608Z"
+    },
+    {
+      "id": "be38c25d-4c12-4e55-9466-a21d8ea4b72b",
+      "state": "settled",
+      "reservedUsd": 0.01976925,
+      "estimatedUsd": 0.01089325,
+      "at": "2026-11-04T09:30:42.070Z"
+    },
+    {
+      "id": "b27a6f4e-e44b-4926-a604-e9f073eaae0d",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.00985425,
+      "at": "2026-11-04T09:30:44.123Z"
+    },
+    {
+      "id": "acf76753-a244-45eb-8370-cefa9f502361",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.00794925,
+      "at": "2026-11-04T09:31:50.305Z"
+    },
+    {
+      "id": "84f227ce-90fb-46e6-aa33-7c4517170625",
+      "state": "settled",
+      "reservedUsd": 0.01976925,
+      "estimatedUsd": 0.00813925,
+      "at": "2026-11-04T09:31:53.035Z"
+    },
+    {
+      "id": "95df81cd-f700-4cec-9ed3-63f482660cb2",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.00933575,
+      "at": "2026-11-04T09:31:54.377Z"
+    },
+    {
+      "id": "4c7a2551-214e-4d13-97f0-1333d6256091",
+      "state": "settled",
+      "reservedUsd": 0.01972425,
+      "estimatedUsd": 0.00966,
+      "at": "2026-11-04T09:32:38.982Z"
+    },
+    {
+      "id": "7c0f56a9-a176-4605-93a4-656bdc3f1b2d",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.00596875,
+      "at": "2026-11-04T09:32:40.972Z"
+    },
+    {
+      "id": "b6417022-3be2-4235-adbc-48ec34a25356",
+      "state": "settled",
+      "reservedUsd": 0.0196155,
+      "estimatedUsd": 0.006504,
+      "at": "2026-11-04T09:32:43.105Z"
+    },
+    {
+      "id": "4e7be702-a1dd-47a3-9f60-e9ce9685e6b2",
+      "state": "settled",
+      "reservedUsd": 0.01972425,
+      "estimatedUsd": 0.00813,
+      "at": "2026-11-04T09:33:20.455Z"
+    },
+    {
+      "id": "9a04d85f-2015-4cde-aa94-b00cd181006f",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.00532275,
+      "at": "2026-11-04T09:33:21.622Z"
+    },
+    {
+      "id": "925f3c1c-ae94-45b1-a002-5f3b21c19831",
+      "state": "settled",
+      "reservedUsd": 0.0196155,
+      "estimatedUsd": 0.0055945000000000005,
+      "at": "2026-11-04T09:33:22.944Z"
+    },
+    {
+      "id": "177fe452-1432-4187-a355-572e43cfc6b9",
+      "state": "settled",
+      "reservedUsd": 0.01972425,
+      "estimatedUsd": 0.0076115,
+      "at": "2026-11-04T09:33:54.934Z"
+    },
+    {
+      "id": "eeb0a846-5420-4f9b-9932-bc07ee9fc970",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.005764750000000001,
+      "at": "2026-11-04T09:33:56.914Z"
+    },
+    {
+      "id": "f1a41f85-7758-44a7-a11a-1c4a37862a19",
+      "state": "settled",
+      "reservedUsd": 0.0196155,
+      "estimatedUsd": 0.005144,
+      "at": "2026-11-04T09:33:59.008Z"
+    },
+    {
+      "id": "c6954133-656f-4966-a4ac-636aa41d8aef",
+      "state": "settled",
+      "reservedUsd": 0.01972425,
+      "estimatedUsd": 0.010884,
+      "at": "2026-11-04T09:34:34.177Z"
+    },
+    {
+      "id": "e213ce01-36c4-4c1d-b941-46382e767d80",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.006899499999999999,
+      "at": "2026-11-04T09:34:36.308Z"
+    },
+    {
+      "id": "228ee476-caef-4728-86ed-34be7c37b8e9",
+      "state": "settled",
+      "reservedUsd": 0.0196155,
+      "estimatedUsd": 0.0071415,
+      "at": "2026-11-04T09:34:38.436Z"
+    },
+    {
+      "id": "3e744a47-7254-40f0-aded-75318f26defc",
+      "state": "settled",
+      "reservedUsd": 0.01972425,
+      "estimatedUsd": 0.00945175,
+      "at": "2026-11-04T09:35:20.808Z"
+    },
+    {
+      "id": "6c7415fe-af4c-4adc-aa54-fc3f8093d8e0",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.008047,
+      "at": "2026-11-04T09:35:22.114Z"
+    },
+    {
+      "id": "10ab1c6d-fae5-439e-a228-6dcf8afa2970",
+      "state": "settled",
+      "reservedUsd": 0.0196155,
+      "estimatedUsd": 0.009105,
+      "at": "2026-11-04T09:35:24.629Z"
+    },
+    {
+      "id": "a1948c37-d324-4f8f-b8fb-c2731a1a8ead",
+      "state": "settled",
+      "reservedUsd": 0.01972425,
+      "estimatedUsd": 0.011105,
+      "at": "2026-11-04T09:36:09.822Z"
+    },
+    {
+      "id": "38d011b6-0afc-4684-b9c4-b78c5f17b205",
+      "state": "settled",
+      "reservedUsd": 0.019603,
+      "estimatedUsd": 0.009271,
+      "at": "2026-11-04T09:36:12.177Z"
+    },
+    {
+      "id": "1e99b468-e76e-4de0-a5b9-64ba1ef2a400",
+      "state": "settled",
+      "reservedUsd": 0.0196155,
+      "estimatedUsd": 0.01052875,
+      "at": "2026-11-04T09:36:13.551Z"
+    },
+    {
+      "id": "01cd2c72-7db6-45ba-9b3f-d7112bc5b976",
+      "state": "settled",
+      "reservedUsd": 0.019783000000000002,
+      "estimatedUsd": 0.005348,
+      "at": "2026-11-04T09:37:08.369Z"
+    },
+    {
+      "id": "856774d8-d25b-42f3-822e-c76f72345432",
+      "state": "settled",
+      "reservedUsd": 0.019768,
+      "estimatedUsd": 0.004266250000000001,
+      "at": "2026-11-04T09:37:09.884Z"
+    },
+    {
+      "id": "ae94a87b-12f8-4196-b8b1-e4fcd071dfe4",
+      "state": "settled",
+      "reservedUsd": 0.01975925,
+      "estimatedUsd": 0.00734725,
+      "at": "2026-11-04T09:37:11.583Z"
+    },
+    {
+      "id": "069d44d6-5cc1-4576-8202-4709d07f702c",
+      "state": "settled",
+      "reservedUsd": 0.019783000000000002,
+      "estimatedUsd": 0.00705225,
+      "at": "2026-11-04T09:37:39.074Z"
+    },
+    {
+      "id": "3b19c9d4-9a2f-4c67-ad34-955fb76d7975",
+      "state": "settled",
+      "reservedUsd": 0.019768,
+      "estimatedUsd": 0.008869,
+      "at": "2026-11-04T09:37:40.567Z"
+    },
+    {
+      "id": "cc36f624-e107-4233-876e-228ff2e03e93",
+      "state": "settled",
+      "reservedUsd": 0.01975925,
+      "estimatedUsd": 0.006361250000000001,
+      "at": "2026-11-04T09:37:42.080Z"
+    },
+    {
+      "id": "e17771dd-13ea-4a0e-b824-7aa78dea1a68",
+      "state": "settled",
+      "reservedUsd": 0.019783000000000002,
+      "estimatedUsd": 0.00608325,
+      "at": "2026-11-04T09:38:20.639Z"
+    },
+    {
+      "id": "b662f1c1-e2dd-4c8d-a04e-54a6168ec70c",
+      "state": "settled",
+      "reservedUsd": 0.019768,
+      "estimatedUsd": 0.0064975,
+      "at": "2026-11-04T09:38:22.737Z"
+    },
+    {
+      "id": "881251e0-49f3-4e3c-9f6a-a5df601c2817",
+      "state": "settled",
+      "reservedUsd": 0.01975925,
+      "estimatedUsd": 0.0076405,
+      "at": "2026-11-04T09:38:24.966Z"
+    },
+    {
+      "id": "3820e05c-df97-4456-b441-cb90cf41b257",
+      "state": "settled",
+      "reservedUsd": 0.019783000000000002,
+      "estimatedUsd": 0.0093685,
+      "at": "2026-11-04T09:38:57.181Z"
+    },
+    {
+      "id": "fdb634f0-530b-445b-8f40-6c2ca2c17c76",
+      "state": "settled",
+      "reservedUsd": 0.019768,
+      "estimatedUsd": 0.0079255,
+      "at": "2026-11-04T09:38:58.952Z"
+    },
+    {
+      "id": "76c30d78-b165-44be-bd74-db73e517260f",
+      "state": "settled",
+      "reservedUsd": 0.01975925,
+      "estimatedUsd": 0.00901325,
+      "at": "2026-11-04T09:39:01.090Z"
+    },
+    {
+      "id": "2a629006-2790-4797-b7d7-7e43879d36f6",
+      "state": "settled",
+      "reservedUsd": 0.019783000000000002,
+      "estimatedUsd": 0.0082805,
+      "at": "2026-11-04T09:39:45.074Z"
+    },
+    {
+      "id": "9c77f8b6-5bba-43a1-8763-b8c57d8f9d4e",
+      "state": "settled",
+      "reservedUsd": 0.019768,
+      "estimatedUsd": 0.010059,
+      "at": "2026-11-04T09:39:46.619Z"
+    },
+    {
+      "id": "d1a36d46-b69c-4ef6-af47-519e2cfcd83a",
+      "state": "settled",
+      "reservedUsd": 0.01975925,
+      "estimatedUsd": 0.012026499999999999,
+      "at": "2026-11-04T09:39:49.149Z"
+    },
+    {
+      "id": "91019298-8dfd-485a-869c-cba72899e89e",
+      "state": "settled",
+      "reservedUsd": 0.019783000000000002,
+      "estimatedUsd": 0.00761325,
+      "at": "2026-11-04T09:40:44.291Z"
+    },
+    {
+      "id": "e11f8016-8370-4789-98cb-9ae226915485",
+      "state": "settled",
+      "reservedUsd": 0.019768,
+      "estimatedUsd": 0.0116315,
+      "at": "2026-11-04T09:40:47.011Z"
+    },
+    {
+      "id": "f1355ed4-85d1-428b-be85-e1316fc06874",
+      "state": "settled",
+      "reservedUsd": 0.01975925,
+      "estimatedUsd": 0.01056875,
+      "at": "2026-11-04T09:40:49.689Z"
+    },
+    {
+      "id": "20a325b5-8406-4f23-9120-31c1d76ec835",
+      "state": "settled",
+      "reservedUsd": 0.0197705,
+      "estimatedUsd": 0.0063300000000000006,
+      "at": "2026-11-04T09:41:39.010Z"
+    },
+    {
+      "id": "afff42c9-d82a-465d-aba5-9affef95f012",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.00555425,
+      "at": "2026-11-04T09:41:41.484Z"
+    },
+    {
+      "id": "68488e18-6d2f-4dc4-a41c-28063245b560",
+      "state": "settled",
+      "reservedUsd": 0.01960675,
+      "estimatedUsd": 0.00701375,
+      "at": "2026-11-04T09:41:43.113Z"
+    },
+    {
+      "id": "75690a99-c463-4048-83aa-e12abedd46ba",
+      "state": "settled",
+      "reservedUsd": 0.0197705,
+      "estimatedUsd": 0.006517,
+      "at": "2026-11-04T09:42:14.994Z"
+    },
+    {
+      "id": "341c510c-54d9-4067-9490-147e1490aea7",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.004989,
+      "at": "2026-11-04T09:42:15.901Z"
+    },
+    {
+      "id": "7d75cf62-7b11-4b14-8234-d852827dae7b",
+      "state": "settled",
+      "reservedUsd": 0.01960675,
+      "estimatedUsd": 0.00423,
+      "at": "2026-11-04T09:42:17.894Z"
+    },
+    {
+      "id": "ed5896b4-b3ff-47f0-8b1a-57f1acf0ba6c",
+      "state": "settled",
+      "reservedUsd": 0.0197705,
+      "estimatedUsd": 0.006963250000000001,
+      "at": "2026-11-04T09:42:41.330Z"
+    },
+    {
+      "id": "44ebed63-f906-4f1a-8ead-0dcf350eb802",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.00525675,
+      "at": "2026-11-04T09:42:43.913Z"
+    },
+    {
+      "id": "3ff6be5c-ca07-4739-b3a3-bed52bc3516a",
+      "state": "settled",
+      "reservedUsd": 0.01960675,
+      "estimatedUsd": 0.004791,
+      "at": "2026-11-04T09:42:46.176Z"
+    },
+    {
+      "id": "f7729cdc-f351-403b-895b-daa4030e32b2",
+      "state": "settled",
+      "reservedUsd": 0.0197705,
+      "estimatedUsd": 0.008059750000000001,
+      "at": "2026-11-04T09:43:12.726Z"
+    },
+    {
+      "id": "d3a08051-0bb1-4e6f-9fb1-0feb8ee08965",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.00840175,
+      "at": "2026-11-04T09:43:14.256Z"
+    },
+    {
+      "id": "b2807dd0-19f7-4db8-8dec-8a08699f5999",
+      "state": "settled",
+      "reservedUsd": 0.01960675,
+      "estimatedUsd": 0.0075195,
+      "at": "2026-11-04T09:43:16.691Z"
+    },
+    {
+      "id": "5e5b7e77-7a48-462f-b211-3660882b3d84",
+      "state": "settled",
+      "reservedUsd": 0.0197705,
+      "estimatedUsd": 0.007133250000000001,
+      "at": "2026-11-04T09:43:55.729Z"
+    },
+    {
+      "id": "1477d3e6-23fa-466e-98e3-cd0ab3721a6d",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.008168,
+      "at": "2026-11-04T09:43:57.798Z"
+    },
+    {
+      "id": "9d2eff62-b869-42e6-81fc-07834aa65c9f",
+      "state": "settled",
+      "reservedUsd": 0.01960675,
+      "estimatedUsd": 0.011178750000000001,
+      "at": "2026-11-04T09:43:59.743Z"
+    },
+    {
+      "id": "4d042000-c96b-4a3a-80ee-9bf322607ce5",
+      "state": "settled",
+      "reservedUsd": 0.0197705,
+      "estimatedUsd": 0.00908825,
+      "at": "2026-11-04T09:44:40.367Z"
+    },
+    {
+      "id": "ac8f9e2a-0824-40af-a4c4-2f4d27e5b23e",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.0098935,
+      "at": "2026-11-04T09:44:42.016Z"
+    },
+    {
+      "id": "a855cc9b-8b6d-482d-b584-b392083d093c",
+      "state": "settled",
+      "reservedUsd": 0.01960675,
+      "estimatedUsd": 0.00696275,
+      "at": "2026-11-04T09:44:44.174Z"
+    },
+    {
+      "id": "bd42af47-3f44-43bc-9567-8ca8d3348238",
+      "state": "settled",
+      "reservedUsd": 0.0197755,
+      "estimatedUsd": 0.00515775,
+      "at": "2026-11-04T09:45:22.503Z"
+    },
+    {
+      "id": "4948ea5d-eb3f-45f0-9962-b82fc889a9d2",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.00661575,
+      "at": "2026-11-04T09:45:24.536Z"
+    },
+    {
+      "id": "85f3ca6c-a2bf-4a9c-b0f1-6c3c29dd44cd",
+      "state": "settled",
+      "reservedUsd": 0.01973175,
+      "estimatedUsd": 0.00787825,
+      "at": "2026-11-04T09:45:27.075Z"
+    },
+    {
+      "id": "e5c0904c-7a91-4529-a9e6-4aa76202a761",
+      "state": "settled",
+      "reservedUsd": 0.0197755,
+      "estimatedUsd": 0.006092749999999999,
+      "at": "2026-11-04T09:45:57.294Z"
+    },
+    {
+      "id": "4eae8cd2-cdf0-4545-bb1a-d0b22cd2c21e",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.00554475,
+      "at": "2026-11-04T09:46:38.602Z"
+    },
+    {
+      "id": "b4700185-de2e-4565-bcef-74bc33f55e1b",
+      "state": "settled",
+      "reservedUsd": 0.01973175,
+      "estimatedUsd": 0.00743625,
+      "at": "2026-11-04T09:46:40.810Z"
+    },
+    {
+      "id": "6d16c846-de20-48c7-8332-5c8f7b1a53d7",
+      "state": "settled",
+      "reservedUsd": 0.0197755,
+      "estimatedUsd": 0.0058674999999999995,
+      "at": "2026-11-04T09:47:10.022Z"
+    },
+    {
+      "id": "5d050fe1-a84a-4819-b29e-ff577c181280",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.0062205,
+      "at": "2026-11-04T09:47:12.789Z"
+    },
+    {
+      "id": "7353dd7b-197b-498b-96cf-6c1718320422",
+      "state": "settled",
+      "reservedUsd": 0.01973175,
+      "estimatedUsd": 0.0066542500000000004,
+      "at": "2026-11-04T09:47:15.079Z"
+    },
+    {
+      "id": "c4fa842c-8b6f-4823-a8c6-550521ef909b",
+      "state": "settled",
+      "reservedUsd": 0.0197755,
+      "estimatedUsd": 0.0091315,
+      "at": "2026-11-04T09:47:41.746Z"
+    },
+    {
+      "id": "7c20c8c3-88c5-424d-ab13-4a72c2a519c6",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.01117175,
+      "at": "2026-11-04T09:47:44.456Z"
+    },
+    {
+      "id": "ce11120d-4b18-4335-b879-54b7efc24ece",
+      "state": "settled",
+      "reservedUsd": 0.01973175,
+      "estimatedUsd": 0.00757225,
+      "at": "2026-11-04T09:47:47.038Z"
+    },
+    {
+      "id": "a66f8e71-4c35-4c75-9029-51e0a9009b47",
+      "state": "settled",
+      "reservedUsd": 0.0197755,
+      "estimatedUsd": 0.00893175,
+      "at": "2026-11-04T09:48:28.594Z"
+    },
+    {
+      "id": "72f9ea70-d06c-4870-9af0-6e0a67bfecd3",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.01292275,
+      "at": "2026-11-04T09:48:30.440Z"
+    },
+    {
+      "id": "d8eb0e92-1cf8-419c-bfab-5453f15b6485",
+      "state": "settled",
+      "reservedUsd": 0.01973175,
+      "estimatedUsd": 0.00791225,
+      "at": "2026-11-04T09:48:32.909Z"
+    },
+    {
+      "id": "054b030d-e6e1-4766-b624-df98499c6547",
+      "state": "settled",
+      "reservedUsd": 0.0197755,
+      "estimatedUsd": 0.00797975,
+      "at": "2026-11-04T09:49:14.616Z"
+    },
+    {
+      "id": "ef6a918d-65c6-401b-80fd-6450f2d7cd6c",
+      "state": "settled",
+      "reservedUsd": 0.019763,
+      "estimatedUsd": 0.008226500000000001,
+      "at": "2026-11-04T09:49:16.305Z"
+    },
+    {
+      "id": "d0250190-45f4-4161-a48f-23197a883404",
+      "state": "settled",
+      "reservedUsd": 0.01973175,
+      "estimatedUsd": 0.0082225,
+      "at": "2026-11-04T09:49:18.817Z"
+    },
+    {
+      "id": "5005c066-1aa9-47dd-b34b-15bcf38300de",
+      "state": "settled",
+      "reservedUsd": 0.0196005,
+      "estimatedUsd": 0.006259500000000001,
+      "at": "2026-11-04T09:49:51.491Z"
+    },
+    {
+      "id": "f85ca113-c4c8-498d-b16b-60828a7b62b1",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.00580925,
+      "at": "2026-11-04T09:49:53.833Z"
+    },
+    {
+      "id": "6f91b4c7-1bde-4899-87d3-6bd9b3151076",
+      "state": "settled",
+      "reservedUsd": 0.02110675,
+      "estimatedUsd": 0.00796375,
+      "at": "2026-11-04T09:49:55.974Z"
+    },
+    {
+      "id": "c1f420b0-317d-4175-b780-f190784d0653",
+      "state": "settled",
+      "reservedUsd": 0.0196005,
+      "estimatedUsd": 0.0057155,
+      "at": "2026-11-04T09:50:24.037Z"
+    },
+    {
+      "id": "7ea28779-66da-4e0f-a5fc-090a530ad774",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.00497625,
+      "at": "2026-11-04T09:50:26.253Z"
+    },
+    {
+      "id": "7f3f254f-0355-476a-ba5f-01a7809d5bed",
+      "state": "settled",
+      "reservedUsd": 0.02110675,
+      "estimatedUsd": 0.007997750000000001,
+      "at": "2026-11-04T09:50:29.423Z"
+    },
+    {
+      "id": "572dbd7c-07f6-48af-864a-054202982736",
+      "state": "settled",
+      "reservedUsd": 0.0196005,
+      "estimatedUsd": 0.00584725,
+      "at": "2026-11-04T09:50:49.865Z"
+    },
+    {
+      "id": "e3994a57-1ec5-4057-bd8e-b80ea6dab421",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.0053035,
+      "at": "2026-11-04T09:50:51.416Z"
+    },
+    {
+      "id": "08b571ff-5a2c-49cd-be23-2ef0bbd31845",
+      "state": "settled",
+      "reservedUsd": 0.02110675,
+      "estimatedUsd": 0.0095235,
+      "at": "2026-11-04T09:50:52.827Z"
+    },
+    {
+      "id": "4304c968-3a85-4931-951d-478e7f3d739e",
+      "state": "settled",
+      "reservedUsd": 0.0196005,
+      "estimatedUsd": 0.0077512499999999995,
+      "at": "2026-11-04T09:51:17.330Z"
+    },
+    {
+      "id": "815aefde-0d95-43a8-9427-0e7169236dc9",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.008699249999999999,
+      "at": "2026-11-04T09:51:19.206Z"
+    },
+    {
+      "id": "2dd3d5a0-a38f-45db-8c76-0bd5db20d609",
+      "state": "settled",
+      "reservedUsd": 0.02110675,
+      "estimatedUsd": 0.013493000000000002,
+      "at": "2026-11-04T09:51:21.989Z"
+    },
+    {
+      "id": "4b8908fd-d758-4679-9c2e-fde7164afe38",
+      "state": "settled",
+      "reservedUsd": 0.0196005,
+      "estimatedUsd": 0.007611,
+      "at": "2026-11-04T09:51:59.762Z"
+    },
+    {
+      "id": "fa816f22-6042-42de-a9e8-ff338324da7d",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.009260250000000001,
+      "at": "2026-11-04T09:52:01.807Z"
+    },
+    {
+      "id": "af712a87-aa21-4cfb-a2ee-18a5b06d1111",
+      "state": "settled",
+      "reservedUsd": 0.02110675,
+      "estimatedUsd": 0.01113425,
+      "at": "2026-11-04T09:52:04.423Z"
+    },
+    {
+      "id": "3dc8b53a-42aa-4a89-83f5-84c8ca82e5e9",
+      "state": "settled",
+      "reservedUsd": 0.0196005,
+      "estimatedUsd": 0.008826500000000001,
+      "at": "2026-11-04T09:52:37.715Z"
+    },
+    {
+      "id": "2db20703-0d0c-4732-8bce-84631e5db2ac",
+      "state": "settled",
+      "reservedUsd": 0.01960925,
+      "estimatedUsd": 0.008945749999999999,
+      "at": "2026-11-04T09:52:39.109Z"
+    },
+    {
+      "id": "74654a58-9c1b-4a4a-82a0-eed2b57e308b",
+      "state": "settled",
+      "reservedUsd": 0.02110675,
+      "estimatedUsd": 0.012736500000000001,
+      "at": "2026-11-04T09:52:40.666Z"
+    },
+    {
+      "id": "f801f4a1-0749-4431-ab50-6a1e2a787a20",
+      "state": "settled",
+      "reservedUsd": 0.021263,
+      "estimatedUsd": 0.009134,
+      "at": "2026-11-04T09:53:16.521Z"
+    },
+    {
+      "id": "093f70bb-1aa8-4d8c-aea1-aac82498b064",
+      "state": "settled",
+      "reservedUsd": 0.021263,
+      "estimatedUsd": 0.00872175,
+      "at": "2026-11-04T09:53:27.921Z"
+    },
+    {
+      "id": "88942eea-022c-4128-ba40-594c966d0451",
+      "state": "settled",
+      "reservedUsd": 0.021263,
+      "estimatedUsd": 0.0122535,
+      "at": "2026-11-04T09:53:40.261Z"
+    },
+    {
+      "id": "9a46c2eb-bed1-40f8-bd4a-6cf83a6bfddd",
+      "state": "settled",
+      "reservedUsd": 0.021263,
+      "estimatedUsd": 0.01287825,
+      "at": "2026-11-04T09:53:56.640Z"
+    },
+    {
+      "id": "d1cfed53-018a-48ee-9f40-11d5c4e20dde",
+      "state": "settled",
+      "reservedUsd": 0.021263,
+      "estimatedUsd": 0.013741,
+      "at": "2026-11-04T09:54:12.934Z"
+    },
+    {
+      "id": "9a631285-a1ec-4848-b38a-86423c388b6e",
+      "state": "settled",
+      "reservedUsd": 0.021263,
+      "estimatedUsd": 0.01640575,
+      "at": "2026-11-04T09:54:30.828Z"
+    }
+  ]
+}

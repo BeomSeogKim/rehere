@@ -1,0 +1,701 @@
+{
+  "schemaVersion": 1,
+  "label": "Expected verdicts written by the development team (AI-assisted), not independent annotators. They describe what we expect a careful viewer to see in these photographs, never historical truth.",
+  "startedAt": "2026-11-04T08:55:42.515Z",
+  "finishedAt": "2026-11-04T08:57:45.874Z",
+  "model": "muse-spark-1.3",
+  "runs": 1,
+  "efforts": [
+    "low",
+    "medium"
+  ],
+  "ledger": {
+    "requests": 8,
+    "chargedUsd": 0.073672
+  },
+  "summary": {
+    "low": {
+      "checks": 4,
+      "notSent": 0,
+      "failureCounts": {
+        "notSent": 0,
+        "provider": 0,
+        "invalidAnswer": 0,
+        "other": 0
+      },
+      "answered": 4,
+      "failed": 0,
+      "agreement": 0.5,
+      "agreementByExpected": {
+        "supports": 0.5,
+        "conflicts": 1,
+        "not_visible": 0
+      },
+      "majorityAgreement": 0.5,
+      "unanimousClaims": 1,
+      "pairwiseConsistency": null,
+      "sourceAccuracy": null,
+      "splitAnswers": 0.5,
+      "denominators": {
+        "agreement": 4,
+        "agreementByExpected": {
+          "supports": 2,
+          "conflicts": 1,
+          "not_visible": 1
+        },
+        "majorityAgreement": 4,
+        "unanimousClaims": 4,
+        "pairwiseConsistency": 0,
+        "sourceAccuracy": 0,
+        "splitAnswers": 4,
+        "sourceAccuracyScope": "Correct supports/conflicts answers on claims with more than one photo and an expected photo."
+      },
+      "confusion": {
+        "supports": {
+          "supports": 1,
+          "conflicts": 0,
+          "not_visible": 1,
+          "mixed": 0,
+          "failed": 0
+        },
+        "conflicts": {
+          "supports": 0,
+          "conflicts": 1,
+          "not_visible": 0,
+          "mixed": 0,
+          "failed": 0
+        },
+        "not_visible": {
+          "supports": 0,
+          "conflicts": 0,
+          "not_visible": 0,
+          "mixed": 1,
+          "failed": 0
+        }
+      },
+      "usage": {
+        "reported": 4,
+        "inputTokens": 7787,
+        "outputTokens": 5063,
+        "estimatedUsd": 0.031252
+      },
+      "latencyMs": {
+        "median": 8413,
+        "max": 18062
+      },
+      "failures": [
+        {
+          "claimId": "s16",
+          "effort": "low",
+          "run": 1,
+          "expected": "supports",
+          "verdict": "not_visible",
+          "failure": null,
+          "error": null,
+          "findings": [
+            {
+              "part": "the sun room had a fireplace",
+              "verdict": "not_visible",
+              "sourceId": "993e33ff-154f-4484-839a-ff338d7c9f2c",
+              "crop": [
+                0.58,
+                0.67,
+                0.75,
+                0.79
+              ],
+              "observation": "A stone fireplace is visible but the room is not identified as the sun room.",
+              "photo": "A-18"
+            }
+          ],
+          "uncertainty": "The photos cannot confirm which shown room is the sun room.",
+          "responseId": "resp_6aeaf338132ddadd7c7344ed"
+        },
+        {
+          "claimId": "n02",
+          "effort": "low",
+          "run": 1,
+          "expected": "not_visible",
+          "verdict": "mixed",
+          "failure": null,
+          "error": null,
+          "findings": [
+            {
+              "part": "the lobby desk",
+              "verdict": "supports",
+              "sourceId": "d590702b-dffd-492f-853d-433671f5a799",
+              "crop": [
+                0.39,
+                0.76,
+                0.895,
+                0.89
+              ],
+              "observation": "A long reception counter is visible in the center of the lobby.",
+              "photo": "A-15"
+            },
+            {
+              "part": "was named Mary.",
+              "verdict": "not_visible",
+              "sourceId": null,
+              "crop": null,
+              "observation": "No name, badge, or label identifying anyone as Mary is visible.",
+              "photo": null
+            }
+          ],
+          "uncertainty": "These photos cannot show what any desk clerk was called.",
+          "responseId": "resp_6aeaf3734d39f43612344c51"
+        }
+      ]
+    },
+    "medium": {
+      "checks": 4,
+      "notSent": 0,
+      "failureCounts": {
+        "notSent": 0,
+        "provider": 0,
+        "invalidAnswer": 0,
+        "other": 0
+      },
+      "answered": 4,
+      "failed": 0,
+      "agreement": 0.25,
+      "agreementByExpected": {
+        "supports": 0,
+        "conflicts": 1,
+        "not_visible": 0
+      },
+      "majorityAgreement": 0.25,
+      "unanimousClaims": 1,
+      "pairwiseConsistency": null,
+      "sourceAccuracy": null,
+      "splitAnswers": 0.75,
+      "denominators": {
+        "agreement": 4,
+        "agreementByExpected": {
+          "supports": 2,
+          "conflicts": 1,
+          "not_visible": 1
+        },
+        "majorityAgreement": 4,
+        "unanimousClaims": 4,
+        "pairwiseConsistency": 0,
+        "sourceAccuracy": 0,
+        "splitAnswers": 4,
+        "sourceAccuracyScope": "Correct supports/conflicts answers on claims with more than one photo and an expected photo."
+      },
+      "confusion": {
+        "supports": {
+          "supports": 0,
+          "conflicts": 0,
+          "not_visible": 0,
+          "mixed": 2,
+          "failed": 0
+        },
+        "conflicts": {
+          "supports": 0,
+          "conflicts": 1,
+          "not_visible": 0,
+          "mixed": 0,
+          "failed": 0
+        },
+        "not_visible": {
+          "supports": 0,
+          "conflicts": 0,
+          "not_visible": 0,
+          "mixed": 1,
+          "failed": 0
+        }
+      },
+      "usage": {
+        "reported": 4,
+        "inputTokens": 7787,
+        "outputTokens": 7691,
+        "estimatedUsd": 0.04242
+      },
+      "latencyMs": {
+        "median": 16112,
+        "max": 19293
+      },
+      "failures": [
+        {
+          "claimId": "s01",
+          "effort": "medium",
+          "run": 1,
+          "expected": "supports",
+          "verdict": "mixed",
+          "failure": null,
+          "error": null,
+          "findings": [
+            {
+              "part": "a large patterned rug hung",
+              "verdict": "supports",
+              "sourceId": "0106f5e7-914b-47b7-b99f-407b7c32a8da",
+              "crop": [
+                0.71,
+                0.632,
+                0.815,
+                0.793
+              ],
+              "observation": "A large diamond-patterned hanging is visible on the right wall.",
+              "photo": "A-15"
+            },
+            {
+              "part": "on the stone wall",
+              "verdict": "supports",
+              "sourceId": "0106f5e7-914b-47b7-b99f-407b7c32a8da",
+              "crop": [
+                0.695,
+                0.615,
+                0.885,
+                0.852
+              ],
+              "observation": "The hanging is mounted directly on a rough stone masonry wall.",
+              "photo": "A-15"
+            },
+            {
+              "part": "of the lobby.",
+              "verdict": "not_visible",
+              "sourceId": null,
+              "crop": null,
+              "observation": "No sign or label is visible confirming the room is the lobby.",
+              "photo": null
+            }
+          ],
+          "uncertainty": "These photos cannot confirm the room shown is the lobby rather than another hall.",
+          "responseId": "resp_6aeaf32c421d122980464be5"
+        },
+        {
+          "claimId": "s16",
+          "effort": "medium",
+          "run": 1,
+          "expected": "supports",
+          "verdict": "mixed",
+          "failure": null,
+          "error": null,
+          "findings": [
+            {
+              "part": "the sun room",
+              "verdict": "not_visible",
+              "sourceId": null,
+              "crop": null,
+              "observation": "No photo labels or identifies any room as the sun room.",
+              "photo": null
+            },
+            {
+              "part": "had a fireplace.",
+              "verdict": "supports",
+              "sourceId": "993e33ff-154f-4484-839a-ff338d7c9f2c",
+              "crop": [
+                0.59,
+                0.69,
+                0.74,
+                0.81
+              ],
+              "observation": "A stone fireplace with an open firebox is visible in the wall.",
+              "photo": "A-18"
+            }
+          ],
+          "uncertainty": "These photos cannot confirm which shown room, if any, is the sun room.",
+          "responseId": "resp_6aeaf34ec5d92c0be62046fc"
+        },
+        {
+          "claimId": "n02",
+          "effort": "medium",
+          "run": 1,
+          "expected": "not_visible",
+          "verdict": "mixed",
+          "failure": null,
+          "error": null,
+          "findings": [
+            {
+              "part": "the lobby desk",
+              "verdict": "supports",
+              "sourceId": "d590702b-dffd-492f-853d-433671f5a799",
+              "crop": [
+                0.36,
+                0.78,
+                0.86,
+                0.91
+              ],
+              "observation": "A long reception counter with cubbies stands in the large room.",
+              "photo": "A-15"
+            },
+            {
+              "part": "was named Mary.",
+              "verdict": "not_visible",
+              "sourceId": null,
+              "crop": null,
+              "observation": "No name, badge, or legible text identifying any clerk is visible.",
+              "photo": null
+            }
+          ],
+          "uncertainty": "The photos cannot reveal what the clerk was named.",
+          "responseId": "resp_6aeaf389bf9687bc67f148e9"
+        }
+      ]
+    }
+  },
+  "results": [
+    {
+      "claimId": "s01",
+      "effort": "low",
+      "run": 1,
+      "httpStatus": 201,
+      "roundTripMs": 10842,
+      "status": "answered",
+      "error": null,
+      "verdict": "supports",
+      "findings": [
+        {
+          "part": "a large patterned rug hung",
+          "verdict": "supports",
+          "sourceId": "0106f5e7-914b-47b7-b99f-407b7c32a8da",
+          "crop": [
+            0.71,
+            0.615,
+            0.85,
+            0.795
+          ],
+          "observation": "A large diamond-patterned textile hangs on the wall above the desk.",
+          "photo": "A-15"
+        },
+        {
+          "part": "on the stone wall of the lobby.",
+          "verdict": "supports",
+          "sourceId": "0106f5e7-914b-47b7-b99f-407b7c32a8da",
+          "crop": [
+            0.7,
+            0.6,
+            0.95,
+            0.885
+          ],
+          "observation": "The textile is mounted on a rough stone wall in the lobby.",
+          "photo": "A-15"
+        }
+      ],
+      "uncertainty": "These photos cannot settle whether the hanging textile is actually a rug.",
+      "call": {
+        "model": "muse-spark-1.3",
+        "responseId": "resp_6aeaf31917c65183f5bf45fe",
+        "usage": {
+          "inputTokens": 1690,
+          "outputTokens": 1051,
+          "estimatedUsd": 0.00657925
+        },
+        "mode": "live",
+        "latencyMs": 8413
+      },
+      "failure": null
+    },
+    {
+      "claimId": "s01",
+      "effort": "medium",
+      "run": 1,
+      "httpStatus": 201,
+      "roundTripMs": 19082,
+      "status": "answered",
+      "error": null,
+      "verdict": "mixed",
+      "findings": [
+        {
+          "part": "a large patterned rug hung",
+          "verdict": "supports",
+          "sourceId": "0106f5e7-914b-47b7-b99f-407b7c32a8da",
+          "crop": [
+            0.71,
+            0.632,
+            0.815,
+            0.793
+          ],
+          "observation": "A large diamond-patterned hanging is visible on the right wall.",
+          "photo": "A-15"
+        },
+        {
+          "part": "on the stone wall",
+          "verdict": "supports",
+          "sourceId": "0106f5e7-914b-47b7-b99f-407b7c32a8da",
+          "crop": [
+            0.695,
+            0.615,
+            0.885,
+            0.852
+          ],
+          "observation": "The hanging is mounted directly on a rough stone masonry wall.",
+          "photo": "A-15"
+        },
+        {
+          "part": "of the lobby.",
+          "verdict": "not_visible",
+          "sourceId": null,
+          "crop": null,
+          "observation": "No sign or label is visible confirming the room is the lobby.",
+          "photo": null
+        }
+      ],
+      "uncertainty": "These photos cannot confirm the room shown is the lobby rather than another hall.",
+      "call": {
+        "model": "muse-spark-1.3",
+        "responseId": "resp_6aeaf32c421d122980464be5",
+        "usage": {
+          "inputTokens": 1690,
+          "outputTokens": 2003,
+          "estimatedUsd": 0.01062525
+        },
+        "mode": "live",
+        "latencyMs": 16112
+      },
+      "failure": null
+    },
+    {
+      "claimId": "s16",
+      "effort": "low",
+      "run": 1,
+      "httpStatus": 201,
+      "roundTripMs": 12356,
+      "status": "answered",
+      "error": null,
+      "verdict": "not_visible",
+      "findings": [
+        {
+          "part": "the sun room had a fireplace",
+          "verdict": "not_visible",
+          "sourceId": "993e33ff-154f-4484-839a-ff338d7c9f2c",
+          "crop": [
+            0.58,
+            0.67,
+            0.75,
+            0.79
+          ],
+          "observation": "A stone fireplace is visible but the room is not identified as the sun room.",
+          "photo": "A-18"
+        }
+      ],
+      "uncertainty": "The photos cannot confirm which shown room is the sun room.",
+      "call": {
+        "model": "muse-spark-1.3",
+        "responseId": "resp_6aeaf338132ddadd7c7344ed",
+        "usage": {
+          "inputTokens": 2752,
+          "outputTokens": 1206,
+          "estimatedUsd": 0.0085655
+        },
+        "mode": "live",
+        "latencyMs": 9881
+      },
+      "failure": null
+    },
+    {
+      "claimId": "s16",
+      "effort": "medium",
+      "run": 1,
+      "httpStatus": 201,
+      "roundTripMs": 21162,
+      "status": "answered",
+      "error": null,
+      "verdict": "mixed",
+      "findings": [
+        {
+          "part": "the sun room",
+          "verdict": "not_visible",
+          "sourceId": null,
+          "crop": null,
+          "observation": "No photo labels or identifies any room as the sun room.",
+          "photo": null
+        },
+        {
+          "part": "had a fireplace.",
+          "verdict": "supports",
+          "sourceId": "993e33ff-154f-4484-839a-ff338d7c9f2c",
+          "crop": [
+            0.59,
+            0.69,
+            0.74,
+            0.81
+          ],
+          "observation": "A stone fireplace with an open firebox is visible in the wall.",
+          "photo": "A-18"
+        }
+      ],
+      "uncertainty": "These photos cannot confirm which shown room, if any, is the sun room.",
+      "call": {
+        "model": "muse-spark-1.3",
+        "responseId": "resp_6aeaf34ec5d92c0be62046fc",
+        "usage": {
+          "inputTokens": 2752,
+          "outputTokens": 2450,
+          "estimatedUsd": 0.0138525
+        },
+        "mode": "live",
+        "latencyMs": 19067
+      },
+      "failure": null
+    },
+    {
+      "claimId": "c01",
+      "effort": "low",
+      "run": 1,
+      "httpStatus": 201,
+      "roundTripMs": 8128,
+      "status": "answered",
+      "error": null,
+      "verdict": "conflicts",
+      "findings": [
+        {
+          "part": "the lobby had a low, flat ceiling.",
+          "verdict": "conflicts",
+          "sourceId": "db10f0f1-d9a3-45e0-af2a-0ad879105585",
+          "crop": [
+            0.025,
+            0.01,
+            0.97,
+            0.6
+          ],
+          "observation": "The lobby ceiling is high, peaked, and framed with large log trusses.",
+          "photo": "A-15"
+        }
+      ],
+      "uncertainty": "These photos cannot settle whether any other unseen lobby area had a different ceiling.",
+      "call": {
+        "model": "muse-spark-1.3",
+        "responseId": "resp_6aeaf3565ccb895a398646d4",
+        "usage": {
+          "inputTokens": 1679,
+          "outputTokens": 750,
+          "estimatedUsd": 0.00528625
+        },
+        "mode": "live",
+        "latencyMs": 6291
+      },
+      "failure": null
+    },
+    {
+      "claimId": "c01",
+      "effort": "medium",
+      "run": 1,
+      "httpStatus": 201,
+      "roundTripMs": 8487,
+      "status": "answered",
+      "error": null,
+      "verdict": "conflicts",
+      "findings": [
+        {
+          "part": "the lobby had a low, flat ceiling.",
+          "verdict": "conflicts",
+          "sourceId": "db10f0f1-d9a3-45e0-af2a-0ad879105585",
+          "crop": [
+            0.03,
+            0.03,
+            0.92,
+            0.6
+          ],
+          "observation": "The photo shows a high pitched timber-truss roof over the lobby.",
+          "photo": "A-15"
+        }
+      ],
+      "uncertainty": "The single photo cannot settle whether the ceiling was changed at another time.",
+      "call": {
+        "model": "muse-spark-1.3",
+        "responseId": "resp_6aeaf35ee019d3aaf9b040ea",
+        "usage": {
+          "inputTokens": 1679,
+          "outputTokens": 771,
+          "estimatedUsd": 0.0053755
+        },
+        "mode": "live",
+        "latencyMs": 6718
+      },
+      "failure": null
+    },
+    {
+      "claimId": "n02",
+      "effort": "low",
+      "run": 1,
+      "httpStatus": 201,
+      "roundTripMs": 20896,
+      "status": "answered",
+      "error": null,
+      "verdict": "mixed",
+      "findings": [
+        {
+          "part": "the lobby desk",
+          "verdict": "supports",
+          "sourceId": "d590702b-dffd-492f-853d-433671f5a799",
+          "crop": [
+            0.39,
+            0.76,
+            0.895,
+            0.89
+          ],
+          "observation": "A long reception counter is visible in the center of the lobby.",
+          "photo": "A-15"
+        },
+        {
+          "part": "was named Mary.",
+          "verdict": "not_visible",
+          "sourceId": null,
+          "crop": null,
+          "observation": "No name, badge, or label identifying anyone as Mary is visible.",
+          "photo": null
+        }
+      ],
+      "uncertainty": "These photos cannot show what any desk clerk was called.",
+      "call": {
+        "model": "muse-spark-1.3",
+        "responseId": "resp_6aeaf3734d39f43612344c51",
+        "usage": {
+          "inputTokens": 1666,
+          "outputTokens": 2056,
+          "estimatedUsd": 0.0108205
+        },
+        "mode": "live",
+        "latencyMs": 18062
+      },
+      "failure": null
+    },
+    {
+      "claimId": "n02",
+      "effort": "medium",
+      "run": 1,
+      "httpStatus": 201,
+      "roundTripMs": 21930,
+      "status": "answered",
+      "error": null,
+      "verdict": "mixed",
+      "findings": [
+        {
+          "part": "the lobby desk",
+          "verdict": "supports",
+          "sourceId": "d590702b-dffd-492f-853d-433671f5a799",
+          "crop": [
+            0.36,
+            0.78,
+            0.86,
+            0.91
+          ],
+          "observation": "A long reception counter with cubbies stands in the large room.",
+          "photo": "A-15"
+        },
+        {
+          "part": "was named Mary.",
+          "verdict": "not_visible",
+          "sourceId": null,
+          "crop": null,
+          "observation": "No name, badge, or legible text identifying any clerk is visible.",
+          "photo": null
+        }
+      ],
+      "uncertainty": "The photos cannot reveal what the clerk was named.",
+      "call": {
+        "model": "muse-spark-1.3",
+        "responseId": "resp_6aeaf389bf9687bc67f148e9",
+        "usage": {
+          "inputTokens": 1666,
+          "outputTokens": 2467,
+          "estimatedUsd": 0.012567249999999999
+        },
+        "mode": "live",
+        "latencyMs": 19293
+      },
+      "failure": null
+    }
+  ]
+}

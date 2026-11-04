@@ -300,8 +300,8 @@ function finalText(result, messages) {
 const failure = (reason, extra = {}) => ({ ok: false, reason, model: null, responseId: null, usage: null, ...extra });
 
 // The exact body of the generation request, also the input a recording is bound to.
-function generationBody(body) {
-  return { ...body, store: false, reasoning: { effort: 'low' }, max_output_tokens: MAX_OUTPUT_TOKENS };
+function generationBody(body, effort = 'low') {
+  return { ...body, store: false, reasoning: { effort }, max_output_tokens: MAX_OUTPUT_TOKENS };
 }
 
 // A recording replays only for a byte-identical generation request: the same
@@ -337,8 +337,11 @@ export function readPlan(result, record) {
 // admission callback nothing is sent. The key is sent only in the
 // Authorization header and never logged. Resolves to a failure, or to
 // { ok: true, result, generation, record } for a 2xx answer.
-export function createMetaSender({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS }) {
+// reasoningEffort is for offline evaluation only; every app caller keeps 'low'.
+export const REASONING_EFFORTS = Object.freeze(['low', 'medium']);
+export function createMetaSender({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, reasoningEffort = 'low' }) {
   if (!apiKey) throw new Error('A model API key is required.');
+  if (!REASONING_EFFORTS.includes(reasoningEffort)) throw new Error('The reasoning effort is not supported.');
   const post = async (route, body, signal) => {
     const response = await fetch(`${META_API}/${route}`, {
       method: 'POST',
@@ -380,7 +383,7 @@ export function createMetaSender({ apiKey, ledger, fetch = globalThis.fetch, tim
 
     let generated;
     let sending = null;
-    const generation = generationBody(body);
+    const generation = generationBody(body, reasoningEffort);
     let started = null;
     try {
       sending = await admit(() => {

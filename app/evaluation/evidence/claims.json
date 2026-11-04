@@ -1,0 +1,463 @@
+{
+ "schemaVersion": 1,
+ "title": "Owner evidence review: expected verdicts for public HABS photographs",
+ "label": "Expected verdicts written by the development team (AI-assisted), not independent annotators. They describe what we expect a careful viewer to see in these photographs, never historical truth.",
+ "verdictRule": "A claim's verdict is conflicts if any finding conflicts, supports if every finding supports, not_visible if every finding is not_visible, and mixed otherwise.",
+ "photos": [
+  {
+   "id": "A-15",
+   "file": "habs-az135a-15.jpg",
+   "sha256": "94a045805e79fe560da0104c641523dcc36d92a3577d80afd8ee0e0e2cbaebdc",
+   "caption": "Interior view of lobby of main lodge",
+   "rights": "HABS survey photograph by Richard Frear, July 1982 (HABS AZ-135-A, Grand Canyon Lodge). U.S. Government work; the Library of Congress lists no known restrictions on images made by the U.S. Government (https://www.loc.gov/rr/print/res/114_habs.html).",
+   "credit": "Richard Frear, July 1982. HABS AZ-135-A-15, Library of Congress."
+  },
+  {
+   "id": "A-16",
+   "file": "habs-az135a-16.jpg",
+   "sha256": "3709133053b8114373882c9bd6b5bcc58e8bf92900a57d7e1170070cc6e1a573",
+   "caption": "Interior view of dining room of main lodge",
+   "rights": "HABS survey photograph by Richard Frear, July 1982 (HABS AZ-135-A, Grand Canyon Lodge). U.S. Government work; the Library of Congress lists no known restrictions on images made by the U.S. Government (https://www.loc.gov/rr/print/res/114_habs.html).",
+   "credit": "Richard Frear, July 1982. HABS AZ-135-A-16, Library of Congress."
+  },
+  {
+   "id": "A-18",
+   "file": "habs-az135a-18.jpg",
+   "sha256": "dace8d5bb84a541d1ed052fc1f30a601957fcf48b0f7421a470174aa9eff6516",
+   "caption": "Interior view of sun room of main lodge, looking towards lobby",
+   "rights": "HABS survey photograph by Richard Frear, July 1982 (HABS AZ-135-A, Grand Canyon Lodge). U.S. Government work; the Library of Congress lists no known restrictions on images made by the U.S. Government (https://www.loc.gov/rr/print/res/114_habs.html).",
+   "credit": "Richard Frear, July 1982. HABS AZ-135-A-18, Library of Congress."
+  },
+  {
+   "id": "A-19",
+   "file": "habs-az135a-19.jpg",
+   "sha256": "ee61f2f747a42bccc0a02557a96d9920a7435d937d637230cd4e909a805178fb",
+   "caption": "Interior view of recreation room of main lodge looking east",
+   "rights": "HABS survey photograph by Richard Frear, July 1982 (HABS AZ-135-A, Grand Canyon Lodge). U.S. Government work; the Library of Congress lists no known restrictions on images made by the U.S. Government (https://www.loc.gov/rr/print/res/114_habs.html).",
+   "credit": "Richard Frear, July 1982. HABS AZ-135-A-19, Library of Congress."
+  },
+  {
+   "id": "A-20",
+   "file": "habs-az135a-20.jpg",
+   "sha256": "58993684715a972644e1b2542016c72b1936d706f043d2dff1d44da70e60cbd2",
+   "caption": "Detail of wall light fixture in recreation room of main lodge",
+   "rights": "HABS survey photograph by Richard Frear, July 1982 (HABS AZ-135-A, Grand Canyon Lodge). U.S. Government work; the Library of Congress lists no known restrictions on images made by the U.S. Government (https://www.loc.gov/rr/print/res/114_habs.html).",
+   "credit": "Richard Frear, July 1982. HABS AZ-135-A-20, Library of Congress."
+  },
+  {
+   "id": "A-26",
+   "file": "habs-az135a-26.jpg",
+   "sha256": "65a8124abc58b8c65f526b6aeff4b07c782cd8b12de1139e9688ec7a11af4129",
+   "caption": "Wicker chest and rocking chair",
+   "rights": "HABS survey photograph by Richard Frear, July 1982 (HABS AZ-135-A, Grand Canyon Lodge). U.S. Government work; the Library of Congress lists no known restrictions on images made by the U.S. Government (https://www.loc.gov/rr/print/res/114_habs.html).",
+   "credit": "Richard Frear, July 1982. HABS AZ-135-A-26, Library of Congress."
+  }
+ ],
+ "claims": [
+  {
+   "id": "s01",
+   "photos": [
+    "A-15"
+   ],
+   "note": "I think a large patterned rug hung on the stone wall of the lobby.",
+   "expected": "supports",
+   "expectedSource": "A-15",
+   "rationale": "A large geometric-patterned rug hangs on the stone wall at the right."
+  },
+  {
+   "id": "s02",
+   "photos": [
+    "A-15"
+   ],
+   "note": "I think the lobby had a front desk with a light-colored countertop.",
+   "expected": "supports",
+   "expectedSource": "A-15",
+   "rationale": "A long desk with a pale top stands in the middle of the lobby floor."
+  },
+  {
+   "id": "s03",
+   "photos": [
+    "A-16"
+   ],
+   "note": "I think the dining room had exposed log roof trusses.",
+   "expected": "supports",
+   "expectedSource": "A-16",
+   "rationale": "Log trusses and rafters fill the top of the frame."
+  },
+  {
+   "id": "s04",
+   "photos": [
+    "A-16"
+   ],
+   "note": "I think the dining tables were covered with white tablecloths.",
+   "expected": "supports",
+   "expectedSource": "A-16",
+   "rationale": "Many tables in the foreground and middle carry pale cloths."
+  },
+  {
+   "id": "s05",
+   "photos": [
+    "A-16"
+   ],
+   "note": "I think a woven rug hung on the stone wall of the dining room.",
+   "expected": "supports",
+   "expectedSource": "A-16",
+   "rationale": "A patterned rug hangs on the stone wall at the right."
+  },
+  {
+   "id": "s06",
+   "photos": [
+    "A-18"
+   ],
+   "note": "I think the sun room had a large stone fireplace.",
+   "expected": "supports",
+   "expectedSource": "A-18",
+   "rationale": "A stone fireplace opening is centered in the stone wall."
+  },
+  {
+   "id": "s07",
+   "photos": [
+    "A-18"
+   ],
+   "note": "I think a wooden balcony railing with crossed X patterns overlooked the sun room.",
+   "expected": "supports",
+   "expectedSource": "A-18",
+   "rationale": "A railing with X-shaped bracing runs along the opening at the upper left."
+  },
+  {
+   "id": "s08",
+   "photos": [
+    "A-18"
+   ],
+   "note": "I think a padded bench stood in front of the fireplace.",
+   "expected": "supports",
+   "expectedSource": "A-18",
+   "rationale": "A cushioned bench sits on the floor to the left of the fireplace."
+  },
+  {
+   "id": "s09",
+   "photos": [
+    "A-19"
+   ],
+   "note": "I think rows of chairs were set out in the recreation room.",
+   "expected": "supports",
+   "expectedSource": "A-19",
+   "rationale": "Many chairs stand in rows across the floor."
+  },
+  {
+   "id": "s10",
+   "photos": [
+    "A-19"
+   ],
+   "note": "I think round iron chandeliers with candle-style lights hung in the recreation room.",
+   "expected": "supports",
+   "expectedSource": "A-19",
+   "rationale": "Ring chandeliers with candle-shaped bulbs hang from the trusses."
+  },
+  {
+   "id": "s11",
+   "photos": [
+    "A-20"
+   ],
+   "note": "I think the wall light had two curved horn-like arms.",
+   "expected": "supports",
+   "expectedSource": "A-20",
+   "rationale": "Two curved dark arms rise from the top of the fixture."
+  },
+  {
+   "id": "s12",
+   "photos": [
+    "A-26"
+   ],
+   "note": "I think the rocking chair had a cushioned seat.",
+   "expected": "supports",
+   "expectedSource": "A-26",
+   "rationale": "A thick cushion lies on the rocking chair's seat."
+  },
+  {
+   "id": "s13",
+   "photos": [
+    "A-26"
+   ],
+   "note": "I think the wicker chest had three rows of drawers.",
+   "expected": "supports",
+   "expectedSource": "A-26",
+   "rationale": "The chest front shows a split top row and two full-width rows below it."
+  },
+  {
+   "id": "s14",
+   "photos": [
+    "A-16",
+    "A-26"
+   ],
+   "note": "I think the dining room tables had white tablecloths.",
+   "expected": "supports",
+   "expectedSource": "A-16",
+   "rationale": "Tablecloths are visible in the dining-room photo; the other photo is outdoors."
+  },
+  {
+   "id": "s15",
+   "photos": [
+    "A-19",
+    "A-20"
+   ],
+   "note": "I think the recreation room had rows of chairs.",
+   "expected": "supports",
+   "expectedSource": "A-19",
+   "rationale": "Rows of chairs are visible in the room view; the other photo is a close detail."
+  },
+  {
+   "id": "s16",
+   "photos": [
+    "A-15",
+    "A-18"
+   ],
+   "note": "I think the sun room had a fireplace.",
+   "expected": "supports",
+   "expectedSource": "A-18",
+   "rationale": "Only the sun-room photo shows a fireplace."
+  },
+  {
+   "id": "c01",
+   "photos": [
+    "A-15"
+   ],
+   "note": "I think the lobby had a low, flat ceiling.",
+   "expected": "conflicts",
+   "expectedSource": "A-15",
+   "rationale": "The lobby is open to a tall pitched roof of log trusses."
+  },
+  {
+   "id": "c02",
+   "photos": [
+    "A-15"
+   ],
+   "note": "I think the lobby walls were smooth plaster with no stonework.",
+   "expected": "conflicts",
+   "expectedSource": "A-15",
+   "rationale": "Rough stone piers and walls are prominent."
+  },
+  {
+   "id": "c03",
+   "photos": [
+    "A-16"
+   ],
+   "note": "I think the dining room was empty, with no tables or chairs.",
+   "expected": "conflicts",
+   "expectedSource": "A-16",
+   "rationale": "The floor is filled with set tables and chairs."
+  },
+  {
+   "id": "c04",
+   "photos": [
+    "A-16"
+   ],
+   "note": "I think the dining room floor was bare, with no carpet.",
+   "expected": "conflicts",
+   "expectedSource": "A-16",
+   "rationale": "A patterned carpet covers the floor between the tables."
+  },
+  {
+   "id": "c05",
+   "photos": [
+    "A-18"
+   ],
+   "note": "I think the sun room had a smooth plaster ceiling.",
+   "expected": "conflicts",
+   "expectedSource": "A-18",
+   "rationale": "The ceiling is made of exposed round logs."
+  },
+  {
+   "id": "c06",
+   "photos": [
+    "A-18"
+   ],
+   "note": "I think a fire was burning in the sun room fireplace.",
+   "expected": "not_visible",
+   "expectedSource": null,
+   "rationale": "One frame shows the firebox dark and empty, but a fire may have burned at another moment, so a single photograph cannot settle this transient state."
+  },
+  {
+   "id": "c07",
+   "photos": [
+    "A-19"
+   ],
+   "note": "I think the recreation room had a carpeted floor.",
+   "expected": "conflicts",
+   "expectedSource": "A-19",
+   "rationale": "The floor is bare, polished wood with reflections."
+  },
+  {
+   "id": "c08",
+   "photos": [
+    "A-19"
+   ],
+   "note": "I think the recreation room had no windows.",
+   "expected": "conflicts",
+   "expectedSource": "A-19",
+   "rationale": "Several windows are visible on the right wall and the far wall."
+  },
+  {
+   "id": "c09",
+   "photos": [
+    "A-20"
+   ],
+   "note": "I think the wall light had a round glass globe shade.",
+   "expected": "conflicts",
+   "expectedSource": "A-20",
+   "rationale": "The fixture is cut flat metal with no globe."
+  },
+  {
+   "id": "c10",
+   "photos": [
+    "A-26"
+   ],
+   "note": "I think the rocking chair stood on a paved terrace.",
+   "expected": "conflicts",
+   "expectedSource": "A-26",
+   "rationale": "The chair stands on grass at the edge of a forest."
+  },
+  {
+   "id": "c11",
+   "photos": [
+    "A-26"
+   ],
+   "note": "I think the wicker chest had glass doors.",
+   "expected": "conflicts",
+   "expectedSource": "A-26",
+   "rationale": "The chest front has drawers with knobs, not glass doors."
+  },
+  {
+   "id": "n01",
+   "photos": [
+    "A-15"
+   ],
+   "note": "I think the rug on the lobby wall was red and black.",
+   "expected": "not_visible",
+   "expectedSource": "A-15",
+   "rationale": "The photograph is black and white, so colors cannot be judged."
+  },
+  {
+   "id": "n02",
+   "photos": [
+    "A-15"
+   ],
+   "note": "I think the lobby desk clerk was named Mary.",
+   "expected": "not_visible",
+   "expectedSource": null,
+   "rationale": "A name cannot be seen in the photograph."
+  },
+  {
+   "id": "n03",
+   "photos": [
+    "A-16"
+   ],
+   "note": "I think breakfast in the dining room was served at seven.",
+   "expected": "not_visible",
+   "expectedSource": null,
+   "rationale": "Meal times are not visible."
+  },
+  {
+   "id": "n04",
+   "photos": [
+    "A-16"
+   ],
+   "note": "I think the dining room windows looked out over the canyon.",
+   "expected": "not_visible",
+   "expectedSource": "A-16",
+   "rationale": "The windows are overexposed; the view outside cannot be seen."
+  },
+  {
+   "id": "n05",
+   "photos": [
+    "A-18"
+   ],
+   "note": "I think the sun room windows faced the canyon.",
+   "expected": "not_visible",
+   "expectedSource": "A-18",
+   "rationale": "The direction and the view outside are not visible."
+  },
+  {
+   "id": "n06",
+   "photos": [
+    "A-18"
+   ],
+   "note": "I think the fireplace stones were reddish sandstone.",
+   "expected": "not_visible",
+   "expectedSource": "A-18",
+   "rationale": "The photograph is black and white, so stone color cannot be judged."
+  },
+  {
+   "id": "n07",
+   "photos": [
+    "A-19"
+   ],
+   "note": "I think square dances were held in the recreation room.",
+   "expected": "not_visible",
+   "expectedSource": null,
+   "rationale": "Events are not shown; the photo shows an empty room."
+  },
+  {
+   "id": "n08",
+   "photos": [
+    "A-19"
+   ],
+   "note": "I think the recreation room chairs were painted green.",
+   "expected": "not_visible",
+   "expectedSource": "A-19",
+   "rationale": "The photograph is black and white."
+  },
+  {
+   "id": "n09",
+   "photos": [
+    "A-20"
+   ],
+   "note": "I think the wall light gave off a warm yellow glow.",
+   "expected": "not_visible",
+   "expectedSource": "A-20",
+   "rationale": "The light is not lit in the photo and the photo has no color."
+  },
+  {
+   "id": "n10",
+   "photos": [
+    "A-26"
+   ],
+   "note": "I think the rocking chair was used on the lodge veranda.",
+   "expected": "not_visible",
+   "expectedSource": null,
+   "rationale": "Use and usual location are not visible; the photo shows the chair outdoors on grass only."
+  },
+  {
+   "id": "n11",
+   "photos": [
+    "A-26"
+   ],
+   "note": "I think the wicker chest was made in 1928.",
+   "expected": "not_visible",
+   "expectedSource": null,
+   "rationale": "A manufacture date cannot be seen."
+  },
+  {
+   "id": "n12",
+   "photos": [
+    "A-16",
+    "A-26"
+   ],
+   "note": "I think a rocking chair stood in the dining room.",
+   "expected": "not_visible",
+   "expectedSource": null,
+   "rationale": "No rocking chair is visible in the dining-room photo; absence in one view does not show it was never there."
+  },
+  {
+   "id": "n13",
+   "photos": [
+    "A-15",
+    "A-19"
+   ],
+   "note": "I think the lobby had rows of chairs set out as for a lecture.",
+   "expected": "not_visible",
+   "expectedSource": null,
+   "rationale": "The lobby photo shows no such rows; absence in one view does not prove the claim false."
+  }
+ ]
+}
