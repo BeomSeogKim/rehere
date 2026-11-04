@@ -13,6 +13,12 @@ export const MAX_INPUT_TOKENS = 20_000;
 export const INPUT_USD = 1.25 / 1_000_000;
 export const OUTPUT_USD = 4.25 / 1_000_000;
 export const DEFAULT_LIMITS = Object.freeze({ totalUsd: 1, perRequestUsd: 0.05, maxRequests: 20 });
+// Full shared context as input plus the output ceiling, at Standard tariffs.
+// This conservative reservation is not a provider-enforced charge cap.
+export const COUNT_FREE_RESERVATION_USD = 1.328128;
+const COUNT_FREE_CONTEXT = 1_048_576;
+const COUNT_FREE_TOTAL_USD = 5.312512;
+const COUNT_FREE_REQUESTS = 4;
 const TIMEOUT_MS = 90_000;
 const RESPONSE_BYTES = 1024 * 1024;
 const SOURCE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -275,6 +281,59 @@ export class BudgetLedger {
     });
   }
 
+  async #countFreeState() {
+    const state = JSON.parse(await readFile(this.file, 'utf8'));
+    const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+    const money = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const groups = new Map(), ids = new Set();
+    if (!exact(state, ['entries']) || !Array.isArray(state.entries)) throw new Error('The model ledger is unreadable.');
+    for (const entry of state.entries) {
+      const tagged = entry?.admission === 'count-free';
+      if (!exact(entry, ['id', 'state', 'reservedUsd', 'estimatedUsd', 'at', ...(tagged ? ['admission', 'requestSha256', 'retryKeySha256', 'attempt', 'retryOf'] : [])])
+          || !SOURCE_ID.test(entry.id) || ids.has(entry.id) || !['reserved', 'settled'].includes(entry.state)
+          || !money(entry.reservedUsd) || (entry.state === 'reserved' ? entry.estimatedUsd !== null : !money(entry.estimatedUsd))
+          || typeof entry.at !== 'string' || !Number.isFinite(Date.parse(entry.at)) || new Date(entry.at).toISOString() !== entry.at) throw new Error('The model ledger is unreadable.');
+      ids.add(entry.id);
+      if (!tagged) continue;
+      const previous = groups.get(entry.retryKeySha256) ?? [];
+      if (!DIGEST.test(entry.requestSha256) || !DIGEST.test(entry.retryKeySha256) || entry.reservedUsd !== COUNT_FREE_RESERVATION_USD
+          || entry.attempt !== previous.length + 1 || entry.attempt > 2 || entry.retryOf !== (previous.at(-1)?.id ?? null)
+          || entry.state === 'settled' && entry.estimatedUsd !== 0) throw new Error('The count-free ledger is inconsistent.');
+      groups.set(entry.retryKeySha256, [...previous, entry]);
+    }
+    return { state, groups };
+  }
+
+  // Count-free use never creates or repairs a ledger. Its structural retry
+  // key groups reordered JSON while the wire digest preserves exact bytes.
+  reserveCountFree({ requestSha256, retryKeySha256 }) {
+    return this.serialize(async () => {
+      const { state, groups } = await this.#countFreeState();
+      const { totalUsd, perRequestUsd, maxRequests } = this.limits;
+      const money = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+      if (!money(totalUsd) || totalUsd <= 0 || totalUsd > COUNT_FREE_TOTAL_USD || perRequestUsd !== COUNT_FREE_RESERVATION_USD
+          || !Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > COUNT_FREE_REQUESTS) return null;
+      if (!DIGEST.test(requestSha256) || !DIGEST.test(retryKeySha256)) throw new Error('The model request binding is invalid.');
+      const previous = groups.get(retryKeySha256) ?? [];
+      const charged = state.entries.reduce((sum, entry) => sum + BudgetLedger.charged(entry), 0);
+      if (previous.length >= 2 || state.entries.length >= maxRequests || charged + COUNT_FREE_RESERVATION_USD > totalUsd) return null;
+      const id = randomUUID();
+      await this.write({ entries: [...state.entries, { id, state: 'reserved', reservedUsd: COUNT_FREE_RESERVATION_USD, estimatedUsd: null,
+        at: new Date().toISOString(), admission: 'count-free', requestSha256, retryKeySha256, attempt: previous.length + 1, retryOf: previous.at(-1)?.id ?? null }] });
+      return id;
+    });
+  }
+
+  releaseCountFreeUnsent(id) {
+    return this.serialize(async () => {
+      const { state } = await this.#countFreeState();
+      const entry = state.entries.find((item) => item.id === id);
+      if (entry?.admission !== 'count-free' || entry.state !== 'reserved') throw new Error('The model reservation could not be verified.');
+      await this.write({ entries: state.entries.map((item) => item.id === id ? { ...item, state: 'settled', estimatedUsd: 0 } : item) });
+    });
+  }
+
   settle(id, estimatedUsd) {
     return this.serialize(async () => {
       const state = await this.read();
@@ -419,10 +478,94 @@ export function createMetaSender({ apiKey, ledger, fetch = globalThis.fetch, tim
   };
 }
 
+const structuralOrder = (value) => Array.isArray(value) ? value.map(structuralOrder) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, structuralOrder(value[key])])) : value;
+
+function countFreeBody(body) {
+  const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+  if (!exact(body, ['model', 'instructions', 'input', 'text']) || body.model !== MODEL_ID || typeof body.instructions !== 'string'
+      || !Array.isArray(body.input) || body.input.length !== 1) return false;
+  const [message] = body.input;
+  if (!exact(message, ['role', 'content']) || message.role !== 'user' || !Array.isArray(message.content) || message.content.length !== 2) return false;
+  const [text, image] = message.content;
+  if (!exact(text, ['type', 'text']) || text.type !== 'input_text' || typeof text.text !== 'string'
+      || !exact(image, ['type', 'image_url']) || image.type !== 'input_image' || typeof image.image_url !== 'string') return false;
+  const encoded = /^data:image\/jpeg;base64,([A-Za-z0-9+/]+={0,2})$/.exec(image.image_url)?.[1];
+  if (!encoded) return false;
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.length === 0 || bytes.length > 1024 * 1024 || bytes.toString('base64') !== encoded) return false;
+  const format = body.text?.format;
+  if (!(exact(body.text, ['format']) && exact(format, ['type', 'name', 'strict', 'schema']) && format.type === 'json_schema'
+    && ['ScenePlan', 'AlternativePlan'].includes(format.name) && format.strict === true && format.schema?.type === 'object'
+    && format.schema.additionalProperties === false)) return false;
+  const schema = JSON.stringify(structuralOrder(format.schema));
+  return [TARGET_ID, 'object-1', 'object-2'].some((targetId) => {
+    const expected = { ...PLAN_SCHEMA, properties: { ...PLAN_SCHEMA.properties, targetId: nullable({ type: 'string', enum: [targetId] }) } };
+    return schema === JSON.stringify(structuralOrder(format.name === 'ScenePlan' ? expected : alternativeSchema(expected, VARIANT_PLAN_KEYS)));
+  });
+}
+
+// Explicit one-image, no-tool admission. Every started attempt keeps the full
+// reservation, even with valid usage. An admission envelope cannot prove that
+// its callback never started; only the independent local flag can do that.
+export function createCountFreeSender({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS }) {
+  if (!apiKey) throw new Error('A model API key is required.');
+  return async function send({ body, signal, admit }) {
+    if (typeof admit !== 'function') return failure('restricted');
+    if (!countFreeBody(body)) return failure('invalid');
+    const snapshot = JSON.parse(JSON.stringify(body));
+    if (!countFreeBody(snapshot)) return failure('invalid');
+    const generation = generationBody(snapshot);
+    const wire = JSON.stringify(generation);
+    const binding = { requestSha256: requestDigest(generation), retryKeySha256: requestDigest(structuralOrder(generation)) };
+    let reservation;
+    try { reservation = await ledger.reserveCountFree(binding); } catch { return failure('budget'); }
+    if (!reservation) return failure('budget');
+    const combined = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+    const stopped = () => failure(signal?.aborted ? 'canceled' : 'timeout');
+    let started = false, accepting = true, outbound = null, began = null;
+    const start = () => {
+      if (!accepting || combined.aborted) return Promise.resolve(null);
+      if (started) return outbound;
+      started = true; began = performance.now();
+      outbound = (async () => {
+        const response = await fetch(`${META_API}/responses`, { method: 'POST',
+          headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: wire, signal: combined, redirect: 'error' });
+        const raw = await readLimited(response, RESPONSE_BYTES);
+        let json = null;
+        try { json = JSON.parse(raw); } catch {}
+        return { ok: response.ok, status: response.status, json };
+      })();
+      outbound.catch(() => {});
+      return outbound;
+    };
+    let envelope = null, admissionFailed = false;
+    try { if (!combined.aborted) envelope = await admit(start); } catch { admissionFailed = true; }
+    accepting = false;
+    if (!started) {
+      try { await ledger.releaseCountFreeUnsent(reservation); } catch { return failure('budget'); }
+      return combined.aborted ? stopped() : failure('restricted');
+    }
+    if (admissionFailed || !envelope) return combined.aborted ? stopped() : failure('provider');
+    let response;
+    try { response = await outbound; } catch { return combined.aborted ? stopped() : failure('provider'); }
+    const rawUsage = response.json?.usage;
+    const validUsage = rawUsage && Number.isSafeInteger(rawUsage.input_tokens) && rawUsage.input_tokens >= 0
+      && Number.isSafeInteger(rawUsage.output_tokens) && rawUsage.output_tokens >= 0 && rawUsage.output_tokens <= MAX_OUTPUT_TOKENS
+      && rawUsage.input_tokens + rawUsage.output_tokens <= COUNT_FREE_CONTEXT;
+    const record = { ...responseRecord(response.json, validUsage ? knownUsage(rawUsage) : null), mode: 'live', latencyMs: Math.round(performance.now() - began) };
+    if (combined.aborted) return { ...stopped(), ...record };
+    if (!response.ok || !validUsage || response.json?.model !== MODEL_ID) return failure('provider', record);
+    return { ok: true, result: response.json, generation, record };
+  };
+}
+
 // The production proposal model: one live structured request per proposal.
 // Browser messages are chosen from `reason` by the caller.
-export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, recorder = null }) {
-  const send = createMetaSender({ apiKey, ledger, fetch, timeoutMs });
+export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, recorder = null, countFree = false }) {
+  if (typeof countFree !== 'boolean') throw new Error('Count-free admission needs an explicit boolean.');
+  const send = countFree ? createCountFreeSender({ apiKey, ledger, fetch, timeoutMs }) : createMetaSender({ apiKey, ledger, fetch, timeoutMs });
   let busy = false;
   return async function proposalModel({ text, image, selection, sourceId, baseVersion, saved, signal, admit, targetId = TARGET_ID, objects = null, relationship = null, representation = null, images = null, sourceIds = null, arrangement = null, alternative = null }) {
     if (typeof admit !== 'function') return failure('restricted');
@@ -525,17 +668,23 @@ export function responseRecorder(file) {
 // are a separate, explicit mode and cannot be combined with live use.
 export function metaModelFromEnv({ ledgerFile, env = process.env }) {
   const live = env.REHERE_MODEL_LIVE === '1';
+  if (![undefined, '', '0', '1'].includes(env.REHERE_MODEL_COUNT_FREE)) throw new Error('The count-free setting must be 0 or 1.');
+  const countFree = env.REHERE_MODEL_COUNT_FREE === '1';
   if (env.REHERE_MODEL_REPLAY) {
+    if (countFree) throw new Error('Count-free admission cannot be combined with stored responses.');
     if (live || env.REHERE_MODEL_RECORD) throw new Error('Stored model responses cannot be combined with live use or recording.');
     return createStoredModel({ entries: parseStoredResponses(JSON.parse(readFileSync(env.REHERE_MODEL_REPLAY, 'utf8'))) });
   }
   if (env.REHERE_MODEL_RECORD && !live) throw new Error('Recording model responses needs live use.');
   if (!env.MODEL_API_KEY || !live) return null;
+  if (countFree && (!env.REHERE_MODEL_TOTAL_USD?.trim() || !env.REHERE_MODEL_MAX_REQUESTS?.trim())) throw new Error('Count-free admission needs explicit bounded limits.');
+  const requestLimit = countFree ? limit(env.REHERE_MODEL_MAX_REQUESTS, COUNT_FREE_REQUESTS) : null;
+  if (countFree && !Number.isInteger(requestLimit)) throw new Error('The count-free request limit must be an integer.');
   const limits = {
-    totalUsd: limit(env.REHERE_MODEL_TOTAL_USD, DEFAULT_LIMITS.totalUsd),
-    perRequestUsd: DEFAULT_LIMITS.perRequestUsd,
-    maxRequests: Math.floor(limit(env.REHERE_MODEL_MAX_REQUESTS, DEFAULT_LIMITS.maxRequests)),
+    totalUsd: limit(env.REHERE_MODEL_TOTAL_USD, countFree ? COUNT_FREE_TOTAL_USD : DEFAULT_LIMITS.totalUsd),
+    perRequestUsd: countFree ? COUNT_FREE_RESERVATION_USD : DEFAULT_LIMITS.perRequestUsd,
+    maxRequests: countFree ? requestLimit : Math.floor(limit(env.REHERE_MODEL_MAX_REQUESTS, DEFAULT_LIMITS.maxRequests)),
   };
   const recorder = env.REHERE_MODEL_RECORD ? responseRecorder(env.REHERE_MODEL_RECORD) : null;
-  return createMetaModel({ apiKey: env.MODEL_API_KEY, ledger: new BudgetLedger({ file: ledgerFile, limits }), recorder });
+  return createMetaModel({ apiKey: env.MODEL_API_KEY, ledger: new BudgetLedger({ file: ledgerFile, limits }), recorder, countFree });
 }

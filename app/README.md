@@ -425,6 +425,54 @@ retain their reservation. Recorded costs are estimates, not billing receipts.
 These limits coordinate one process and are not provider-enforced spending
 caps. Check current account credits and usage before each live batch.
 
+An operator can instead explicitly select conservative count-free admission
+for one-photo proposals. It sends no token-count request. The model remains
+`muse-spark-1.3` at Standard pricing, with one user message, one inline JPEG,
+no tools or history and a 4096-token output ceiling. Two-photo compositions
+are refused in this mode. The default counted path and other model callers
+keep their existing limits and behavior.
+
+In addition to the key and `REHERE_MODEL_LIVE=1`, this mode requires
+`REHERE_MODEL_COUNT_FREE=1`, an explicit `REHERE_MODEL_TOTAL_USD` no greater
+than `5.312512`, and an explicit integer `REHERE_MODEL_MAX_REQUESTS` from 1
+through 4. Missing, invalid or larger limits are refused. Each attempt
+reserves exactly USD 1.328128 before any generation can start, using the full
+1,048,576-token shared context as input plus the output ceiling at the listed
+tariffs. This deliberately double-counts the shared output space; it is a
+conservative estimate under that model contract, not a billing guarantee.
+
+Count-free admission requires an existing valid `data/model-budget.json`.
+It never creates, repairs or resets one. Only in a newly approved isolated
+workspace with no prior ledger or spending history, initialize it using
+exclusive creation; an existing ledger must be retained, including counted
+requests and their charges:
+
+```sh
+node --input-type=module -e 'import { writeFile } from "node:fs/promises"; await writeFile("data/model-budget.json", "{\"entries\":[]}", { flag: "wx", mode: 0o600 });'
+```
+
+Deleting a ledger or choosing a new data directory does not erase prior
+provider charges. A missing or incompatible ledger after use must be
+investigated rather than initialized again. This guard coordinates one
+ledger instance in one server process; it is not an account-wide or
+provider-enforced cap.
+
+Every dispatched attempt retains the full reservation, including successful
+responses with known usage. Reported provider usage remains separate from
+that conservative local reservation. HTTP errors, unknown outcomes,
+timeouts, invalid or out-of-bound usage never recycle it. Only work proven
+not to have started can release its reservation. Ledger entries bind exact
+transmitted bytes and a separate structural retry key; object-key order and
+external request IDs cannot bypass the two-attempt ceiling for the same
+request. String bytes and array order remain significant. An exact app retry
+reopens its saved receipt; a deliberate new attempt still requires explicit
+authorization. Nothing retries automatically.
+
+Four full Spark reservations total USD 5.312512. Two one-minute voice attempts
+would add a separate USD 0.006; the Spark ledger does not enforce that voice
+budget, concurrent use, billing lag or undocumented fees. Establish shared
+headroom and approve the concrete batch separately before dispatch.
+
 With live use, `REHERE_MODEL_RECORD=<file>` saves each successful response
 unchanged, bound to a hash of its exact request. A separate process started
 with only `REHERE_MODEL_REPLAY=<file>` answers from that file: it sends and
