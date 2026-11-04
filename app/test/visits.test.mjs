@@ -331,6 +331,24 @@ describe('visitor screen', () => {
     v.view.dispose();
   });
 
+  it('shows reviewed-story attribution without disclosing words or fetching an unselected recording', async () => {
+    const data = manifest();
+    data.views[1].evidence.support = [{ kind: 'reviewed_story', providerLabel: 'Synthetic voice contributor', captionAuthorLabel: 'Workspace owner', captionDraft: { model: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe' }, status: 'owner-selected' }];
+    data.views[1].evidence.recollections = [];
+    const src = source({ manifest: async () => data });
+    src.storyAudio = () => assert.fail('No story selected for sharing');
+    const v = open(src);
+    await flush();
+    v.button('Mina’s recollection').dispatch('click');
+    const details = v.find((node) => node.className === 'visit-details')[0];
+    assert.match(details.textContent, /a reviewed story by Synthetic voice contributor, selected by the owner/);
+    assert.match(details.textContent, /Captions AI-drafted \(Muse Voice Transcribe\), reviewed by Workspace owner/);
+    assert.match(details.textContent, /does not include the story’s words or establish historical truth/);
+    assert.equal(v.find((node) => node.tag === 'audio').length, 0);
+    assert.doesNotMatch(details.textContent, /The counter <b>|based on these words/);
+    v.view.dispose();
+  });
+
   it('closes everything at the first failed heartbeat and shows only a generic message', async () => {
     let allowed = true;
     const v = open(source({ check: () => Promise.resolve(allowed) }));

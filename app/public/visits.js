@@ -207,6 +207,10 @@ function viewDetails(view, labelOf, summary = [], nameOf = objectNames(null)) {
     ? "Arrangement: the owner approved a model's proposed placement change based on these shared words. This is not verified history."
     : arrangementText(view.evidence?.arrangement) }));
   for (const support of view.evidence?.support ?? []) {
+    if (support?.kind === 'reviewed_story') {
+      nodes.push(el('p', { className: 'hint', textContent: `Source attribution: a reviewed story by ${support.providerLabel || 'an unnamed provider'}, selected by the owner. ${support.captionDraft ? `Captions AI-drafted (${support.captionDraft.label || support.captionDraft.model || 'model not recorded'}), reviewed by` : 'Captions written by'} ${support.captionAuthorLabel || 'the owner'}. This attribution does not include the story’s words or establish historical truth.` }));
+      continue;
+    }
     if (support?.kind !== 'human_recollection') continue;
     nodes.push(
       el('p', {
