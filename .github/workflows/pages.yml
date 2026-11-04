@@ -16,9 +16,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: demo-2026-11-05-penn
-  ASSET_NAME: rehere-penn-update6-site.zip
-  ASSET_SHA256: abcafd77b44a683e42536a67debb258d5814c81a44a99e66b02b72aa78f3b2c6
+  RELEASE_TAG: demo-2026-11-05-penn-openai
+  ASSET_NAME: rehere-penn-openai-site.zip
+  ASSET_SHA256: ae0d06ec1004c36c56821415abeb8085a1a4ebf234a82ef487a9c7776b6e9e02
 
 jobs:
   deploy:
