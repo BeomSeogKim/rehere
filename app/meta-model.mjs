@@ -314,8 +314,8 @@ function responseRecord(result, usage) {
   return { model: typeof result?.model === 'string' ? result.model.slice(0, 120) : null, responseId: typeof result?.id === 'string' ? result.id.slice(0, 200) : null, usage };
 }
 
-// Reads the plan from a provider response that arrived with a 2xx status.
-function readPlan(result, record) {
+// Reads the JSON answer from a provider response that arrived with a 2xx status.
+export function readPlan(result, record) {
   const messages = Array.isArray(result?.output) ? result.output.filter((item) => item?.type === 'message') : [];
   const parts = messages.flatMap((item) => (Array.isArray(item.content) ? item.content : []));
   if (parts.some((part) => part?.type === 'refusal')) return failure('refused', record);
@@ -330,15 +330,15 @@ function readPlan(result, record) {
   return { ok: true, plan, ...record };
 }
 
-// The production proposal model. Count, reserve, then generate once; there are
+// One live structured request: count, reserve, then generate once; there are
 // no automatic retries. Each outbound request starts only through `admit`,
 // which the caller runs under its policy mutex: `admit(start)` resolves to
 // { value: start() } when the step is still allowed, or null. Without an
-// admission callback nothing is sent. The key is sent only in the Authorization header and
-// never logged; browser messages are chosen from `reason` by the caller.
-export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, recorder = null }) {
+// admission callback nothing is sent. The key is sent only in the
+// Authorization header and never logged. Resolves to a failure, or to
+// { ok: true, result, generation, record } for a 2xx answer.
+export function createMetaSender({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS }) {
   if (!apiKey) throw new Error('A model API key is required.');
-  let busy = false;
   const post = async (route, body, signal) => {
     const response = await fetch(`${META_API}/${route}`, {
       method: 'POST',
@@ -355,70 +355,84 @@ export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, time
     return { ok: response.ok, status: response.status, json };
   };
 
+  return async function send({ body, signal, admit }) {
+    if (typeof admit !== 'function') return failure('restricted');
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const stopped = () => failure(signal?.aborted ? 'canceled' : 'timeout');
+    let counted;
+    try {
+      const counting = await admit(() => post('responses/input_tokens', Object.fromEntries(COUNT_KEYS.map((key) => [key, body[key]])), combined));
+      if (!counting) return combined.aborted ? stopped() : failure('restricted');
+      counted = await counting.value;
+    } catch {
+      return combined.aborted ? stopped() : failure('provider');
+    }
+    const tokens = counted.json?.input_tokens;
+    if (!counted.ok || !Number.isInteger(tokens) || tokens < 0) {
+      console.error(`model token count failed: HTTP ${counted.status}`);
+      return failure('provider');
+    }
+    if (tokens > MAX_INPUT_TOKENS) return failure('tooLarge');
+    if (combined.aborted) return stopped();
+    const reservation = await ledger.reserve(tokens * INPUT_USD + MAX_OUTPUT_TOKENS * OUTPUT_USD);
+    if (!reservation) return failure('budget');
+
+    let generated;
+    let sending = null;
+    const generation = generationBody(body);
+    let started = null;
+    try {
+      sending = await admit(() => {
+        started = performance.now();
+        return post('responses', generation, combined);
+      });
+    } catch {
+      sending = null;
+    }
+    if (!sending) {
+      // The request was never started, so nothing can be charged for it.
+      await ledger.settle(reservation, 0);
+      return combined.aborted ? stopped() : failure('restricted');
+    }
+    try {
+      generated = await sending.value;
+    } catch {
+      // A request that got no HTTP answer records no mode or latency; only
+      // its retained reservation shows it may have been charged.
+      return combined.aborted ? stopped() : failure('provider');
+    }
+    const latencyMs = Math.round(performance.now() - started);
+    const result = generated.json;
+    const usage = knownUsage(result?.usage);
+    if (usage) await ledger.settle(reservation, usage.estimatedUsd);
+    const record = { ...responseRecord(result, usage), mode: 'live', latencyMs };
+    if (combined.aborted) return { ...stopped(), ...record };
+    if (!generated.ok) {
+      console.error(`model generation failed: HTTP ${generated.status}`);
+      return failure('provider', record);
+    }
+    return { ok: true, result, generation, record };
+  };
+}
+
+// The production proposal model: one live structured request per proposal.
+// Browser messages are chosen from `reason` by the caller.
+export function createMetaModel({ apiKey, ledger, fetch = globalThis.fetch, timeoutMs = TIMEOUT_MS, recorder = null }) {
+  const send = createMetaSender({ apiKey, ledger, fetch, timeoutMs });
+  let busy = false;
   return async function proposalModel({ text, image, selection, sourceId, baseVersion, saved, signal, admit, targetId = TARGET_ID, objects = null, relationship = null, representation = null, images = null, sourceIds = null, arrangement = null, alternative = null }) {
     if (typeof admit !== 'function') return failure('restricted');
     if (busy) return failure('busy');
     busy = true;
-    const timeout = AbortSignal.timeout(timeoutMs);
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    const stopped = () => failure(signal?.aborted ? 'canceled' : 'timeout');
     try {
       const body = requestBody({ text, image, selection, sourceId, baseVersion, saved, targetId, objects, relationship, representation, images, sourceIds, arrangement, alternative });
-      let counted;
-      try {
-        const counting = await admit(() => post('responses/input_tokens', Object.fromEntries(COUNT_KEYS.map((key) => [key, body[key]])), combined));
-        if (!counting) return combined.aborted ? stopped() : failure('restricted');
-        counted = await counting.value;
-      } catch {
-        return combined.aborted ? stopped() : failure('provider');
-      }
-      const tokens = counted.json?.input_tokens;
-      if (!counted.ok || !Number.isInteger(tokens) || tokens < 0) {
-        console.error(`model token count failed: HTTP ${counted.status}`);
-        return failure('provider');
-      }
-      if (tokens > MAX_INPUT_TOKENS) return failure('tooLarge');
-      if (combined.aborted) return stopped();
-      const reservation = await ledger.reserve(tokens * INPUT_USD + MAX_OUTPUT_TOKENS * OUTPUT_USD);
-      if (!reservation) return failure('budget');
-
-      let generated;
-      let sending = null;
-      const generation = generationBody(body);
-      let started = null;
-      try {
-        sending = await admit(() => {
-          started = performance.now();
-          return post('responses', generation, combined);
-        });
-      } catch {
-        sending = null;
-      }
-      if (!sending) {
-        // The request was never started, so nothing can be charged for it.
-        await ledger.settle(reservation, 0);
-        return combined.aborted ? stopped() : failure('restricted');
-      }
-      try {
-        generated = await sending.value;
-      } catch {
-        // A request that got no HTTP answer records no mode or latency; only
-        // its retained reservation shows it may have been charged.
-        return combined.aborted ? stopped() : failure('provider');
-      }
-      const latencyMs = Math.round(performance.now() - started);
-      const result = generated.json;
-      const usage = knownUsage(result?.usage);
-      if (usage) await ledger.settle(reservation, usage.estimatedUsd);
-      const record = { ...responseRecord(result, usage), mode: 'live', latencyMs };
-      if (combined.aborted) return { ...stopped(), ...record };
-      if (!generated.ok) {
-        console.error(`model generation failed: HTTP ${generated.status}`);
-        return failure('provider', record);
-      }
+      const sent = await send({ body, signal, admit });
+      if (!sent.ok) return sent;
+      const { result, generation, record } = sent;
       if (recorder) {
         try {
-          await recorder({ kind: 'recorded', requestSha256: requestDigest(generation), recordedAt: new Date().toISOString(), latencyMs, response: result });
+          await recorder({ kind: 'recorded', requestSha256: requestDigest(generation), recordedAt: new Date().toISOString(), latencyMs: record.latencyMs, response: result });
         } catch (error) {
           console.error(`model response recording failed: ${error.message}`);
         }
