@@ -66,8 +66,8 @@ The [earlier frozen Lodge snapshot](https://github.com/BeomSeogKim/rehere/releas
 was created at 08:42 UTC, before this run. Its "Alternative arrangement 2"
 records a -5 degree chest turn in a previously saved version; it is not a save
 of response `resp_6aeb1241f83ad239ef2d4477`. The exported manifest does not
-include the saved proposal's response ID, so that ID cannot be verified from
-this copy.
+include a model-response ID attributable to that saved turn, so that ID cannot
+be verified from this copy.
 
 **Evidence check.** Note: "The dining room had large windows looking out over
 the canyon." The model split it into three parts:
