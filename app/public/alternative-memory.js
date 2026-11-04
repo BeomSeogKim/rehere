@@ -37,7 +37,12 @@ export function boundAttributionLines(attribution) {
   ];
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const hidden = (proposal) => proposal?.redacted === true || typeof proposal?.statement?.text !== 'string';
+const hidden = (proposal) => {
+  const source = proposal?.statement?.source;
+  return proposal?.redacted === true || typeof proposal?.statement?.text !== 'string'
+    || (['contribution-text', 'story-captions'].includes(source?.kind)
+      && (proposal.statement.ownerReviewed !== true || !/^[a-f0-9]{64}$/.test(source.sourceSha256 ?? '') || proposal.statement.sha256 !== source.sourceSha256));
+};
 const statusText = (proposal) => ({ queued: 'Waiting to plan your instruction.', processing: 'Your instruction is being planned.', ready: 'A bounded change is proposed. Nothing has been saved.', clarify: 'More detail is needed. Nothing was saved.', applied: 'This proposal already created a saved alternative.', canceled: 'Planning canceled. No alternative was created.', interrupted: 'Planning was interrupted. No alternative was created.', stale: 'The parent or its time changed. Review it before planning again.', failed: 'A usable change could not be proposed. No alternative was created.' }[proposal?.status] ?? 'The proposal status could not be confirmed.');
 function el(tag, props = {}, children = []) { const node = document.createElement(tag); Object.assign(node, props); node.append(...children); return node; }
 async function request(url, body) {
@@ -73,7 +78,7 @@ export function mountAlternativeMemory(container, bridge) {
   let readToken = 0, pollToken = 0, timer = null, reportedLock = false;
   let proposals = [], createAttempt = null, applyAttempt = null, cancelAttempt = null;
   let createUnknown = false, applyUnknown = false, requestedInspect = bridge.initialProposalId ?? null;
-  const redacted = new Set();
+  const redacted = bridge.redactedProposalIds ?? new Set();
   const text = el('textarea', { rows: 3, maxLength: TEXT_LIMIT });
   text.setAttribute('aria-label', 'Remembered instruction for this alternative');
   const consent = el('input', { type: 'checkbox' });
@@ -106,14 +111,17 @@ export function mountAlternativeMemory(container, bridge) {
   const stopPoll = () => { clearTimeout(timer); timer = null; pollToken += 1; };
   const clearPreview = () => { const drawn = previewed; previewed = false; frontChecked = false; if (drawn) bridge.clearPreview(); };
   const scrub = (proposal) => {
-    if (hidden(proposal)) redacted.add(proposal.id);
+    if (hidden(proposal) && !redacted.has(proposal.id)) {
+      redacted.add(proposal.id);
+      bridge.onRedacted?.();
+    }
     return redacted.has(proposal.id) ? { ...proposal, redacted: true, statement: { text: null }, result: null, candidate: null, question: null } : proposal;
   };
   const update = (proposal) => {
     if (!validScope(proposal) || typeof proposal.id !== 'string') return false;
     const old = proposals.find((item) => item.id === proposal.id);
-    if (old && String(proposal.updatedAt ?? '') < String(old.updatedAt ?? '')) return true;
     const next = scrub(proposal);
+    if (old && !hidden(old) && !hidden(next) && String(proposal.updatedAt ?? '') < String(old.updatedAt ?? '')) return true;
     proposals = old ? proposals.map((item) => item.id === next.id ? next : item) : [next, ...proposals];
     if (selected === next.id && (hidden(next) || next.status !== 'ready')) clearPreview();
     return true;
@@ -145,6 +153,7 @@ export function mountAlternativeMemory(container, bridge) {
   }
   function render() {
     if (disposed) return;
+    proposals = proposals.map((proposal) => redacted.has(proposal.id) ? scrub(proposal) : proposal);
     const nowLocked = locked();
     if (nowLocked !== reportedLock) { reportedLock = nowLocked; bridge.setPending(nowLocked); }
     const binding = bridge.binding();
@@ -158,6 +167,7 @@ export function mountAlternativeMemory(container, bridge) {
     }
     if (reviewedBinding !== JSON.stringify(selectedSource)) {
       sourceReviewed.checked = false;
+      consent.checked = false;
       reviewedBinding = JSON.stringify(selectedSource);
     }
     sourceOptions.hidden = !choices.length;
@@ -182,7 +192,7 @@ export function mountAlternativeMemory(container, bridge) {
         ...(written.modelAllowed ? [] : [el('p', { className: 'hint', textContent: 'Model use is off for this written source.' })])]));
     text.hidden = useSource.checked || Boolean(selectedSource);
     const ready = selectedSource ? selectedSource.modelAllowed === true && sourceReviewed.checked : useSource.checked ? sourceUsable : Boolean(text.value.trim()) && text.value.length <= TEXT_LIMIT;
-    plan.disabled = busy || (!createAttempt && (!readable || nowLocked || Boolean(block) || !binding?.ready || !ready || !consent.checked));
+    plan.disabled = busy || (!createAttempt && (sourcesUnavailable || !readable || nowLocked || Boolean(block) || !binding?.ready || !ready || !consent.checked));
     plan.textContent = createAttempt ? 'Retry the earlier alternative plan' : 'Plan a change to this alternative';
     text.disabled = consent.disabled = nowLocked;
     refresh.disabled = busy;
@@ -205,7 +215,7 @@ export function mountAlternativeMemory(container, bridge) {
       cancel?.addEventListener('click', () => cancelPlan({ id: cancelAttempt.id }));
       review.replaceChildren(el('p', { className: 'hint', textContent: block || 'Choose a saved proposal to inspect it, or write a complete remembered instruction for a new plan.' }), ...(retry ? [retry] : []), ...(cancel ? [cancel] : [])); return;
     }
-    if (hidden(proposal)) {
+    if (sourcesUnavailable || hidden(proposal)) {
       const retry = applyAttempt ? el('button', { type: 'button', textContent: 'Retry saving the earlier alternative', disabled: busy }) : null;
       retry?.addEventListener('click', () => apply(proposal));
       const cancel = cancelAttempt ? el('button', { type: 'button', textContent: 'Retry canceling the earlier plan', disabled: busy }) : null;
@@ -293,7 +303,8 @@ export function mountAlternativeMemory(container, bridge) {
     const old = proposals;
     proposals = result.body.map((proposal) => {
       const before = old.find((item) => item.id === proposal.id);
-      return before && String(proposal.updatedAt ?? '') < String(before.updatedAt ?? '') ? before : scrub(proposal);
+      const next = scrub(proposal);
+      return before && !hidden(before) && !hidden(next) && String(proposal.updatedAt ?? '') < String(before.updatedAt ?? '') ? before : next;
     });
     if (requestedInspect && proposals.some((proposal) => proposal.id === requestedInspect)) { selected = requestedInspect; requestedInspect = null; bridge.selectScope?.(current()); }
     if (!proposals.some((proposal) => proposal.id === selected)) { selected = null; clearPreview(); }
@@ -315,6 +326,21 @@ export function mountAlternativeMemory(container, bridge) {
   }
   async function create() {
     if (plan.disabled || disposed) return;
+    if (!createAttempt && boundSource()) {
+      const reviewedSource = JSON.stringify(boundSource());
+      const scope = JSON.stringify(bridge.binding());
+      busy = true; clearPreview(); render();
+      const admitted = await bridge.admitParent?.();
+      if (disposed) return;
+      busy = false; render();
+      if (!admitted || sourcesUnavailable || !readable || !bridge.binding()?.ready || bridge.blocked?.()
+          || reviewedSource !== JSON.stringify(boundSource()) || scope !== JSON.stringify(bridge.binding())
+          || !sourceReviewed.checked || !consent.checked) {
+        sourceReviewed.checked = false; consent.checked = false;
+        note.textContent = 'The saved source or parent could not be confirmed unchanged. Review the current saved words and consent again before planning.';
+        render(); return;
+      }
+    }
     const binding = bridge.binding();
     const written = writtenSourceOf(bridge.writtenSource?.());
     // Only the server-resolved source identity is sent, never its words.
@@ -370,7 +396,16 @@ export function mountAlternativeMemory(container, bridge) {
   useSource.addEventListener('change', () => { clearPreview(); render(); });
   sourceSelect.addEventListener('change', () => { clearPreview(); useSource.checked = false; sourceReviewed.checked = false; consent.checked = false; render(); });
   sourceReviewed.addEventListener('change', () => { clearPreview(); render(); });
-  plan.addEventListener('click', create); refresh.addEventListener('click', read);
+  plan.addEventListener('click', create);
+  refresh.addEventListener('click', async () => {
+    if (busy || disposed) return;
+    busy = true; render();
+    const admitted = bridge.admitParent ? await bridge.admitParent() : true;
+    if (disposed) return;
+    busy = false;
+    if (admitted) await read();
+    else render();
+  });
   const fullObjectNote = el('p', { className: 'hint', hidden: !bridge.binding()?.edit?.fullObject, textContent: 'For this estimated object, a plan can move it left or right, toward or away, or turn it. Its height stays as in the parent, and its front is not known, so a request to face something asks you for an explicit turn instead.' });
   container.replaceChildren(el('h4', { textContent: 'Revise this alternative from a remembered instruction' }), fullObjectNote,
     el('p', { className: 'hint', textContent: 'Plan sends your instruction or explicitly chosen saved words, the permitted source photo selections and this parent’s object layout to Meta. Parent time wording and recordings are not added. Dates in your message do not change the selected unknown or re-confirmed time. Use public or synthetic photos only. The model cannot choose another parent, change the time, or infer relative size.' }), sourceChoice, sourceView, sourceOptions, boundSourceView, text,
@@ -378,8 +413,15 @@ export function mountAlternativeMemory(container, bridge) {
     el('div', { className: 'actions' }, [plan, refresh]), note, list, review);
   read();
   return {
+    admittedSources() {
+      if (sourcesUnavailable) {
+        sourcesUnavailable = false; reviewedBinding = null;
+        sourceReviewed.checked = false; consent.checked = false;
+      }
+      render();
+    },
     sync() { if (previewed && candidateProblem(current())) clearPreview(); render(); },
-    invalidate(reason, unavailable = false) { clearPreview(); if (unavailable) { sourcesUnavailable = true; readable = false; proposals = proposals.map((proposal) => ({ ...proposal, statement: { text: null }, result: null, candidate: null, question: null })); } note.textContent = reason; render(); },
+    invalidate(reason, unavailable = false) { clearPreview(); if (unavailable) { sourcesUnavailable = true; readable = false; readToken += 1; stopPoll(); proposals = proposals.map((proposal) => ({ ...proposal, statement: { text: null }, result: null, candidate: null, question: null })); } note.textContent = reason; render(); },
     inspect(id) { const proposal = proposals.find((item) => item.id === id); if (proposal) { selected = id; bridge.selectScope?.(proposal); if (ACTIVE.has(proposal.status)) poll(id); render(); } },
     hasPending: locked,
     dispose() { disposed = true; stopPoll(); readToken += 1; clearPreview(); container.replaceChildren(); },

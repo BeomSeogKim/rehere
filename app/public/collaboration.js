@@ -2272,7 +2272,7 @@ export function mountCollaboration(container, bridge) {
           item.append(el('span', { className: 'hint', textContent: variant.targetId ? `Kept for ${bridge.targets.nameOf(variant.targetId)}.` : 'The object for this arrangement was not recorded.' }));
         }
         if (variant.revision?.proposalId) {
-          const applied = alternativeTimelineMemory(variant, lineageProposals);
+          const applied = !redactedLineageIds.has(variant.revision.proposalId) && alternativeTimelineMemory(variant, lineageProposals);
           if (applied) {
             const kind = applied.statement.source?.kind;
             item.append(el('p', { className: 'hint', textContent: kind === 'contribution-text' ? 'Saved child from reviewed contributor writing.'
@@ -2449,7 +2449,7 @@ export function mountCollaboration(container, bridge) {
       timeNote.textContent = hidden ? '' : `Parent time: ${describeEra(mine.context.latestEra, variantLabel)}.${mine.context.latestEra?.statement ? ` Based on: ${mine.context.latestEra.statement}` : ''} A retained relative reference stays relative to the same alternative; no date is inferred.`;
       timeConfirm.hidden = hidden || time.value !== 'reconfirm-parent';
       mode.disabled = locked;
-      memoryHolder.hidden = mode.value !== 'memory' || (hidden && !mine.memory?.hasPending());
+      memoryHolder.hidden = mode.value !== 'memory' || ((!mine.context || mine.stale) && !mine.memory?.hasPending());
       [...mine.inputs, target, time, reaffirm].forEach((input) => { input.disabled = locked; });
       // An estimated full object keeps the parent's height in this release.
       if (mine.context?.edit?.fullObject && mine.inputs[1]) mine.inputs[1].disabled = true;
@@ -2500,6 +2500,7 @@ export function mountCollaboration(container, bridge) {
         mine.context.statementSources = context.statementSources ?? [];
         mine.context.writtenSource = context.writtenSource ?? null;
       }
+      if (!mine.unavailable) mine.memory?.admittedSources();
       mine.sync();
       return true;
     };
@@ -2603,6 +2604,8 @@ export function mountCollaboration(container, bridge) {
         parentId: mine.parentId,
         textureUrl: bridge.memoryTextureUrl ?? null,
         initialProposalId: memoryProposalId,
+        redactedProposalIds: redactedLineageIds,
+        onRedacted: () => { if (alive()) renderCompare(); },
         proposalUrl: `${bridge.jobUrl}/variants/${encodeURIComponent(mine.parentId)}/proposals`,
         binding: () => ({ parentVariantId: mine.parentId, baseEraRevision: mine.context.eraRevision, edit: mine.context.edit,
           targetId: mine.context.edit.objects ? mine.targetId : 'selected-foreground', timeMode: time.value,

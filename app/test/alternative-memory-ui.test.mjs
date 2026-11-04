@@ -441,9 +441,11 @@ describe('reviewed saved words for an alternative proposal', () => {
     routes[`POST ${PROPOSALS}`] = () => Promise.resolve(json(503, {}));
     ui.button('Plan a change to this alternative').dispatch('click'); await settle();
     const original = clone(creation()[0].body);
+    const admissions = requests.filter((entry) => entry.url === CONTEXT).length;
     form.instruction.value = 'A new owner instruction must not replace the pending source.';
     ui.button('Retry the earlier alternative plan').dispatch('click'); await settle();
     assert.deepEqual(creation()[1].body, original);
+    assert.equal(requests.filter((entry) => entry.url === CONTEXT).length, admissions, 'an exact retry does not admit or rewrite its sealed source again');
   });
 
   it('keeps voice provider, caption reviewer and model draft credit distinct', () => {
@@ -464,5 +466,140 @@ describe('reviewed saved words for an alternative proposal', () => {
     assert.match(review.textContent, /From the contributor’s exact saved writing/);
     assert.match(review.textContent, /Provided by Synthetic original provider/);
     assert.doesNotMatch(review.textContent, /Synthetic contributor A/);
+  });
+
+  it('keeps redacted lineage words and attribution hidden when Inspect mounts another reader', async () => {
+    const ui = await mount('legacy');
+    const applied = { ...proposal(ui), status: 'applied', appliedVariantId: CHILD,
+      statement: { text: 'Synthetic withdrawn words.', source: contribution.statementSource, ownerReviewed: true,
+        sha256: 'a'.repeat(64), attribution: { kind: 'contribution-text', providerLabel: 'Synthetic withdrawn provider' } } };
+    ui.setVariants([ui.parent, memoryChild(ui, applied)]);
+    routes[`GET ${PROPOSALS}`] = () => Promise.resolve(json(200, [{ ...applied, redacted: true, statement: { text: null } }]));
+    ui.button('Refresh').dispatch('click'); await settle();
+    routes[`GET ${PROPOSALS}`] = () => Promise.resolve(json(200, [applied]));
+    ui.button('Inspect saved memory proposal').dispatch('click'); await settle();
+    assert.doesNotMatch(ui.root.textContent, /Synthetic withdrawn words|Synthetic withdrawn provider/);
+    assert.match(ui.root.textContent, /no longer available/);
+  });
+
+  it('lets an older-timestamp list redaction override a newer readable proposal', async () => {
+    const ui = await mount('legacy');
+    const applied = { ...proposal(ui), status: 'applied', appliedVariantId: CHILD,
+      statement: { text: 'Synthetic concealed words.', source: contribution.statementSource, ownerReviewed: true,
+        sha256: 'a'.repeat(64), attribution: { kind: 'contribution-text', providerLabel: 'Synthetic concealed provider' } } };
+    ui.setVariants([ui.parent, memoryChild(ui, applied)]);
+    routes[`GET ${PROPOSALS}`] = () => Promise.resolve(json(200, [applied]));
+    ui.button('Refresh').dispatch('click'); await settle();
+    ui.button('Inspect saved memory proposal').dispatch('click'); await settle();
+    assert.match(ui.root.textContent, /Synthetic concealed words/);
+    routes[`GET ${PROPOSALS}`] = () => Promise.resolve(json(200, [{ ...applied, updatedAt: '2026-11-01T00:00:00Z', redacted: true, statement: { text: null } }]));
+    ui.button('Read saved alternative proposals').dispatch('click'); await settle();
+    assert.doesNotMatch(ui.root.textContent, /Synthetic concealed words|Synthetic concealed provider/);
+    routes[`GET ${PROPOSALS}`] = () => Promise.resolve(json(200, [applied]));
+    ui.button('Read saved alternative proposals').dispatch('click'); await settle();
+    assert.doesNotMatch(ui.root.textContent, /Synthetic concealed words|Synthetic concealed provider/);
+  });
+
+  it('lets an older-timestamp polled redaction override a newer planning proposal', async () => {
+    const ui = await mount('legacy'); await memory(ui);
+    const processing = { ...proposal(ui), status: 'processing', result: null, candidate: null,
+      statement: { text: 'Synthetic concealed planning words.' } };
+    routes[`POST ${PROPOSALS}`] = (body) => Promise.resolve(json(202, { ...processing, requestId: body.requestId }));
+    routes[`GET ${PROPOSALS}/${PROPOSAL}`] = () => Promise.resolve(json(200, { ...processing, status: 'stale',
+      updatedAt: '2026-11-01T00:00:00Z', redacted: true, statement: { text: null } }));
+    ui.button('Plan a change to this alternative').dispatch('click'); await settle();
+    assert.doesNotMatch(ui.root.textContent, /Synthetic concealed planning words/);
+    assert.match(ui.root.textContent, /no longer available/);
+  });
+
+  for (const invalid of [{ ownerReviewed: false }, { sha256: 'd'.repeat(64) }]) it(`withholds story words and attribution without an exact reviewed-source proof (${Object.keys(invalid)[0]})`, async () => {
+    const ui = await mount('legacy');
+    const applied = { ...proposal(ui), status: 'applied', appliedVariantId: CHILD,
+      statement: { text: 'Synthetic withheld caption words.', source: story.statementSource, ownerReviewed: true,
+        sha256: 'b'.repeat(64), attribution: story.attribution, ...invalid } };
+    ui.setVariants([ui.parent, memoryChild(ui, applied)]);
+    routes[`GET ${PROPOSALS}`] = () => Promise.resolve(json(200, [applied]));
+    ui.button('Refresh').dispatch('click'); await settle();
+    ui.button('Inspect saved memory proposal').dispatch('click'); await settle();
+    assert.doesNotMatch(ui.root.textContent, /Synthetic withheld caption words|Synthetic speaker B|Synthetic reviewer C/);
+    assert.match(ui.root.textContent, /no longer available/);
+  });
+
+  for (const restored of [true, false]) it(`recovers unavailable saved sources only through fresh parent admission (${restored ? 'restored' : 'withdrawn'})`, async () => {
+    const ui = await mount('legacy', { context: { statementSources: [contribution] } });
+    const form = await memory(ui), controls = sourceControls(ui);
+    chooseSource(controls, contribution); check(controls.reviewed); check(form.consent);
+    await plan(ui);
+    routes[`GET ${CONTEXT}`] = () => Promise.resolve(json(403, {}));
+    await previewMemory(ui);
+    assert.equal(ui.button('Read saved alternative proposals').parent.parent.hidden, false, 'fresh admission remains reachable after unavailable access');
+    ui.button('Read saved alternative proposals').dispatch('click'); await settle();
+    assert.equal(controls.select.parent.parent.hidden, true, 'a failed admission cannot revive saved source choices');
+    assert.equal(form.consent.checked, false);
+    assert.equal(ui.button('Plan a change to this alternative').disabled, true);
+    const admissions = requests.filter((entry) => entry.url === CONTEXT).length;
+    const next = { ...clone(ui.context), statementSources: restored ? [clone(contribution)] : [] };
+    routes[`GET ${CONTEXT}`] = () => Promise.resolve(json(200, next));
+    routes[`GET ${PROPOSALS}`] = () => Promise.resolve(json(200, []));
+    ui.button('Read saved alternative proposals').dispatch('click'); await settle();
+    assert.equal(requests.filter((entry) => entry.url === CONTEXT).length, admissions + 1);
+    const refreshed = sourceControls(ui);
+    assert.equal(refreshed.select.parent.parent.hidden, !restored);
+    assert.equal(form.consent.checked, false);
+    assert.equal(ui.button('Plan a change to this alternative').disabled, true);
+    if (restored) {
+      chooseSource(refreshed, contribution);
+      assert.equal(refreshed.reviewed.checked, false);
+      check(refreshed.reviewed); check(form.consent);
+      assert.equal(ui.button('Plan a change to this alternative').disabled, false);
+    } else assert.doesNotMatch(ui.root.textContent, /Synthetic contributor: turn the object|Synthetic contributor A/);
+  });
+
+  for (const change of ['words', 'attribution', 'model permission', 'parent time']) it(`rechecks fresh context before a new tagged plan when ${change} changes`, async () => {
+    const ui = await mount('legacy', { context: { statementSources: [contribution] } });
+    const form = await memory(ui), controls = sourceControls(ui);
+    chooseSource(controls, contribution); check(controls.reviewed); check(form.consent);
+    const next = clone(contribution);
+    if (change === 'words') { next.text = 'Synthetic replacement words.'; next.statementSource.sourceSha256 = 'd'.repeat(64); }
+    if (change === 'attribution') next.attribution.providerLabel = 'Synthetic corrected provider';
+    if (change === 'model permission') next.modelAllowed = false;
+    routes[`GET ${CONTEXT}`] = () => Promise.resolve(json(200, { ...clone(ui.context),
+      ...(change === 'parent time' ? { eraRevision: 3 } : {}), statementSources: [next] }));
+    await plan(ui);
+    assert.equal(creation().length, 0, 'the old review must not seal changed saved material');
+    assert.equal(ui.button('Plan a change to this alternative').disabled, true);
+    assert.equal(form.consent.checked, false);
+  });
+
+  it('does not seal a tagged plan when consent changes during fresh admission', async () => {
+    const ui = await mount('legacy', { context: { statementSources: [contribution] } });
+    const form = await memory(ui), controls = sourceControls(ui);
+    chooseSource(controls, contribution); check(controls.reviewed); check(form.consent);
+    let release;
+    routes[`GET ${CONTEXT}`] = () => new Promise((resolve) => { release = () => resolve(json(200, clone(ui.context))); });
+    ui.button('Plan a change to this alternative').dispatch('click'); await settle();
+    assert.equal(typeof release, 'function');
+    form.consent.checked = false;
+    release(); await settle();
+    assert.equal(creation().length, 0);
+    assert.equal(ui.button('Plan a change to this alternative').disabled, true);
+  });
+
+  it('drops a proposal read started before unavailable access instead of reviving its words', async () => {
+    const ui = await mount('legacy'); await memory(ui); const get = await plan(ui);
+    let release;
+    routes[`GET ${PROPOSALS}`] = () => new Promise((resolve) => { release = () => resolve(json(200,
+      [{ ...get(), statement: { text: 'Synthetic delayed source words.' } }])); });
+    ui.button('Read saved alternative proposals').dispatch('click'); await settle();
+    ui.setVariants([{ ...ui.parent, blocked: true }]);
+    ui.button('Refresh').dispatch('click'); await settle();
+    release(); await settle();
+    assert.doesNotMatch(ui.root.textContent, /Synthetic delayed source words/);
+    ui.setVariants([ui.parent]);
+    ui.button('Refresh').dispatch('click'); await settle();
+    routes[`GET ${CONTEXT}`] = () => Promise.resolve(json(200, clone(ui.context)));
+    routes[`GET ${PROPOSALS}`] = () => Promise.resolve(json(200, []));
+    ui.button('Read saved alternative proposals').dispatch('click'); await settle();
+    assert.doesNotMatch(ui.root.textContent, /Synthetic delayed source words/);
   });
 });
