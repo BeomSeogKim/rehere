@@ -489,8 +489,8 @@ and account privacy controls must be checked before using nonpublic material.
 
 Three.js uses the MIT license; its notice is supplied with the package and
 served at `/vendor/THREE-LICENSE`. The MIT notice for three-mesh-bvh is served
-privately at `/vendor/THREE-MESH-BVH-LICENSE`. The project license remains
-undecided.
+privately at `/vendor/THREE-MESH-BVH-LICENSE`. The project is licensed under
+Apache-2.0; see the [third-party notices](../THIRD-PARTY-NOTICES.md).
 
 ## Upload limits
 

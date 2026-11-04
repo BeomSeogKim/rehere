@@ -115,4 +115,8 @@ setup require a separate instruction.
 
 ## License
 
-A license has not been selected. No open-source license grant is claimed yet.
+Rehere's source code and documentation are licensed under the
+[Apache License, Version 2.0](LICENSE); see [NOTICE](NOTICE). Third-party
+packages keep their own licenses, model weights are not bundled and stay under
+their own licenses, and photographs, recordings and memories keep their own
+rights. See [third-party notices](THIRD-PARTY-NOTICES.md).
