@@ -45,10 +45,20 @@ Only these are written, and the export stops with an error otherwise:
   serves (checked against `server.mjs` by a test), with root-absolute vendor
   imports made relative.
 - `vendor/`: the pinned Three.js files used for viewing, with their MIT notice.
-- `data/manifest.json`, and per view only the exact asset names the visitor
-  listener admits, the contributor photos the manifest lists, and the story and
-  recording audio the manifest lists.
+- `data/manifest.json` and exactly the files the visitor page reads to draw
+  the snapshot: the start view's surface and texture (both textures of a
+  two-photo composition), the pinned object and outline of a full-object scene
+  (their sizes and hashes must match the manifest), the contributor photos the
+  manifest lists, and the story and recording audio it lists. Every one of
+  these is required: a missing file stops the export instead of producing a
+  page that cannot be drawn.
 - `EXPORT.json`: the export date, snapshot ID, and a SHA-256 for every file.
+
+Each file is read through a hard byte limit: a longer body is cancelled, not
+buffered. The manifest is read again at the end and must be unchanged, so a
+link revoked or a snapshot edited during the export cannot yield a mixed copy.
+File paths and links to local addresses inside the manifest text stop the
+export; other web links are printed for review.
 
 The capability is sent only as an `Authorization` header. The export stops if
 any file contains it, the source origin, a local path, an email address, an

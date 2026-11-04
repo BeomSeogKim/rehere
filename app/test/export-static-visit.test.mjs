@@ -41,15 +41,17 @@ function snapshot(overrides = {}) {
     [`/api/visit/stories/${storyId}/audio.wav`, WAV],
     [`/api/visit/recordings/${recordingId}/audio.wav`, WAV],
   ]);
-  for (const name of overrides.drop ?? []) routes.delete(name.replace('{story}', storyId));
+  for (const [route, body] of Object.entries(overrides.routes ?? {})) routes.set(route.replace('{view}', viewId), body);
+  for (const name of overrides.drop ?? []) routes.delete(name.replace('{story}', storyId).replace('{view}', viewId));
   return { manifest, routes, viewId, storyId, recordingId };
 }
 
-async function withVisitor(routes, run) {
+async function withVisitor(routes, run, { onManifest } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     requests.push({ url: req.url, authorization: req.headers.authorization });
-    const body = req.headers.authorization === `Bearer ${TOKEN}` ? routes.get(req.url) : undefined;
+    let body = req.headers.authorization === `Bearer ${TOKEN}` ? routes.get(req.url) : undefined;
+    if (req.url === '/api/visit' && onManifest) body = onManifest(body, requests.filter((item) => item.url === '/api/visit').length);
     res.writeHead(body ? 200 : 404).end(body);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -165,6 +167,10 @@ describe('static visitor export', () => {
     });
     const unsafe = snapshot({ manifest: { contributorPhotos: [{ viewIds: [], label: 'x', asset: { viewId: '..', name: 'secret.json' } }] } });
     await withVisitor(unsafe.routes, async (origin) => {
+      await assert.rejects(exportInto(origin), /file path/);
+    });
+    const outside = snapshot({ manifest: { contributorPhotos: [{ viewIds: [], label: 'x', asset: { viewId: randomUUID(), name: 'secret.json.bak' } }] } });
+    await withVisitor(outside.routes, async (origin) => {
       await assert.rejects(exportInto(origin), /outside the asset allowlist/);
     });
     const badView = snapshot({ manifest: { views: [{ id: '../owner' }] } });
@@ -193,5 +199,116 @@ describe('static visitor export', () => {
     await withVisitor(withToken.routes, async (origin) => {
       await assert.rejects(exportInto(origin), /visit capability/);
     });
+  });
+
+  it('rejects a view whose required geometry or texture is missing', async () => {
+    for (const missing of ['/api/visit/assets/{view}/surface.json', '/api/visit/assets/{view}/texture.jpg']) {
+      const { routes } = snapshot({ drop: [missing] });
+      await withVisitor(routes, async (origin) => {
+        await assert.rejects(exportInto(origin), /HTTP 404/, missing);
+      });
+    }
+  });
+
+  it('requires both textures of a two-photo composition and a matching surface', async () => {
+    const composition = { representation: 'two-photo-composition-v1' };
+    const routes = { '/api/visit/assets/{view}/surface.json': Buffer.from(JSON.stringify(composition)), '/api/visit/assets/{view}/texture-1.jpg': JPEG, '/api/visit/assets/{view}/texture-2.jpg': JPEG };
+    const whole = snapshot({ manifest: composition, routes });
+    await withVisitor(whole.routes, async (origin) => {
+      const { outDir } = await exportInto(origin);
+      assert.ok((await walk(outDir)).includes(path.join('data', 'assets', whole.viewId, 'texture-2.jpg')));
+    });
+    const partial = snapshot({ manifest: composition, routes, drop: ['/api/visit/assets/{view}/texture-2.jpg'] });
+    await withVisitor(partial.routes, async (origin) => {
+      await assert.rejects(exportInto(origin), /HTTP 404/);
+    });
+    const mismatch = snapshot({ manifest: composition });
+    await withVisitor(mismatch.routes, async (origin) => {
+      await assert.rejects(exportInto(origin), /does not match the snapshot representation/);
+    });
+  });
+
+  it('requires the pinned object and outline of a full-object scene, with matching hashes', async () => {
+    const glb = Buffer.from('glTF synthetic object');
+    const outline = Buffer.from('synthetic outline');
+    const build = (overrides = {}) => {
+      const viewId = randomUUID();
+      const fullObject = {
+        sha256: createHash('sha256').update(glb).digest('hex'), outlineSha256: createHash('sha256').update(outline).digest('hex'),
+        asset: { name: 'object.glb', viewId, size: glb.length }, mask: { name: 'outline.png', viewId, size: outline.length }, ...overrides,
+      };
+      const manifest = { views: [{ id: viewId, representation: 'source-photo-full-object-v1', fullObject }], startViewId: viewId };
+      return { viewId, ...snapshot({ manifest, routes: { [`/api/visit/assets/${viewId}/object.glb`]: glb, [`/api/visit/assets/${viewId}/outline.png`]: outline } }) };
+    };
+    // The start view ID is generated inside snapshot(); build routes after it is known.
+    const whole = build();
+    whole.routes.set('/api/visit', Buffer.from(JSON.stringify({ ...whole.manifest, startViewId: whole.manifest.views[0].id })));
+    for (const name of ['surface.json', 'texture.jpg']) whole.routes.set(`/api/visit/assets/${whole.manifest.views[0].id}/${name}`, name === 'surface.json' ? Buffer.from('{}') : JPEG);
+    await withVisitor(whole.routes, async (origin) => {
+      const { outDir } = await exportInto(origin);
+      const names = (await walk(outDir)).map((file) => path.basename(file));
+      assert.ok(names.includes('object.glb') && names.includes('outline.png'));
+    });
+    const missing = new Map(whole.routes);
+    missing.delete(`/api/visit/assets/${whole.manifest.views[0].id}/object.glb`);
+    await withVisitor(missing, async (origin) => {
+      await assert.rejects(exportInto(origin), /HTTP 404/);
+    });
+    const tampered = new Map(whole.routes);
+    tampered.set(`/api/visit/assets/${whole.manifest.views[0].id}/outline.png`, Buffer.from('other outline!!!!'));
+    await withVisitor(tampered, async (origin) => {
+      await assert.rejects(exportInto(origin), /does not match the manifest/);
+    });
+  });
+
+  it('cancels a body that exceeds the limit instead of buffering it', async () => {
+    let produced = 0;
+    let cancelled = false;
+    const endless = () => new Response(new ReadableStream({
+      pull(controller) {
+        produced += 1024;
+        controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }));
+    await assert.rejects(exportStaticVisit({
+      origin: 'http://127.0.0.1:9', token: TOKEN, outDir: await tempDir(), confirmPublicMaterial: true, limits: { file: 4096, total: 8192 }, fetchImpl: async () => endless(),
+    }), /larger than the export limit/);
+    assert.ok(cancelled);
+    assert.ok(produced <= 4096 + 4096, `read ${produced} bytes`);
+    const { routes } = snapshot();
+    await withVisitor(routes, async (origin) => {
+      await assert.rejects(exportInto(origin, { limits: { file: 16, total: 1_000_000 } }), /larger than the export limit/);
+    });
+  });
+
+  it('rejects file paths and local links in the manifest and reports other links for review', async () => {
+    for (const title of ['../../owner/secret', '/etc/hosts', 'See http://127.0.0.1:4317/owner', 'file:///tmp/x']) {
+      const { routes } = snapshot({ manifest: { title } });
+      await withVisitor(routes, async (origin) => {
+        await assert.rejects(exportInto(origin), /holds a (?:file path|link)/, title);
+      });
+    }
+    const { routes } = snapshot({ manifest: { title: 'Source https://www.loc.gov/pictures/item/az0459.photos.321989p/' } });
+    await withVisitor(routes, async (origin) => {
+      const result = await exportInto(origin);
+      assert.deepEqual(result.externalLinks, ['https://www.loc.gov/pictures/item/az0459.photos.321989p/']);
+    });
+  });
+
+  it('rejects a snapshot that changes or becomes unavailable while it is read', async () => {
+    const { routes } = snapshot();
+    await withVisitor(routes, async (origin) => {
+      await assert.rejects(exportInto(origin), /changed or became unavailable/);
+    }, { onManifest: (body, count) => (count === 1 ? body : undefined) });
+  });
+
+  it('keeps the required file list in step with the visitor page that reads it', async () => {
+    const visits = await readFile(fileURLToPath(new URL('../public/visits.js', import.meta.url)), 'utf8');
+    for (const literal of ["'surface.json'", "['texture-1.jpg', 'texture-2.jpg']", "['texture.jpg']", "'object.glb'", "'outline.png'", "'source-photo-full-object-v1'"]) {
+      assert.ok(visits.includes(literal), literal);
+    }
   });
 });

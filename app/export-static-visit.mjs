@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isComposition } from './public/composition-scene.js';
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
@@ -17,10 +18,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // The same exact names the visitor server admits (SHARE_ASSETS in server.mjs).
 const ASSET_NAMES = ['surface.json', 'texture.jpg', 'texture-1.jpg', 'texture-2.jpg', 'object.glb', 'outline.png'];
 const EVIDENCE_NAME = /^[1-9][0-9]?\.jpg$/;
+const SHA256 = /^[a-f0-9]{64}$/;
+const FULL_OBJECT = 'source-photo-full-object-v1';
 // Home-directory and temporary-folder prefixes that must never reach a public copy.
 const LOCAL_PATHS = ['Users', 'private', 'home'].map((name) => `/${name}/`);
-const MAX_FILE_BYTES = 64 * 1024 ** 2;
-const MAX_TOTAL_BYTES = 256 * 1024 ** 2;
+const LIMITS = { file: 64 * 1024 ** 2, total: 256 * 1024 ** 2 };
 
 // Mirrors VISITOR_FILES in server.mjs, with this export's entry in place of
 // visitor-entry.js. A test keeps the two lists equal.
@@ -100,13 +102,69 @@ const pageHtml = (template, date) => {
   return html;
 };
 
-async function fetchBytes(fetchImpl, url, token, allowMissing) {
+// Reads at most `limit` bytes; a longer body is cancelled, not buffered.
+async function readBody(response, limit) {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel();
+    fail('A snapshot file is larger than the export limit.');
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body ?? []) {
+    size += chunk.length;
+    if (size > limit) fail('A snapshot file is larger than the export limit.');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// Every file the viewer reads is required: a missing one means the copy could
+// not be drawn, so there is no optional fetch.
+async function fetchBytes(fetchImpl, url, token, limit) {
   const response = await fetchImpl(url, { headers: { authorization: `Bearer ${token}` }, redirect: 'error' });
-  if (response.status === 404 && allowMissing) return null;
-  if (!response.ok) fail(`A snapshot file could not be read (HTTP ${response.status}).`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length > MAX_FILE_BYTES) fail('A snapshot file is larger than the export limit.');
-  return bytes;
+  if (!response.ok) {
+    await response.body?.cancel();
+    fail(`A snapshot file could not be read (HTTP ${response.status}).`);
+  }
+  return readBody(response, limit);
+}
+
+// The manifest is untrusted text that the page renders. Paths that point out of
+// the folder, or links to this machine, stop the export; other links are
+// returned so a person can review them.
+function inspectManifest(value, location = 'manifest', links = new Set()) {
+  if (typeof value === 'string') {
+    if (/^(?:\/|~\/|[A-Za-z]:[\\/])|(?:^|[\\/])\.\.(?:[\\/]|$)/.test(value)) fail(`${location} holds a file path.`);
+    for (const match of value.matchAll(/\b([a-z][a-z0-9+.-]*):\/\/[^\s"'<>]*/gi)) {
+      const scheme = match[1].toLowerCase();
+      let host = '';
+      try {
+        host = new URL(match[0]).hostname;
+      } catch {
+        fail(`${location} holds a malformed link.`);
+      }
+      if (!['http', 'https'].includes(scheme) || /^(?:localhost|\[?::1\]?|127\..*|10\..*|192\.168\..*|169\.254\..*|172\.(?:1[6-9]|2\d|3[01])\..*|.*\.local)$/i.test(host)) fail(`${location} holds a link to a local or non-web address.`);
+      links.add(match[0]);
+    }
+    if (/^(?:javascript|data|file|blob):/i.test(value.trim())) fail(`${location} holds a script or data link.`);
+  } else if (Array.isArray(value)) {
+    value.forEach((item, index) => inspectManifest(item, `${location}[${index}]`, links));
+  } else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) inspectManifest(item, `${location}.${key}`, links);
+  }
+  return links;
+}
+
+// The full-object references the viewer itself requires (fullObjectOf in visits.js).
+function pinnedObject(manifest) {
+  if (!manifest.views.some((view) => view.representation === FULL_OBJECT)) return null;
+  const ids = new Set(manifest.views.map((view) => view.id));
+  const valid = (asset, name) => asset?.name === name && ids.has(asset.viewId) && Number.isInteger(asset.size) && asset.size > 0;
+  const start = manifest.views.find((view) => view.id === manifest.startViewId)?.fullObject;
+  if (!start || !SHA256.test(start.sha256 ?? '') || !SHA256.test(start.outlineSha256 ?? '') || !valid(start.asset, 'object.glb') || !valid(start.mask, 'outline.png')
+      || manifest.views.some((view) => view.representation !== FULL_OBJECT)) fail('The full-object references in the manifest are incomplete.');
+  return start;
 }
 
 // Fails closed: the output must hold no capability, origin, local path, API
@@ -125,7 +183,7 @@ function scan(files, { token, origin }) {
 }
 
 export async function exportStaticVisit({
-  origin, token, outDir, confirmPublicMaterial = false, fetchImpl = fetch, now = () => new Date(), publicDir = PUBLIC_DIR, threeDir = THREE_DIR,
+  origin, token, outDir, confirmPublicMaterial = false, limits = LIMITS, fetchImpl = fetch, now = () => new Date(), publicDir = PUBLIC_DIR, threeDir = THREE_DIR,
 }) {
   if (!confirmPublicMaterial) fail('Confirm that the snapshot holds only public or synthetic material (--confirm-public-material).');
   if (typeof token !== 'string' || !TOKEN.test(token)) fail('The visit capability is missing or malformed.');
@@ -139,12 +197,13 @@ export async function exportStaticVisit({
   let total = 0;
   const put = (name, bytes) => {
     total += bytes.length;
-    if (total > MAX_TOTAL_BYTES) fail('The export is larger than the total limit.');
+    if (total > limits.total) fail('The export is larger than the total limit.');
     files.set(name, Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes));
   };
   const api = (suffix) => new URL(`/api/visit${suffix}`, base).href;
 
-  const manifestBytes = await fetchBytes(fetchImpl, api(''), token, false);
+  const get = (suffix) => fetchBytes(fetchImpl, api(suffix), token, Math.max(0, Math.min(limits.file, limits.total - total)));
+  const manifestBytes = await get('');
   let manifest;
   try {
     manifest = JSON.parse(manifestBytes.toString('utf8'));
@@ -152,29 +211,51 @@ export async function exportStaticVisit({
     fail('The snapshot manifest is not JSON.');
   }
   if (!manifest || typeof manifest.id !== 'string' || !Array.isArray(manifest.views) || manifest.views.length === 0) fail('The snapshot manifest is not a visitor view.');
+  if (!manifest.views.every((view) => UUID.test(view?.id))) fail('A view has an unsafe identifier.');
+  const externalLinks = inspectManifest(manifest);
   put('data/manifest.json', manifestBytes);
 
-  for (const view of manifest.views) {
-    if (!UUID.test(view.id)) fail('A view has an unsafe identifier.');
-    for (const name of ASSET_NAMES) {
-      const bytes = await fetchBytes(fetchImpl, api(`/assets/${view.id}/${name}`), token, true);
-      if (bytes) put(`data/assets/${view.id}/${name}`, bytes);
-    }
+  // Exactly what the visitor page reads to draw the start view: its surface and
+  // texture(s), and the pinned object and outline of a full-object scene.
+  const start = manifest.views.find((view) => view.id === manifest.startViewId);
+  if (!start) fail('The start view is not in the snapshot.');
+  const asset = async (viewId, name) => {
+    const key = `data/assets/${viewId}/${name}`;
+    if (!files.has(key)) put(key, await get(`/assets/${viewId}/${name}`));
+    return files.get(key);
+  };
+  let surface;
+  try {
+    surface = JSON.parse((await asset(start.id, 'surface.json')).toString('utf8'));
+  } catch (error) {
+    fail(error.message.startsWith('A snapshot') ? error.message : 'The start view surface is not JSON.');
+  }
+  if (isComposition(manifest) !== isComposition(surface)) fail('The start view surface does not match the snapshot representation.');
+  const pinned = pinnedObject(manifest);
+  if (pinned && isComposition(manifest)) fail('A composition cannot also hold a full object.');
+  for (const name of isComposition(manifest) ? ['texture-1.jpg', 'texture-2.jpg'] : ['texture.jpg']) await asset(start.id, name);
+  if (pinned) {
+    const object = await asset(pinned.asset.viewId, 'object.glb');
+    const outline = await asset(pinned.mask.viewId, 'outline.png');
+    if (object.length !== pinned.asset.size || sha256(object) !== pinned.sha256) fail('The pinned object does not match the manifest.');
+    if (outline.length !== pinned.mask.size || sha256(outline) !== pinned.outlineSha256) fail('The pinned outline does not match the manifest.');
   }
   for (const photo of manifest.contributorPhotos ?? []) {
     const { viewId, name } = photo.asset ?? {};
     if (!safeAsset(viewId, name)) fail('A contributor photo points outside the asset allowlist.');
-    const key = `data/assets/${viewId}/${name}`;
-    if (!files.has(key)) put(key, await fetchBytes(fetchImpl, api(`/assets/${viewId}/${name}`), token, false));
+    await asset(viewId, name);
   }
   for (const story of manifest.stories ?? []) {
     if (!UUID.test(story.id)) fail('A story has an unsafe identifier.');
-    put(`data/stories/${story.id}/audio.wav`, await fetchBytes(fetchImpl, api(`/stories/${story.id}/audio.wav`), token, false));
+    put(`data/stories/${story.id}/audio.wav`, await get(`/stories/${story.id}/audio.wav`));
   }
   for (const recording of manifest.contributorRecordings ?? []) {
     if (!UUID.test(recording.id)) fail('A recording has an unsafe identifier.');
-    put(`data/recordings/${recording.id}/audio.wav`, await fetchBytes(fetchImpl, api(`/recordings/${recording.id}/audio.wav`), token, false));
+    put(`data/recordings/${recording.id}/audio.wav`, await get(`/recordings/${recording.id}/audio.wav`));
   }
+  // A link revoked or a snapshot changed while files were read must not yield a mixed copy.
+  const again = await get('').catch(() => null);
+  if (!again?.equals(manifestBytes)) fail('The snapshot changed or became unavailable during the export.');
 
   const date = now().toISOString().slice(0, 10);
   put('index.html', pageHtml(await readFile(path.join(publicDir, 'visit.html'), 'utf8'), date));
@@ -197,7 +278,7 @@ export async function exportStaticVisit({
   }
   return {
     outDir: root, snapshotId: manifest.id, title: manifest.title, synthetic: manifest.synthetic === true, files: files.size, bytes: total,
-    contributorLabels: [...new Set((manifest.contributorPhotos ?? []).concat(manifest.contributorRecordings ?? []).map((item) => item.providerLabel).filter(Boolean))],
+    externalLinks: [...externalLinks], contributorLabels: [...new Set((manifest.contributorPhotos ?? []).concat(manifest.contributorRecordings ?? []).map((item) => item.providerLabel).filter(Boolean))],
   };
 }
 
@@ -213,6 +294,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     });
     console.log(`Exported "${result.title}" (${result.files} files, ${result.bytes} bytes) to ${result.outDir}`);
     console.log(`Marked synthetic: ${result.synthetic}. Contributor labels shown to visitors: ${result.contributorLabels.join(', ') || 'none'}.`);
+    if (result.externalLinks.length) console.log(`Links inside the snapshot text (review them): ${result.externalLinks.join(' ')}`);
     console.log('Review the folder before publishing it; this copy does not follow later revocation or withdrawal.');
   } catch (error) {
     console.error(`Export failed: ${error instanceof TypeError ? 'invalid --origin or --out.' : error.message}`);
