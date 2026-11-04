@@ -69,6 +69,11 @@ A saved visitor snapshot can be exported as a frozen, read-only
 later revocation or withdrawal. Multi-view alignment and live hosted
 operation remain absent.
 
+Try it: a frozen, read-only demo of one synthetic snapshot is at
+https://beomseogkim.github.io/rehere/
+It is an offline copy (see the static copy above), so it does not follow
+revocation or withdrawal.
+
 The production deployment stack is not selected.
 
 ## Getting started
