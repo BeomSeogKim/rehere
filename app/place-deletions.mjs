@@ -281,7 +281,7 @@ export async function removeMatching(dir, rootDir, pattern) {
 
 const temp = (name) => new RegExp(`^${name.replace(/\./g, '\\.')}\\.${UUID_SOURCE}\\.tmp$`);
 const DRAFT_FILES = [/^draft\.json$/, /^intake-receipt\.json$/, /^policy\.json$/, /^place\.json$/, temp('policy.json'), temp('place.json'),
-  /^photo-[1-9][0-9]?\.(jpg|png)$/, /^voice\.(webm|ogg|m4a)$/];
+  /^evidence-reviews\.json$/, temp('evidence-reviews.json'), /^photo-[1-9][0-9]?\.(jpg|png)$/, /^voice\.(webm|ogg|m4a)$/];
 const MEDIA = new Set(['original.jpg', 'original.png', REVIEW_NAME, PLAYBACK_NAME, ...Object.values(VOICE_ORIGINAL_NAMES)]);
 const JOB_FILES = [/^manifest\.json$/, /^region-links\.json$/, /^memory-links\.json$/, temp('manifest.json'), temp('region-links.json'), temp('memory-links.json')];
 const WAV = new RegExp(`^${UUID_SOURCE}\\.wav$`);

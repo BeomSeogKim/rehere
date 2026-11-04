@@ -16,6 +16,7 @@ import { DraftStore, LIMITS, RequestError, parseDraft } from './drafts.mjs';
 import { parseApplyRequest, parseCancelRequest } from './memory-proposals.mjs';
 import { metaModelFromEnv } from './meta-model.mjs';
 import { metaTranscriberFromEnv } from './meta-transcribe.mjs';
+import { EvidenceReviews, evidenceModelFromEnv } from './evidence-reviews.mjs';
 import { ReconstructionStore, UUID_PATTERN, parseBuildRequest, pythonModelImage, pythonRunner, pythonOutlineRunner } from './reconstructions.mjs';
 import { FullObjectStore } from './full-objects.mjs';
 import { OBJECT_IDS } from './arrangements.mjs';
@@ -56,6 +57,7 @@ const STATIC_FILES = new Map([
   ['/scene-viewer.js', ['scene-viewer.js', 'text/javascript; charset=utf-8']],
   ['/shares.js', ['shares.js', 'text/javascript; charset=utf-8']],
   ['/source-controls.js', ['source-controls.js', 'text/javascript; charset=utf-8']],
+  ['/evidence-review.js', ['evidence-review.js', 'text/javascript; charset=utf-8']],
   ['/playback.js', ['playback.js', 'text/javascript; charset=utf-8']],
   ['/story-player.js', ['story-player.js', 'text/javascript; charset=utf-8']],
   ['/stories.js', ['stories.js', 'text/javascript; charset=utf-8']],
@@ -136,6 +138,7 @@ const PLACE_DELETION_PATH = /^\/api\/drafts\/([^/]+)\/deletion$/;
 const PLACE_DELETE_PATH = /^\/api\/drafts\/([^/]+)\/delete$/;
 const SOURCE_SIZE_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/image-size$/;
 const SOURCE_POLICY_PATH = /^\/api\/drafts\/([^/]+)\/sources\/([^/]+)\/policy$/;
+const EVIDENCE_PATH = /^\/api\/drafts\/([^/]+)\/evidence-reviews(?:\/([^/]+)\/(decision))?$/;
 const INTAKE_PATH = /^\/api\/intakes\/([^/]+)$/;
 const INTAKE_ACTION_PATH = /^\/api\/intakes\/([^/]+)\/(plan|commit|discard)$/;
 const INTAKE_PART_PATH = /^\/api\/intakes\/([^/]+)\/parts\/([^/]+)$/;
@@ -411,6 +414,7 @@ export function createAppServer({
   outlineTimeoutMs,
   proposalModel = null,
   captionTranscriber = null,
+  evidenceModel = null,
   prepareModelImage = pythonModelImage(),
   accessStore = new AccessStore({ dataDir }),
   audioDecoder = createAudioDecoder(),
@@ -438,6 +442,7 @@ export function createAppServer({
   reconstructions.fullObjects = fullObjects;
   const collaboration = new CollaborationStore({ reconstructions, decodePhoto: contributionPhotoDecoder, prepareRecording: recordingPreparer });
   const stories = new StoryStore({ reconstructions, audioDecoder, transcriber: captionTranscriber });
+  const evidence = new EvidenceReviews({ reconstructions, model: evidenceModel });
   const intakes = new IntakeStore({ dataDir, drafts: store, verifier: mediaVerifier, placeCommits: placeDeletions });
   const deletions = new PlaceDeletionService({ dataDir, placeDeletions, reconstructions, intakes, accessStore });
   // Pending deletions resume once at startup; an explicit retry is also possible.
@@ -790,6 +795,24 @@ export function createAppServer({
       if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
       const body = strictBody(await readJsonBody(req), ['requestId', 'baseRevision', 'permissions', 'stopUse']);
       sendJson(res, 200, await reconstructions.restrictSource(draftId, sourceId, owner, body));
+      return;
+    }
+
+    const evidenceMatch = EVIDENCE_PATH.exec(pathname);
+    if (evidenceMatch) {
+      const [, draftId, reviewId] = evidenceMatch;
+      if (!UUID.test(draftId) || (reviewId !== undefined && !UUID.test(reviewId))) throw new RequestError(404, 'This memory could not be found.');
+      if (reading && reviewId === undefined) {
+        sendJson(res, 200, await evidence.list(draftId, owner));
+        return;
+      }
+      if (req.method !== 'POST') throw new RequestError(405, 'Method not allowed.');
+      if (reviewId !== undefined) {
+        sendJson(res, 200, await evidence.decide(draftId, reviewId, owner, await readJsonBody(req)));
+        return;
+      }
+      const answer = await evidence.review(draftId, owner, await readJsonBody(req));
+      sendJson(res, answer.replayed ? 200 : 201, answer);
       return;
     }
 
@@ -1394,6 +1417,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const app = createAppServer({
     proposalModel: metaModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'model-budget.json') }),
     captionTranscriber: metaTranscriberFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'transcribe-budget.json') }),
+    evidenceModel: evidenceModelFromEnv({ ledgerFile: path.join(DEFAULT_DATA_DIR, 'evidence-budget.json') }),
     visitorOrigin: settings?.origin ?? null,
   });
   listenAll(app, port, settings?.port ?? null).then(() => {

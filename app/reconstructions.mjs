@@ -639,6 +639,9 @@ export class ReconstructionStore {
     // The one contributed bundle whose photo or recording is being prepared,
     // set and cleared by the collaboration store: { controller, done }.
     this.activeContributionMedia = null;
+    // The one owner evidence review sending a note and photos to a model, set
+    // and cleared by the evidence store: { draftId, sourceIds, controller, done }.
+    this.activeEvidence = null;
     this.rootDir = path.join(dataDir, 'reconstructions');
     this.stagingDir = path.join(dataDir, 'reconstruction-staging');
     this.queue = Promise.resolve();
@@ -973,7 +976,7 @@ export class ReconstructionStore {
   // Requests cancellation of this place's running work. Only called once its
   // deletion barrier is durable; nothing is awaited and no data is recalled.
   abortPlace(draftId) {
-    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition, this.fullObjects?.active]) {
+    for (const item of [this.active, this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition, this.fullObjects?.active, this.activeEvidence]) {
       if (item?.draftId !== draftId) continue;
       try {
         item.controller.abort();
@@ -989,7 +992,7 @@ export class ReconstructionStore {
     const builds = new Set();
     if (this.active?.draftId === draftId) builds.add(this.active.id);
     for (const [jobId, runner] of this.runners) if (runner.draftId === draftId) builds.add(jobId);
-    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition, this.fullObjects?.active].filter((item) => item?.draftId === draftId).length;
+    return builds.size + [this.activeProposal, this.activeStory, this.activeContributionMedia, this.activeOutline, this.activeComposition, this.fullObjects?.active, this.activeEvidence].filter((item) => item?.draftId === draftId).length;
   }
 
   async asset(draftId, jobId, name) {
@@ -2455,6 +2458,7 @@ export class ReconstructionStore {
     if (this.activeOutline?.draftId === draftId && this.activeOutline.sourceId === sourceId) impacts.processing += 1;
     if (this.activeComposition?.draftId === draftId && this.activeComposition.sourceIds.includes(sourceId)) impacts.processing += 1;
     if (this.fullObjects?.active?.draftId === draftId && this.fullObjects.active.sourceId === sourceId) impacts.processing += 1;
+    if (this.activeEvidence?.draftId === draftId && this.activeEvidence.sourceIds.includes(sourceId)) impacts.processing += 1;
     return impacts;
   }
 
@@ -2479,7 +2483,7 @@ export class ReconstructionStore {
       // Story decoding and outline correction need only place use, so a
       // model- or share-only reduction leaves that local work running. A
       // caption draft in the story slot sends its recording to a model.
-      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, this.activeStory?.purpose ?? 'place'], [this.activeOutline, 'place'], [this.activeComposition, 'place'], [this.fullObjects?.active, 'model']];
+      const work = [[this.active, 'model'], [this.activeProposal, 'model'], [this.activeStory, this.activeStory?.purpose ?? 'place'], [this.activeOutline, 'place'], [this.activeComposition, 'place'], [this.fullObjects?.active, 'model'], [this.activeEvidence, 'model']];
       const running = work.filter(([item, purpose]) => item?.draftId === draftId
         && (item.sourceIds ?? [item.sourceId]).includes(sourceId) && !allows(policy, purpose)).map(([item]) => item);
       if (running.length > 0) {
@@ -2508,7 +2512,8 @@ export class ReconstructionStore {
     this.activeOutline?.controller.abort();
     this.activeComposition?.controller.abort();
     this.fullObjects?.active?.controller.abort();
+    this.activeEvidence?.controller.abort();
     await this.serialize(() => {});
-    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done, this.activeOutline?.done.catch(() => {}), this.activeComposition?.done.catch(() => {}), this.fullObjects?.active?.done.catch(() => {})]);
+    await Promise.all([this.active?.done, this.activeProposal?.done, this.activeStory?.done, this.activeContributionMedia?.done, this.activeOutline?.done.catch(() => {}), this.activeComposition?.done.catch(() => {}), this.fullObjects?.active?.done.catch(() => {}), this.activeEvidence?.done.catch(() => {})]);
   }
 }

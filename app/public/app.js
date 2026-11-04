@@ -2,6 +2,7 @@ import { mountAccess } from './access-ui.js';
 import { mountContributor } from './collaboration.js';
 import { registerElement, stopAll } from './playback.js';
 import { isStopped, mountSourceControls, renderStoppedMarker } from './source-controls.js';
+import { mountEvidenceReview } from './evidence-review.js';
 import {
   canonicalPlaceName,
   createIntakeSession,
@@ -76,6 +77,7 @@ const els = {
   viewerTextSource: $('viewer-text-source'),
   viewerVoice: $('viewer-voice'),
   viewerVoiceSource: $('viewer-voice-source'),
+  viewerEvidence: $('viewer-evidence'),
   viewerSpace: $('viewer-space'),
   viewerMaterials: $('viewer-materials'),
   viewerPlaceRemoval: $('viewer-place-removal'),
@@ -748,6 +750,7 @@ async function showDraft(id, notice = '', sceneId = null) {
   els.viewerPhotos.replaceChildren();
   els.viewerText.textContent = '';
   els.viewerTextSource.replaceChildren();
+  els.viewerEvidence.replaceChildren();
   els.viewerVoiceSource.replaceChildren();
   stopViewerVoice();
   els.viewerTitle.tabIndex = -1;
@@ -836,6 +839,11 @@ async function showDraft(id, notice = '', sceneId = null) {
   const textRecord = source(draft.textSourceId);
   if (isStopped(textRecord)) els.viewerTextSource.append(renderStoppedMarker(textRecord));
   else if (draft.text.trim()) els.viewerTextSource.append(renderSavedSource(document, textRecord), controls(textRecord, 'the written memory'));
+  // Optional and owner-only; it shows nothing unless set up or already used.
+  sourceViews.push(mountEvidenceReview(els.viewerEvidence, {
+    draftId: draft.id, note: draft.text.trim() ? draft.text : '', formatDate,
+    photos: draft.photos.map((photo, index) => ({ sourceId: photo.sourceId, index, url: asset(photo.name) })),
+  }));
   const voiceRecord = draft.voice ? source(draft.voice.sourceId) : sources.find((record) => record.kind === 'voice' && isStopped(record));
   if (draft.voice && !isStopped(voiceRecord)) {
     els.viewerVoice.src = asset(draft.voice.name);
@@ -1185,6 +1193,7 @@ function clearViewer() {
   els.viewerPhotos.replaceChildren();
   els.viewerText.textContent = '';
   els.viewerTextSource.replaceChildren();
+  els.viewerEvidence.replaceChildren();
   els.viewerVoiceSource.replaceChildren();
   stopViewerVoice();
 }

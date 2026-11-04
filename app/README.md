@@ -536,6 +536,48 @@ See the official [speech-to-text documentation](https://dev.meta.ai/docs/speech-
 for the provider contract and price. Retention terms are not stated there, so
 use only public or synthetic recordings unless the account terms allow more.
 
+## Owner evidence checks
+
+An owner can ask Meta's Muse Spark (`muse-spark-1.3`) to compare one memory's
+written note with up to four photos of the same memory. The model splits the
+note into at most three verbatim parts. For each part it answers `supports`,
+`conflicts` or `not_visible`, names one of the photos it was sent and gives a
+crop (`[x0, y0, x1, y1]` as fractions of the photo). It also names one thing
+the photos cannot settle. The result is visual agreement or disagreement in
+these photos for this note only. It is never historical truth, and
+`not_visible` never means a part is false. The owner keeps or dismisses each
+result; nothing is applied to a scene, planned or shared.
+
+The server sends only the note and the photos the owner chose, and only when
+each of them currently allows model use. It sends no names, captions,
+providers or dates. It checks the grants again before every outbound request,
+and a restriction or place deletion stops a running check. A part must be an
+exact excerpt of the note. The named photo must be one of those sent, and the
+crop must be finite, inside the photo and at least 2% on each side. Otherwise
+the whole answer is rejected and nothing is offered. Once the note or a photo
+is stopped, its excerpts and observations are withheld.
+
+Checks are off by default. An operator must supply `MODEL_API_KEY` and set
+`REHERE_EVIDENCE_LIVE=1` for the server process. Each check counts input
+tokens, reserves the worst case in `data/evidence-budget.json` and generates
+once, with no automatic retry. Default local limits are $0.05 per check, $0.10
+in total and 4 checks; `REHERE_EVIDENCE_TOTAL_USD` and
+`REHERE_EVIDENCE_MAX_REQUESTS` can lower them. A reported usage settles the
+reservation; an unknown or failed outcome keeps it. Each attempt is saved in
+`data/drafts/<id>/evidence-reviews.json` before anything is sent. It records
+the model, response ID, usage and latency, with null for any value not
+returned. A repeated request ID answers from that record. An attempt
+interrupted by a restart is shown as interrupted, and its reservation is kept.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/drafts/<id>/evidence-reviews` | Whether checks are set up, which photos may be sent, and the saved checks |
+| `POST /api/drafts/<id>/evidence-reviews` | One check with `requestId`, `consent: true` and `sourceIds` |
+| `POST /api/drafts/<id>/evidence-reviews/<reviewId>/decision` | The owner's `choice`: `accepted` or `dismissed`, once |
+
+All three need the owner session. Checks are not part of shares, visitor
+links or static exports.
+
 ## Upload limits
 
 Both the resumable entry screen and the legacy multipart endpoint check the

@@ -497,3 +497,24 @@ p.memory-text, .visit-memory-summary p, .visit-memory-full p, .share-memory-word
 .space-viewport-wrap > .viewport-unseen-label { position: absolute; top: 12px; left: 12px; z-index: 1; pointer-events: none; }
 /* The display rule above would otherwise override the hidden attribute. */
 .viewport-unseen-label[hidden] { display: none; }
+
+/* Owner evidence check: a region outlined on the photo it came from. */
+.evidence-review { margin: 20px 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.evidence-review h3 { margin: 0 0 6px; }
+.evidence-review fieldset { border: 1px solid var(--line); border-radius: var(--radius); margin: 8px 0; }
+.evidence-review fieldset label { display: block; padding: 4px 0; }
+.evidence-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.evidence-list, .evidence-findings { padding-left: 1.4em; }
+.evidence-item { margin: 12px 0; }
+.evidence-finding { margin: 10px 0; }
+.evidence-finding q { font-family: var(--serif); }
+.evidence-verdict { font-weight: 600; margin: 4px 0; }
+.evidence-supports .evidence-verdict { color: var(--lamp); }
+.evidence-conflicts .evidence-verdict { color: var(--danger); }
+.evidence-not_visible .evidence-verdict { color: var(--muted); }
+.evidence-unchecked, .evidence-uncertainty { border-left: 2px solid var(--ghost); padding-left: 8px; }
+.evidence-crop-frame { position: relative; display: inline-block; overflow: hidden; max-width: min(100%, 420px); line-height: 0; }
+.evidence-crop-frame img { width: 100%; height: auto; image-orientation: none; border-radius: 3px; }
+.evidence-crop { position: absolute; box-sizing: border-box; border: 3px solid var(--lamp); box-shadow: 0 0 0 9999px rgba(22, 27, 40, 0.45); pointer-events: none; }
+.evidence-crop.evidence-conflicts { border-color: var(--danger); }
+.evidence-crop.evidence-not_visible { border-style: dashed; border-color: var(--muted); }
