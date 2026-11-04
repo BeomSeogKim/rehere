@@ -75,10 +75,11 @@ File paths and links to local addresses inside the manifest text stop the
 export; other web links are printed for review.
 
 The capability is sent only as an `Authorization` header. The export stops if
-any file contains it, the source origin, a local path, an email address, an
-API route in the page or data, or a photo metadata block, or if a file or the
-total exceeds the size limits. Owner, contributor and editing routes are never
-requested, and the exported page cannot call them.
+any file contains it, the source origin or a local path, if the page or data
+reference an API route, if an HTML or JSON file contains an email address, if
+a JPEG carries an Exif block, or if a file or the total exceeds the size limits.
+Owner, contributor and editing routes are never requested, and the exported page
+cannot call them.
 
 The unchanged visitor modules still contain their live-visit code paths; the
 static entry never uses them because it supplies its own read-only source.

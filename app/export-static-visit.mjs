@@ -215,7 +215,7 @@ function scan(files, { token, origin }) {
     if (LOCAL_PATHS.some((prefix) => bytes.includes(prefix))) fail(`${name} contains a local path.`);
     if (name.endsWith('.html') || name.startsWith('data/') || name.endsWith('.json')) {
       if (bytes.includes('/api/')) fail(`${name} references an API route.`);
-      if (name.endsWith('.json') && /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(bytes.toString('utf8'))) fail(`${name} contains an email address.`);
+      if ((name.endsWith('.json') || name.endsWith('.html')) && /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(bytes.toString('utf8'))) fail(`${name} contains an email address.`);
     }
     if (name.endsWith('.jpg') && bytes.subarray(0, 65536).includes(Buffer.from('Exif\0\0', 'latin1'))) fail(`${name} carries a photo metadata block.`);
   }

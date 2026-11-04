@@ -217,6 +217,15 @@ describe('static visitor export', () => {
     });
   });
 
+  it('refuses a credit line that exposes an email address', async () => {
+    const { routes } = snapshot();
+    await withVisitor(routes, async (origin) => {
+      await assert.rejects(exportInto(origin, { credit: 'Contact someone@example.org' }), /email address/);
+      const { credited } = await exportInto(origin, { credit: 'Photograph: Test' });
+      assert.equal(credited, true);
+    });
+  });
+
   it('rejects a view whose required geometry or texture is missing', async () => {
     for (const missing of ['/api/visit/assets/{view}/surface.json', '/api/visit/assets/{view}/texture.jpg']) {
       const { routes } = snapshot({ drop: [missing] });
