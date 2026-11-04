@@ -1,11 +1,37 @@
 # Rehere
 
-Revisit places through the memories you share.
+Revisit places that can no longer be visited, rebuilt from old photographs and
+the memories of people who knew them.
 
-Rehere combines old photographs and real people's memories to reconstruct
-personally meaningful places that can no longer be visited. People can explore
-a place through a browser link and choose to contribute their own memories.
-Photographic evidence, personal recollections, and AI proposals remain distinct.
+Rehere turns an archival photograph into a partial 3D scene that shows only
+what the camera saw. Areas no photograph shows stay empty, and the viewer says
+so. People add what they remember as attributed notes. When the optional
+planner is enabled, Muse Spark, Meta's model, reads a note and proposes one
+bounded change to the scene. The app checks the proposal against the scene and
+its sources, and nothing is applied until a person approves it. Each approved
+change is saved as a new version, and earlier versions are never overwritten.
+A proposal that fails the checks is not applied, and the app shows why.
+
+Throughout, Rehere keeps three kinds of origin apart: what a photograph shows,
+what a person remembered, and what a model proposed. Anyone with a link can
+visit a saved version without an account and see, for each saved view, which of
+these it rests on. Contributors keep control of their material. When a source
+is withdrawn, the shared views that depend on it stop being served.
+
+**Why this matters.** When a place is lost, what remains is a handful of
+photographs and the people who remember it. The Grand Canyon Lodge on the North
+Rim was destroyed by fire in July 2025. Tools that fill gaps with plausible
+imagery make memory and invention indistinguishable. Rehere lets a family, a
+community or a visitor rebuild a place together, with originals that keep their
+checksums and every change recorded as a new, attributed version.
+
+**Demo material.** Photographs of the Grand Canyon Lodge from the Historic
+American Buildings Survey (HABS AZ-135-A, Richard Frear, July 1982; Library of
+Congress; public domain). Notes in the demo are labelled as demonstration
+hypotheses, not recollections.
+
+Built during the Meta Global AI Developer Hackathon (October 27 to
+November 4, 2026).
 
 ## Status
 
@@ -13,7 +39,7 @@ The [local memory-entry app](app/README.md) saves photographs, written memories
 and optional voice recordings, then reopens them for viewing and playback.
 It preserves original checksums, source attribution, independent use permissions
 and unknown dates. Permitted photos can become partial depth scenes through
-local depth estimation and SAM2 segmentation. People can inspect model
+local depth estimation and Meta's SAM 2.1 segmentation (open weights). People can inspect model
 proposals, explore the visible surfaces, preview foreground changes and save
 versioned transforms. A scene can also hold exactly two named objects, each
 moved separately, with one explicit left/right rule from the original
