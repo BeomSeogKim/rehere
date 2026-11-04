@@ -97,6 +97,19 @@ describe('the Muse Voice Transcribe client', () => {
     for (const language of ['english', 'en', 'Klingon', '']) assert.throws(() => createMetaTranscriber({ apiKey: 'k', ledger: budget, language }), undefined, language);
   });
 
+  it('reserves at least the whole-second amount the provider bills for fractional durations', async () => {
+    for (const durationMs of [11_275, 8_705]) {
+      const { ledger: budget } = await ledger();
+      const transcribe = createMetaTranscriber({ apiKey: 'k', ledger: budget, fetch: async () => json({ turns: [turn('t1', 0, 500, 'a')] }) });
+      const { call } = await transcribe({ wav: WAV, durationMs, admit: admitNow });
+      const [entry] = (await budget.read()).entries;
+      const billedUsd = (Math.floor(durationMs / 1000) * 0.18) / 3600;
+      assert.equal(call.admittedDurationMs, durationMs);
+      assert.equal(entry.reservedUsd, call.estimatedUsd);
+      assert.ok(entry.reservedUsd >= billedUsd, `${durationMs} ms`);
+    }
+  });
+
   it('marks provider IDs unavailable when the response has none', async () => {
     const { ledger: budget } = await ledger();
     const transcribe = createMetaTranscriber({ apiKey: 'k', ledger: budget, fetch: async () => json({ turns: [turn('t1', 0, 500, 'a')] }) });

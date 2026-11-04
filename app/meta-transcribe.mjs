@@ -5,7 +5,9 @@ export const TRANSCRIBE_MODEL = 'muse-voice-transcribe-1.0';
 export const TRANSCRIBE_LABEL = 'Muse Voice Transcribe';
 // A product limit for reviewable drafts; the provider accepts up to 10 minutes.
 export const MAX_DRAFT_MS = 60_000;
-// The published price is per hour of processed audio, billed per whole second.
+// The published price is per hour of processed audio, rounded down to whole
+// seconds, so an estimate from the exact admitted milliseconds is never below
+// the billed amount. Estimates are local bounds, not bills.
 export const USD_PER_AUDIO_MS = 0.18 / 3_600_000;
 export const DEFAULT_TRANSCRIBE_LIMITS = Object.freeze({ totalUsd: 0.05, perRequestUsd: 0.005, maxRequests: 10 });
 // The language names the provider documents for `languageBias`.
