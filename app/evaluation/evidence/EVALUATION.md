@@ -182,3 +182,9 @@ request is billed was not measured here.
   added after seeing a small pilot, so both are shown.
 - Results describe agreement with these expectations, not the truth about the
   lodge, and not other photographs or models.
+
+## Live run during the event
+
+A separate single live run of the evidence check, made during the event
+together with SAM 3.1 outlines and a scene proposal, is described in
+[RUN.md](RUN.md). It is not part of the results above.
